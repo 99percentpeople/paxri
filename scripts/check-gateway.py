@@ -3,14 +3,12 @@
 import argparse
 import asyncio
 import contextlib
-import getpass
 import json
 import os
 from pathlib import Path
 import socket
 import socketserver
 import subprocess
-import shlex
 import sys
 import tempfile
 import threading
@@ -59,63 +57,236 @@ async def check_remote_eof(command):
             await process.wait()
 
 
-def configure_sshd(root, terminal=False):
-    for key in ("host-key", "user-key"):
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(root/key)], check=True)
-    (root/"known_hosts").write_text("p2p-test " + (root/"host-key.pub").read_text())
-    (root/"sshd_config").write_text(
-        f'HostKey "{root/"host-key"}"\nAuthorizedKeysFile "{root/"user-key.pub"}"\n'
-        'AuthenticationMethods publickey\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n'
-        'UsePAM no\nPermitRootLogin prohibit-password\nPermitUserRC no\nDisableForwarding yes\n'
-        + ('PermitTTY yes\nForceCommand if test -t 0; then stty -echo; stty size; fi; exec cat\n'
-           if terminal else 'PermitTTY no\nForceCommand cat\n'))
-
-
-def check_ssh_terminal(command):
+def check_native_terminal(root, keys, call, start, cli, ipc):
+    import errno
     import fcntl
+    import re
     import select
+    import signal
     import struct
     import termios
 
-    with contextlib.ExitStack() as stack:
+    # An existing TCP port grant does not confer native shell access.
+    (root / "host.toml").write_text(
+        f'version=1\n[peers.client]\nendpoint_id="{keys["client"]}"\nports.connect=["127.0.0.1:22"]\n')
+    host_process, host = start("host")
+    (root / "client.toml").write_text(
+        f'version=1\n[peers.host]\nendpoint_id="{keys["host"]}"\nticket="{host["ticket"]}"\n')
+    start("client")
+    assert not host["terminal_access"] and "denied" in call("host", "terminal-access", "show", "client")
+
+    @contextlib.contextmanager
+    def session():
         master, slave = os.openpty()
-        stack.callback(os.close, master)
-        stack.callback(os.close, slave)
+        mode = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 31, 89, 0, 0))
-        child = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave)
+        child = subprocess.Popen([cli, "--ipc", ipc("client"), "shell", "host"],
+                                 stdin=slave, stdout=slave, stderr=slave)
         try:
-            def read_until(marker):
-                data = bytearray()
-                deadline = time.monotonic() + 12
-                while marker not in data:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
-                        raise AssertionError(f"Expected {marker!r} on SSH terminal, got {data[-500:]!r}")
-                    data.extend(os.read(master, 4096))
-            read_until(b"31 89")
-            os.write(master, b"remote-pty-input\n")
-            read_until(b"remote-pty-input")
-            os.write(master, b"\x04")
-            assert child.wait(timeout=8) == 0
+            yield child, master, slave
+            if child.poll() is not None:
+                assert termios.tcgetattr(slave) == mode, "CLI did not restore the terminal"
         finally:
             if child.poll() is None:
                 child.kill()
                 child.wait()
+            os.close(master)
+            os.close(slave)
+
+    def read_until(fd, pattern):
+        data = bytearray()
+        end = time.monotonic() + 15
+        while time.monotonic() < end:
+            if not select.select([fd], [], [], max(0, end - time.monotonic()))[0]:
+                break
+            try:
+                block = os.read(fd, 32768)
+            except OSError as e:
+                if e.errno == errno.EIO:
+                    break
+                raise
+            if not block:
+                break
+            data.extend(block)
+            if match := re.search(pattern, data, re.DOTALL):
+                return match
+        raise AssertionError(f"missing {pattern!r} in {data[-600:]!r}")
+
+    def ready(slave):
+        end = time.monotonic() + 12
+        while termios.tcgetattr(slave)[3] & termios.ICANON:
+            assert time.monotonic() < end, "CLI never entered raw mode"
+            time.sleep(.02)
+
+    with session() as (child, fd, _):
+        assert child.wait(14) != 0
+        read_until(fd, b"Terminal access denied")
+    call("host", "terminal-access", "allow", "client")
+    assert "client" in json.loads(call("host", "status", "--json"))["terminal_access"]
+    with session() as (child, fd, slave):
+        ready(slave)
+        query = b"""test -t 0 && printf 'PTY[%s]\\n' "$(stty size)"\r"""
+        os.write(fd, query)
+        read_until(fd, rb"PTY\[31 89\]")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 42, 121, 0, 0))
+        child.send_signal(signal.SIGWINCH)
+        os.write(fd, b"""while [ "$(stty size)" != "42 121" ]; do sleep .05; done; printf 'SIZE=%s\\n' "$(stty size)"\r""")
+        read_until(fd, b"SIZE=42 121")
+        os.write(fd, b"sh -c 'echo starting-$$; exec sleep 60'\r")
+        read_until(fd, rb"starting-\d+")
+        os.write(fd, b"\x03")
+        os.write(fd, b"printf 'signal-%s\\n' returned\r")
+        read_until(fd, b"signal-returned")
+        os.write(fd, b"printf 'last-%s\\n' output; exit 23\r")
+        read_until(fd, b"last-output")
+        assert child.wait(12) == 23
+
+    with session() as (child, fd, slave):
+        ready(slave)
+        os.write(fd, b"""printf 'shell-pid=%s\\n' "$$"; sh -c 'printf "job-pid=%s\\n" "$$"; exec sleep 60'\r""")
+        match = read_until(fd, rb"shell-pid=(\d+).*?job-pid=(\d+)")
+        pids = [int(p) for p in match.groups()]
+        call("host", "terminal-access", "deny", "client")
+        assert child.wait(10) != 0
+        end = time.monotonic() + 5
+        while any(Path(f"/proc/{pid}").exists() for pid in pids):
+            assert time.monotonic() < end, "revocation left a shell or foreground job running"
+            time.sleep(.05)
+    assert host_process.poll() is None
+    print("Native PTY denial, grant, real shell, resize, final output, exit status and live revocation passed.")
+
+
+def check_pairing(root, keys, call, start, target_port):
+    platform = {"darwin": "macos", "win32": "windows", "linux": "linux"}.get(sys.platform, "unknown")
+    def status(node):
+        return json.loads(call(node, "status", "--json"))
+
+    def wait(node, condition):
+        deadline = time.monotonic() + 14
+        while time.monotonic() < deadline:
+            state = status(node)
+            if condition(state):
+                return state
+            time.sleep(.08)
+        raise AssertionError(f"Timed out waiting for pairing on {node}")
+
+    def rejected(node, *args):
+        try:
+            call(node, *args)
+        except subprocess.CalledProcessError:
+            return
+        raise AssertionError(f"Expected {args[:2]} to fail")
+
+    def join_and_wait(code):
+        call("client", "pair", "join", code)
+        pending = wait("host", lambda s: s["pairing"]["incoming"])["pairing"]["incoming"][0]
+        assert pending["name"] == "Laptop" and pending["device_id"] == keys["client"]
+        assert pending["platform"] == platform
+
+    # The client already knows a different device named Studio.
+    spare = call("spare", "identity", str(root / "spare.key"))
+    configs = {
+        "host": 'version=1\ndevice_name="Studio"\npeers={}\n',
+        "client": f'version=1\ndevice_name="Laptop"\n[peers.Studio]\nendpoint_id="{spare}"\n',
+        "spare": 'version=1\ndevice_name="Spare"\n',
+    }
+    for node, text in configs.items():
+        (root / (node + ".toml")).write_text(text)
+    processes = {node: start(node)[0] for node in configs}
+    originals = {node: (root / (node + ".toml")).read_bytes() for node in configs}
+    code = call("host", "pair", "code")
+    assert code and status("host")["pairing"]["code"] == code
+    rejected("host", "pair", "join", code)
+    rejected("client", "pair", "join", "incomplete")
+    wrong_code = code[:-1] + ("f" if code[-1] != "f" else "0")
+    call("client", "pair", "join", wrong_code)
+    wait("client", lambda s: not s["pairing"]["outgoing"] and "invalid" in (s["pairing"]["message"] or "").lower())
+    join_and_wait(code)
+    rejected("host", "pair", "accept", spare)
+    assert not status("host")["peers"] and status("client")["peers"] == {"Studio": spare}
+    call("host", "pair", "decline", keys["client"])
+    wait("client", lambda s: not s["pairing"]["outgoing"] and "declined" in s["pairing"]["message"])
+    assert all((root / (node + ".toml")).read_bytes() == text for node, text in originals.items())
+
+    assert call("host", "pair", "code") == code
+    join_and_wait(code)
+    call("spare", "pair", "join", code)
+    wait("host", lambda s: len(s["pairing"]["incoming"]) == 2)
+    old_code = code
+    config_path = root / "host.toml"
+    # A failed write must leave the old code and its pending confirmations intact.
+    config_path.write_bytes(originals["host"] + b"# external edit\n")
+    rejected("host", "pair", "refresh")
+    assert call("host", "pair", "code") == old_code and len(status("host")["pairing"]["incoming"]) == 2
+    config_path.write_bytes(originals["host"])
+    code = call("host", "pair", "refresh")
+    assert old_code != code and not status("host")["pairing"]["incoming"]
+    for node in ["client", "spare"]:
+        wait(node, lambda s: not s["pairing"]["outgoing"] and "refreshed" in s["pairing"]["message"])
+    rejected("host", "pair", "accept", keys["client"])
+    join_and_wait(code)
+    call("host", "pair", "accept", keys["client"])
+    wait("client", lambda s: s["peers"].get("Studio-2") == keys["host"])
+    assert status("host")["peers"] == {"Laptop": keys["client"]}
+    assert status("host")["peer_platforms"] == {"Laptop": platform}
+    assert status("client")["peer_platforms"] == {"Studio-2": platform}
+    assert not status("host")["port_access"] and not status("client")["port_access"]
+    call("spare", "pair", "join", old_code)
+    wait("spare", lambda s: not s["pairing"]["outgoing"] and "invalid" in (s["pairing"]["message"] or "").lower())
+    assert not status("spare")["peers"]
+
+    call("host", "port-access", "set", "Laptop", "--connect", str(target_port))
+    call("client", "forward", "add", "echo", "--peer", "Studio-2", "--listen", "0", "--target", str(target_port))
+    port = int(status("client")["forwards"]["echo"]["bound"].rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=8) as conn, conn.makefile("rb") as received:
+        assert received.readline() == b"ready\n"
+        conn.sendall(b"paired")
+        conn.shutdown(socket.SHUT_WR)
+        assert received.read() == b"deriap"
+
+    # Re-pairing the same identities preserves local aliases, ACLs and rules.
+    join_and_wait(call("host", "pair", "code"))
+    call("host", "pair", "accept", keys["client"])
+    wait("client", lambda s: not s["pairing"]["outgoing"])
+    for node in ["client", "host"]:
+        processes[node].terminate()
+        processes[node].wait(timeout=12)
+        if node == "client":
+            # Simulate a pairing saved before platform exchange existed.
+            path = root / "client.toml"
+            lines = path.read_text().splitlines(keepends=True)
+            assert sum(line.startswith("platform =") for line in lines) == 1
+            path.write_text("".join(line for line in lines if not line.startswith("platform =")))
+        start(node)
+        if node == "client":
+            wait(node, lambda s: s["peer_platforms"].get("Studio-2") == platform)
+            assert f'platform = "{platform}"' in path.read_text()
+    assert status("client")["peers"] == {"Studio": spare, "Studio-2": keys["host"]}
+    assert status("client")["forwards"]["echo"]["peer"] == "Studio-2"
+    assert status("host")["port_access"]["Laptop"]["connect"] == [f"127.0.0.1:{target_port}"]
+    assert call("host", "pair", "code") == code
+    # Even direct-only devices can use the previously copied code after the issuer restarts.
+    call("spare", "pair", "join", code)
+    wait("host", lambda s: any(p["device_id"] == spare for p in s["pairing"]["incoming"]))
+    call("spare", "pair", "cancel")
+    wait("host", lambda s: not s["pairing"]["incoming"])
+    assert status("host")["peers"] == {"Laptop": keys["client"]}
+    print("Pairing, peer platform exchange and backfill, live forwarding and shared settings passed.")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
-    parser.add_argument("--ssh-stdio", action="store_true", help="also exercise Linux OpenSSH in inetd mode")
+    parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
+    parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
     args = parser.parse_args()
-    if args.ssh_stdio and not sys.platform.startswith("linux"):
-        parser.error("--ssh-stdio requires Linux")
+    if args.native_terminal and (not sys.platform.startswith("linux") or os.geteuid() == 0):
+        parser.error("--native-terminal requires a standard Linux user")
     bins = args.bin_dir.resolve()
     suffix = ".exe" if os.name == "nt" else ""
     cli, gateway = (str(bins / (n + suffix)) for n in ("tunnel", "tunnel-gateway"))
 
-    # OpenSSH checks ownership and modes up to the home directory for authorized_keys.
-    with tempfile.TemporaryDirectory(dir=Path.home() if args.ssh_stdio else None) as tmp, contextlib.ExitStack() as stack:
+    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         root = Path(tmp)
         target = stack.enter_context(TargetServer(("127.0.0.1", 0), Target))
         threading.Thread(target=target.serve_forever, daemon=True).start()
@@ -148,7 +319,8 @@ def main():
         def start(node):
             log = stack.enter_context((root / (node + ".log")).open("a+", encoding="utf-8"))
             process = subprocess.Popen([gateway, "--no-relay", "--config", str(root / (node + ".toml")),
-                                        "--key", str(root / (node + ".key")), "--ipc", ipc(node)], stderr=log)
+                                        "--key", str(root / (node + ".key")), "--ipc", ipc(node)], stderr=log,
+                                       env={**os.environ, "SHELL": "/bin/sh"} if args.native_terminal else None)
 
             def stop():
                 if process.poll() is None:
@@ -171,6 +343,13 @@ def main():
                     time.sleep(0.1)
             raise RuntimeError(f"{node} IPC did not become ready")
 
+        if args.native_terminal:
+            check_native_terminal(root, keys, call, start, cli, ipc)
+            return
+        if args.pairing_only:
+            check_pairing(root, keys, call, start, target.server_address[1])
+            return
+
         (root / "host.toml").write_text(f'''version=1
 [peers.client]
 endpoint_id="{keys['client']}"
@@ -187,10 +366,6 @@ allow_peers=["client"]
 target="127.0.0.1:{streaming.server_address[1]}"
 allow_peers=["client"]
 ''')
-        if args.ssh_stdio:
-            configure_sshd(root, terminal=True)
-            with (root / "host.toml").open("a") as cfg:
-                cfg.write(f'\n[services.ssh]\ntarget={{sshd_config={json.dumps(str(root/"sshd_config"))}}}\nallow_peers=["client"]\n')
         _, host = start("host")
         assert host["device_id"] == keys["host"]
         ticket = call("host", "ticket")
@@ -215,37 +390,6 @@ ticket="{ticket}"
         assert finish_first.received.wait(5)
         denial = subprocess.run([*command, "private"], input=b"", capture_output=True, timeout=10)
         assert denial.returncode != 0 and not denial.stdout and b"DENIED" in denial.stderr
-        if args.ssh_stdio:
-            proxy = shlex.join([*command, "ssh"])
-            session = subprocess.run([
-                "ssh", "-F", "/dev/null", "-T", "-i", str(root/"user-key"),
-                "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
-                "-o", "StrictHostKeyChecking=yes", "-o", "GlobalKnownHostsFile=/dev/null",
-                "-o", f"UserKnownHostsFile={root/'known_hosts'}", "-o", f"ProxyCommand={proxy}",
-                "-l", getpass.getuser(), "p2p-test", "cat",
-            ], input=payload, capture_output=True, timeout=20)
-            assert session.returncode == 0 and session.stdout == payload, session.stderr
-            client_config_path = root / "OpenSSH client.conf"
-            client_config_path.write_text(
-                'Host host\n    HostKeyAlias p2p-test\n    IdentitiesOnly yes\n'
-                '    IdentityAgent none\n    BatchMode yes\n    StrictHostKeyChecking yes\n'
-                f'    UserKnownHostsFile "{root/"known_hosts"}"\n')
-            ssh_command = [
-                cli, "--ipc", ipc("client"), "ssh", f"{getpass.getuser()}@host",
-                "-i", str(root/"user-key"), "-F", str(client_config_path),
-            ]
-            terminal = subprocess.run(ssh_command, input=payload, capture_output=True, timeout=20)
-            assert terminal.returncode == 0 and terminal.stdout == payload, terminal.stderr
-            check_ssh_terminal(ssh_command)
-            call("client", "ssh-config", "set", "host", "--user", getpass.getuser(),
-                 "--identity", str(root/"user-key"), "--service", "ssh")
-            # The GUI calls this entry point with no application prompts or per-session flags.
-            saved = [cli, "--ipc", ipc("client"), "ssh", "host", "-F", str(client_config_path)]
-            check_ssh_terminal(saved)
-            refused = subprocess.run([*saved, "--service", "private"], input=b"", capture_output=True, timeout=15)
-            assert refused.returncode and b"DENIED" in refused.stderr
-            call("client", "ssh-config", "reset", "host")
-            print("PASS: OpenSSH auth, 256 KiB round trip, interactive remote PTY with input and window size, no SSH TCP listener")
         direct.terminate()
         direct.wait(timeout=12)
         print("PASS: stdio service access with no forwards, binary data, EOF in both orders and access denial")

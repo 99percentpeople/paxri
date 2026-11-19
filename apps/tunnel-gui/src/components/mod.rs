@@ -6,6 +6,7 @@ mod dropdown;
 mod icons;
 mod input;
 mod list_item;
+mod scrollbar;
 mod select;
 mod tooltip;
 use crate::theme::{
@@ -17,6 +18,7 @@ use gpui::{prelude::*, *};
 pub use icons::Icon;
 pub use input::{Input, Textarea};
 pub use list_item::ListItem;
+pub use scrollbar::{ScrollMetrics, ScrollSource, Scrollbar};
 pub use select::Select;
 pub use tooltip::tooltip;
 
@@ -76,7 +78,7 @@ impl Ui {
             .child(control)
     }
 
-    pub fn avatar(self, name: &str) -> Div {
+    pub fn device_icon(self, platform: tunnel_control::DevicePlatform) -> Div {
         div()
             .size(px(34.))
             .flex_none()
@@ -86,14 +88,7 @@ impl Ui {
             .rounded(CONTROL_RADIUS)
             .bg(rgb(self.colors.accent.background))
             .text_color(rgb(self.colors.accent.foreground))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(
-                name.chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_uppercase()
-                    .to_string(),
-            )
+            .child(Icon::device(platform).draw(20.))
     }
 
     pub fn alert(self, message: impl Into<SharedString>) -> Div {
@@ -119,12 +114,12 @@ impl Ui {
     }
 }
 
-pub fn page(title: &'static str) -> Div {
+pub fn page(title: impl Into<SharedString>) -> Div {
     div().flex().flex_col().gap(SPACE_4).child(
         div()
             .text_3xl()
             .font_weight(FontWeight::SEMIBOLD)
-            .child(title),
+            .child(title.into()),
     )
 }
 

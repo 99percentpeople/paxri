@@ -40,7 +40,9 @@ impl Dashboard {
     }
 
     pub(crate) fn settings(&self, ui: Ui, cx: &mut Context<Self>) -> Div {
-        let page = page("Settings").child(self.appearance_settings(ui, cx));
+        let page = page("Settings")
+            .child(self.appearance_settings(ui, cx))
+            .child(self.terminal_settings.clone());
         let Some(s) = &self.status else {
             return page.child(self.gateway_notice(ui, cx));
         };
@@ -118,12 +120,6 @@ impl Dashboard {
                     .detail(short_id(&s.device_id))
                     .trailing(copy_button(ui, "copy-id", "Copy ID", s.device_id.clone())),
             )
-            .child(ListItem::new(ui.muted("Pairing")).trailing(copy_button(
-                ui,
-                "copy-ticket",
-                "Copy connection ticket",
-                s.ticket.clone(),
-            )))
             .child(ui.muted(format!(
                 "Local IPC · {}",
                 self.address
@@ -140,9 +136,6 @@ impl Dashboard {
                 .child(ui.separator())
                 .child(ListItem::new(name.clone()).trailing(ui.muted(target.clone())));
         }
-        page.child(device)
-            .child(self.port_access(s, ui, cx))
-            .child(identity)
-            .child(services)
+        page.child(device).child(identity).child(services)
     }
 }

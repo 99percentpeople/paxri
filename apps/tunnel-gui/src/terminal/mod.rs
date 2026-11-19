@@ -1,74 +1,53 @@
+mod cursor;
 mod display;
+mod preview;
+pub(crate) use preview::TerminalPreview;
+mod emulator;
 mod keys;
+mod mouse;
 mod selection;
 mod session;
 
-use crate::components::{ButtonVariant::Primary, Ui};
-use anyhow::Result;
+use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
+use crate::theme::{SPACE_2, TerminalAppearance};
+use alacritty_terminal::{
+    grid::{Dimensions, Scroll},
+    term::{MIN_COLUMNS, TermMode},
+};
 use display::{COL, LINE};
+use emulator::{Emulator, GridSize};
 use gpui::{prelude::*, *};
-use portable_pty::PtySize;
-use selection::{Selection, top_row};
 use session::{Output, Session};
-use std::{num::NonZeroU16, ops::Range, path::Path};
+use std::{ops::Range, path::Path};
 
-const PAD: f32 = 12.;
-
-fn dimensions(viewport: Size<Pixels>) -> PtySize {
-    PtySize {
-        cols: (f32::from(viewport.width) / COL).clamp(1., 500.) as u16,
+fn dimensions(viewport: Size<Pixels>) -> GridSize {
+    GridSize {
+        cols: (f32::from(viewport.width) / COL).clamp(MIN_COLUMNS as f32, 500.) as u16,
         rows: (f32::from(viewport.height) / LINE).clamp(1., 250.) as u16,
-        pixel_width: COL as u16,
-        pixel_height: LINE as u16,
     }
 }
 
-// Some full-screen programs query the cursor position before painting.
-#[derive(Default)]
-struct Replies {
-    bytes: Vec<u8>,
-    discarded: [usize; 2],
-}
-impl vt100::Callbacks for Replies {
-    fn on_scroll(&mut self, _: vt100::capture::RowContents<'_>, alternate: bool) {
-        self.discarded[usize::from(alternate)] += 1;
-    }
-
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut vt100::Screen,
-        first: Option<u8>,
-        second: Option<u8>,
-        params: &[&[u16]],
-        end: char,
-    ) {
-        if first.is_some() || second.is_some() {
-            return;
-        }
-        match (
-            end,
-            params.first().and_then(|p| p.first()).copied().unwrap_or(0),
-        ) {
-            ('n', 6) => {
-                let (r, c) = screen.cursor_position();
-                self.bytes
-                    .extend_from_slice(format!("\x1b[{};{}R", r + 1, c + 1).as_bytes());
-            }
-            ('n', 5) => self.bytes.extend_from_slice(b"\x1b[0n"),
-            ('c', 0) => self.bytes.extend_from_slice(b"\x1b[?1;2c"),
-            _ => {}
-        }
-    }
+fn layout_grid(available: Bounds<Pixels>) -> (GridSize, Bounds<Pixels>) {
+    let grid = dimensions(available.size);
+    let cells = size(
+        px(f32::from(grid.cols) * COL).min(available.size.width),
+        px(f32::from(grid.rows) * LINE).min(available.size.height),
+    );
+    (grid, Bounds::centered_at(available.center(), cells))
 }
 
 pub struct Terminal {
     focus: FocusHandle,
-    parser: vt100::Parser<Replies>,
+    emulator: Emulator,
     session: Option<Session>,
     status: String,
     marked: String,
     viewport: Bounds<Pixels>,
-    selection: Option<Selection>,
+    selecting: bool,
+    mouse: mouse::Mouse,
+    hidden_pointer_at: Option<Point<Pixels>>,
+    focused: bool,
+    focus_observers: Option<(WindowId, [Subscription; 3])>,
 }
 
 impl Focusable for Terminal {
@@ -77,89 +56,103 @@ impl Focusable for Terminal {
     }
 }
 
+impl ScrollSource for Entity<Terminal> {
+    fn metrics(&self, cx: &App) -> ScrollMetrics {
+        let grid = self.read(cx).emulator.term.grid();
+        ScrollMetrics::new(
+            grid.screen_lines() as f32,
+            grid.history_size() as f32,
+            (grid.history_size() - grid.display_offset()) as f32,
+        )
+    }
+
+    fn scroll_to(&self, offset: f32, cx: &mut App) {
+        self.update(cx, |view, cx| {
+            let grid = view.emulator.term.grid();
+            let from_bottom = grid.history_size().saturating_sub(offset.round() as usize);
+            let delta = from_bottom as i32 - grid.display_offset() as i32;
+            if delta != 0 {
+                view.emulator.scroll(Scroll::Delta(delta));
+                cx.notify();
+            }
+        });
+    }
+}
+
 impl Terminal {
     pub(super) fn open(
         peer: &str,
+        runtime: &tokio::runtime::Handle,
         ipc: Option<&Path>,
-        viewport: Size<Pixels>,
+        window: &Window,
         cx: &mut App,
-    ) -> Result<Entity<Self>> {
-        let grid = dimensions(viewport);
-        let (session, events) = Session::start(peer, ipc, grid)?;
-        Ok(cx.new(|cx| {
+    ) -> Entity<Self> {
+        let grid = dimensions(window.viewport_size());
+        let appearance = *cx.global::<TerminalAppearance>();
+        let palette = appearance.scheme.palette(crate::theme::palette(window, cx));
+        let (session, events) = Session::start(peer, ipc, grid.pty(), runtime);
+        cx.new(|cx| {
             let focus = cx.focus_handle();
             cx.spawn(async move |this, cx| {
                 while let Ok(event) = events.recv().await {
-                    if this
-                        .update(cx, |view: &mut Terminal, cx| {
+                    let Ok(pending) = this.update(cx, |view: &mut Terminal, cx| {
+                        view.output(event);
+                        // Coalesce ready chunks into the same frame.
+                        for event in std::iter::from_fn(|| events.try_recv().ok()).take(32) {
                             view.output(event);
-                            // Coalesce ready chunks into the same frame.
-                            for event in std::iter::from_fn(|| events.try_recv().ok()).take(32) {
-                                view.output(event);
-                            }
-                            let reply = std::mem::take(&mut view.parser.callbacks_mut().bytes);
-                            if !reply.is_empty() {
-                                view.send(reply);
-                            }
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
+                        }
+                        let reply = view.emulator.finish_batch();
+                        if !reply.is_empty() {
+                            view.send(reply);
+                        }
+                        cx.notify();
+                        view.session.as_ref().and_then(|s| s.input.pending())
+                    }) else {
                         break;
+                    };
+                    // Backpressure a peer producing queries faster than it reads the replies.
+                    if let Some(pending) = pending {
+                        let _ = pending.recv().await;
                     }
                 }
             })
             .detach();
+            let mut emulator = Emulator::with_palette(grid, palette);
+            emulator.set_default_cursor(cursor::default_style(appearance));
             Terminal {
                 focus,
-                parser: vt100::Parser::new_with_callbacks(
-                    grid.rows.try_into().unwrap(),
-                    grid.cols.try_into().unwrap(),
-                    2000,
-                    Replies::default(),
-                ),
+                emulator,
                 session: Some(session),
                 status: String::new(),
                 marked: String::new(),
                 viewport: Bounds::default(),
-                selection: None,
+                selecting: false,
+                mouse: mouse::Mouse::default(),
+                hidden_pointer_at: None,
+                focused: false,
+                focus_observers: None,
             }
-        }))
+        })
     }
 
     pub(super) fn is_running(&self) -> bool {
         self.session.is_some()
     }
 
-    fn resize(&mut self, bounds: Bounds<Pixels>) {
+    fn resize(&mut self, available: Bounds<Pixels>, cx: &mut Context<Self>) -> Bounds<Pixels> {
+        let (grid, bounds) = layout_grid(available);
         self.viewport = bounds;
-        let grid = dimensions(bounds.size);
-        let rows = NonZeroU16::new(grid.rows).unwrap();
-        let cols = NonZeroU16::new(grid.cols).unwrap();
-        if self.parser.screen().size() != (rows, cols) {
-            if self.parser.screen().size().1 != cols {
-                self.selection = None;
-            }
-            self.parser.set_size(rows, cols);
+        if bounds.size.width > px(0.) && bounds.size.height > px(0.) && self.emulator.resize(grid) {
             if let Some(session) = &self.session {
-                session.resize(grid);
+                session.io.resize(grid.pty());
             }
+            cx.notify();
         }
+        bounds
     }
     fn output(&mut self, event: Output) {
         match event {
-            Output::Bytes(bytes) => {
-                let alternate = self.parser.screen().alternate_screen();
-                self.parser.process(&bytes);
-                if self.parser.screen().alternate_screen() != alternate
-                    || self
-                        .selection
-                        .as_ref()
-                        .is_some_and(|s| s.evicted(self.discarded()))
-                {
-                    self.selection = None;
-                }
-            }
+            Output::Bytes(bytes) => self.emulator.process(&bytes),
             Output::Error(error) => {
                 if self.is_running() {
                     self.status = format!("Terminal I/O: {error}");
@@ -175,76 +168,107 @@ impl Terminal {
             }
         }
     }
-    fn discarded(&self) -> usize {
-        self.parser.callbacks().discarded[usize::from(self.parser.screen().alternate_screen())]
-    }
-
-    fn cell_at(&self, position: Point<Pixels>) -> (u16, f32) {
+    fn cell_at(&self, position: Point<Pixels>) -> (usize, f32) {
         let local = position - self.viewport.origin;
-        let rows = self.parser.screen().size().0.get();
-        let row = (f32::from(local.y) / LINE)
-            .floor()
-            .clamp(0., f32::from(rows - 1)) as u16;
+        let last = self.emulator.term.screen_lines() - 1;
+        let row = (f32::from(local.y) / LINE).floor().clamp(0., last as f32) as usize;
         (row, f32::from(local.x) / COL)
     }
 
     fn start_selection(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(w);
         let (row, x) = self.cell_at(e.position);
-        let screen = self.parser.screen();
-        let top = top_row(screen, self.discarded());
-        if e.modifiers.shift
-            && let Some(selection) = &mut self.selection
-        {
-            selection.dragging = true;
-            selection.extend(screen, top, row, x);
+        if e.modifiers.shift && self.emulator.term.selection.is_some() {
+            self.emulator.extend_selection(row, x);
         } else {
-            self.selection = Some(Selection::start(screen, top, row, x, e.click_count));
+            self.emulator.start_selection(row, x, e.click_count);
         }
+        self.selecting = true;
         cx.notify();
     }
 
     fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let (row, x) = self.cell_at(position);
-        let discarded = self.discarded();
-        let screen = self.parser.screen();
-        if let Some(selection) = &mut self.selection {
-            selection.extend(screen, top_row(screen, discarded), row, x);
+        self.emulator.extend_selection(row, x);
+        cx.notify();
+    }
+
+    fn send(&mut self, bytes: Vec<u8>) {
+        if let Some(session) = &mut self.session {
+            session.input.send(bytes);
+        }
+    }
+
+    fn focus_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = window.is_window_active() && self.focus.is_focused(window);
+        if focused != self.focused {
+            self.focused = focused;
+            if !focused {
+                self.selecting = false;
+                self.hidden_pointer_at = None;
+                self.release_pointer();
+            }
+            if self.emulator.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                self.send(if focused { b"\x1b[I" } else { b"\x1b[O" }.to_vec());
+            }
             cx.notify();
         }
     }
 
-    fn scroll(&mut self, delta: isize) {
-        let screen = self.parser.screen_mut();
-        if !screen.alternate_screen() {
-            screen.set_scrollback(screen.scrollback().saturating_add_signed(delta));
-        }
-    }
-
-    fn send(&mut self, bytes: Vec<u8>) {
-        if let Some(session) = &self.session
-            && session.input.try_send(bytes).is_err()
+    fn observe_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = window.window_handle().window_id();
+        if self
+            .focus_observers
+            .as_ref()
+            .is_none_or(|(old, _)| *old != id)
         {
-            self.status = "Terminal input is busy".into();
+            self.hidden_pointer_at = None;
+            self.focus_observers = Some((
+                id,
+                [
+                    cx.on_focus(&self.focus, window, Self::focus_changed),
+                    cx.on_blur(&self.focus, window, Self::focus_changed),
+                    cx.observe_window_activation(window, Self::focus_changed),
+                ],
+            ));
+            self.focus_changed(window, cx);
         }
     }
 
-    fn write(&mut self, bytes: Vec<u8>) {
-        if self.is_running() {
-            self.selection = None;
-            self.parser.screen_mut().set_scrollback(0);
+    fn typing_pointer_position(&self, window: &Window) -> Option<Point<Pixels>> {
+        let position = window.mouse_position();
+        (self.is_running()
+            && self.focus.is_focused(window)
+            && window.is_window_active()
+            && crate::chrome::pointer_over_window(window)
+            && Bounds::new(Point::default(), window.viewport_size()).contains(&position))
+        .then_some(position)
+    }
+
+    fn write(&mut self, bytes: Vec<u8>, window: &Window) {
+        if self.is_running() && !bytes.is_empty() {
+            self.hidden_pointer_at = self.typing_pointer_position(window);
+            self.emulator.input_started();
+            self.emulator.term.selection = None;
+            self.selecting = false;
+            self.emulator.scroll(Scroll::Bottom);
             self.send(bytes);
         }
     }
-    fn paste(&mut self, cx: &App) {
+    fn paste(&mut self, window: &Window, cx: &App) {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
             let text = text.replace("\r\n", "\n").replace('\n', "\r");
-            let bytes = if self.parser.screen().bracketed_paste() {
+            let bytes = if self
+                .emulator
+                .term
+                .mode()
+                .contains(TermMode::BRACKETED_PASTE)
+            {
                 format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
             } else {
                 text.into_bytes()
             };
-            self.write(bytes);
+            self.write(bytes, window);
         }
     }
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -257,22 +281,23 @@ impl Terminal {
         if !self.is_running() && key.key == "enter" && !key.modifiers.modified() {
             window.dispatch_action(Box::new(super::workspace::ReconnectTerminal), cx);
         } else if shortcut && key.key.eq_ignore_ascii_case("v") {
-            self.paste(cx);
+            self.paste(window, cx);
         } else if key.key.eq_ignore_ascii_case("c")
             && (shortcut
                 || (!cfg!(target_os = "macos")
                     && key.modifiers == Modifiers::control()
-                    && self.selection.as_ref().is_some_and(|s| !s.is_empty())))
+                    && self.emulator.selected_range().is_some()))
         {
-            let discarded = self.discarded();
             let text = self
-                .selection
-                .as_ref()
-                .and_then(|s| s.text(self.parser.screen_mut(), discarded))
-                .unwrap_or_else(|| self.parser.screen().contents());
+                .emulator
+                .selected_text()
+                .unwrap_or_else(|| self.emulator.visible_text());
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-        } else if let Some(bytes) = keys::sequence(key, self.parser.screen().application_cursor()) {
-            self.write(bytes);
+        } else if let Some(bytes) = keys::sequence(
+            key,
+            self.emulator.term.mode().contains(TermMode::APP_CURSOR),
+        ) {
+            self.write(bytes, window);
         } else {
             return;
         }
@@ -285,21 +310,50 @@ impl Terminal {
 impl Render for Terminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::new(window, cx);
+        let appearance = *cx.global::<TerminalAppearance>();
+        let palette = appearance.scheme.palette(ui.colors);
+        self.emulator.palette = palette;
+        let background = display::color(
+            alacritty_terminal::vte::ansi::Color::Named(
+                alacritty_terminal::vte::ansi::NamedColor::Background,
+            ),
+            palette,
+            self.emulator.term.colors(),
+        );
+        self.observe_focus(window, cx);
+        if self.hidden_pointer_at.is_some()
+            && self.hidden_pointer_at != self.typing_pointer_position(window)
+        {
+            self.hidden_pointer_at = None;
+        }
+        let hide_pointer = self.hidden_pointer_at.is_some();
+        self.emulator
+            .set_default_cursor(cursor::default_style(appearance));
+        let style = self.emulator.term.cursor_style();
+        let blink = style.blinking && self.focused && self.marked.is_empty() && self.is_running();
+        let cursor_on = cursor::blink_visible(
+            blink,
+            cursor::CursorCell::visible(&self.emulator),
+            window,
+            cx,
+        );
         let entity = cx.entity();
+        let sizing = entity.clone();
         let focus = self.focus.clone();
         let screen = canvas(
-            |_, _, _| (),
-            move |bounds, (), window, cx| {
+            move |bounds, _, cx| sizing.update(cx, |view, cx| view.resize(bounds, cx)),
+            move |_, bounds, window, cx| {
+                if hide_pointer {
+                    window.set_window_cursor_style(CursorStyle::None);
+                }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
                 entity.update(cx, |view, cx| {
-                    view.resize(bounds);
-                    let screen = view.parser.screen();
                     display::paint(
-                        screen,
+                        &view.emulator,
                         bounds,
                         &view.marked,
-                        view.selection.as_ref(),
-                        top_row(screen, view.discarded()),
+                        cursor_on.then_some(style.shape),
+                        palette,
                         window,
                         cx,
                     )
@@ -309,48 +363,30 @@ impl Render for Terminal {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
-                    let _ = moving.update(cx, |v, cx| {
-                        if !v.selection.as_ref().is_some_and(|s| s.dragging) {
-                            return;
+                    let _ = moving.update(cx, |view, cx| {
+                        if view.hidden_pointer_at.is_some_and(|at| at != e.position) {
+                            view.hidden_pointer_at = None;
+                            cx.notify();
                         }
-                        if e.pressed_button != Some(MouseButton::Left) {
-                            if let Some(s) = &mut v.selection {
-                                s.dragging = false;
-                            }
-                            return;
-                        }
-                        if e.position.y < v.viewport.top() {
-                            v.scroll(1);
-                        }
-                        if e.position.y >= v.viewport.bottom() {
-                            v.scroll(-1);
-                        }
-                        v.extend_selection(e.position, cx);
+                        view.mouse_drag(e, cx);
                     });
                 });
                 let release = entity.downgrade();
                 window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
-                    if e.button == MouseButton::Left && phase == DispatchPhase::Capture {
-                        let _ = release.update(cx, |v, cx| {
-                            if let Some(s) = &mut v.selection
-                                && s.dragging
-                            {
-                                s.dragging = false;
-                                v.extend_selection(e.position, cx);
-                            }
-                        });
+                    if phase == DispatchPhase::Capture {
+                        let _ = release.update(cx, |v, cx| v.mouse_up(e, cx));
                     }
                 });
             },
         )
         .size_full();
         div()
-            .id("ssh-terminal")
+            .id("device-terminal")
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(ui.colors.terminal.surface.background))
-            .text_color(rgb(ui.colors.terminal.surface.foreground))
+            .bg(rgb(background))
+            .text_color(rgb(palette.surface.foreground))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .when(!self.status.is_empty(), |d| {
@@ -380,21 +416,17 @@ impl Render for Terminal {
             .child(
                 div()
                     .id("terminal-screen")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .p(px(PAD))
+                    .p(SPACE_2)
                     .overflow_hidden()
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::start_selection))
-                    .on_scroll_wheel(cx.listener(|v, e: &ScrollWheelEvent, _, cx| {
-                        let delta = f32::from(e.delta.pixel_delta(px(LINE)).y) / LINE;
-                        v.scroll(delta.round() as isize);
-                        if v.selection.as_ref().is_some_and(|s| s.dragging) {
-                            v.extend_selection(e.position, cx);
-                        }
-                        cx.notify();
-                    }))
-                    .child(screen),
+                    .cursor(CursorStyle::Arrow)
+                    .on_any_mouse_down(cx.listener(Self::mouse_down))
+                    .on_mouse_move(cx.listener(Self::mouse_hover))
+                    .on_scroll_wheel(cx.listener(Self::wheel))
+                    .child(screen)
+                    .child(Scrollbar::vertical("terminal-history", cx.entity())),
             )
     }
 }
@@ -437,12 +469,12 @@ impl EntityInputHandler for Terminal {
         &mut self,
         _: Option<Range<usize>>,
         text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.marked.clear();
         if !text.is_empty() {
-            self.write(text.as_bytes().to_vec());
+            self.write(text.as_bytes().to_vec(), window);
         }
         cx.notify();
     }
@@ -451,9 +483,12 @@ impl EntityInputHandler for Terminal {
         _: Option<Range<usize>>,
         text: &str,
         _: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !text.is_empty() {
+            self.hidden_pointer_at = self.typing_pointer_position(window);
+        }
         self.marked = text.into();
         cx.notify();
     }
@@ -464,9 +499,13 @@ impl EntityInputHandler for Terminal {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let (r, c) = self.parser.screen().cursor_position();
+        let cursor = self.emulator.term.grid().cursor.point;
         Some(Bounds::new(
-            bounds.origin + point(px(f32::from(c) * COL), px(f32::from(r) * LINE)),
+            bounds.origin
+                + point(
+                    px(cursor.column.0 as f32 * COL),
+                    px(cursor.line.0 as f32 * LINE),
+                ),
             size(px(COL), px(LINE)),
         ))
     }
@@ -477,5 +516,39 @@ impl EntityInputHandler for Terminal {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{COL, LINE, layout_grid};
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn whole_cells_leave_equal_space_on_opposite_edges() {
+        for height in [20., 39.5, 40., 691., 700., 719.5, 720., 730.] {
+            let available = Bounds::new(point(px(8.), px(48.)), size(px(951.5), px(height)));
+            let (grid, bounds) = layout_grid(available);
+            assert_eq!(grid.pty().rows, (height / LINE).floor() as u16);
+            assert_eq!(grid.cols, 105);
+            assert_eq!(
+                bounds.size,
+                size(
+                    px(f32::from(grid.cols) * COL),
+                    px(f32::from(grid.rows) * LINE)
+                )
+            );
+            assert_eq!(bounds.center(), available.center());
+        }
+    }
+
+    #[test]
+    fn a_pane_shorter_than_one_row_keeps_its_input_bounds_inside_the_pane() {
+        for height in [0., 7.5] {
+            let available = Bounds::new(point(px(5.), px(40.)), size(px(90.), px(height)));
+            let (grid, bounds) = layout_grid(available);
+            assert_eq!(grid.rows, 1);
+            assert_eq!(bounds, available);
+        }
     }
 }

@@ -2,16 +2,24 @@
 mod buffer;
 mod layout;
 use buffer::{TextBuffer, byte_at_utf16};
-use layout::InputLayout;
+use layout::{CARET_SPACE, InputLayout};
 
 use super::Ui;
 use crate::theme;
 use gpui::{prelude::*, *};
-use std::ops::Range;
+use std::{
+    ops::Range,
+    time::{Duration, Instant},
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub type Input = TextInput<false>;
 pub type Textarea = TextInput<true>;
+
+struct SelectionDrag {
+    pointer: Point<Pixels>,
+    last_frame: Option<Instant>,
+}
 
 pub struct TextInput<const MULTILINE: bool> {
     buffer: TextBuffer<MULTILINE>,
@@ -21,20 +29,30 @@ pub struct TextInput<const MULTILINE: bool> {
     bounds: Option<Bounds<Pixels>>,
     scroll: Point<Pixels>,
     reveal_cursor: bool,
+    drag: Option<SelectionDrag>,
     row_hint: Option<usize>,
     preferred_x: Option<Pixels>,
 }
 
 impl<const MULTILINE: bool> TextInput<MULTILINE> {
     pub fn new(text: &str, placeholder: &str, cx: &mut App) -> Entity<Self> {
+        Self::with_buffer(TextBuffer::new(text), placeholder, cx)
+    }
+
+    pub fn read_only(text: &str, cx: &mut App) -> Entity<Self> {
+        Self::with_buffer(TextBuffer::read_only(text), "", cx)
+    }
+
+    fn with_buffer(buffer: TextBuffer<MULTILINE>, placeholder: &str, cx: &mut App) -> Entity<Self> {
         cx.new(|cx| Self {
             placeholder: placeholder.into(),
             focus: cx.focus_handle().tab_stop(true),
-            buffer: TextBuffer::new(text),
+            buffer,
             layout: None,
             bounds: None,
             scroll: Point::default(),
             reveal_cursor: true,
+            drag: None,
             row_hint: None,
             preferred_x: None,
         })
@@ -44,8 +62,29 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         &self.buffer.text
     }
 
+    /// Keep focus, selection and scrolling when a refreshed model still contains the same value.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if self.text() == text {
+            return false;
+        }
+        self.buffer = if self.buffer.read_only {
+            TextBuffer::read_only(text)
+        } else {
+            TextBuffer::new(text)
+        };
+        self.layout = None;
+        self.drag = None;
+        self.scroll = Point::default();
+        self.row_hint = None;
+        self.preferred_x = None;
+        self.reveal_cursor = true;
+        cx.notify();
+        true
+    }
+
     fn replace(&mut self, range: Option<Range<usize>>, value: &str) -> Range<usize> {
         let added = self.buffer.replace(range, value);
+        self.drag = None;
         self.layout = None;
         self.row_hint = None;
         self.preferred_x = None;
@@ -76,6 +115,8 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
             self.preferred_x = None;
         }
         match key.key.as_str() {
+            "backspace" | "delete" | "enter" if self.buffer.read_only => {}
+            "x" | "v" if shortcut && self.buffer.read_only => {}
             "enter" if MULTILINE => {
                 self.replace(None, "\n");
             }
@@ -169,6 +210,7 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         if !row_key {
             self.row_hint = None;
         }
+        self.drag = None;
         self.reveal_cursor = true;
         window.prevent_default();
         cx.stop_propagation();
@@ -188,6 +230,44 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         (self.buffer.cursor, self.row_hint) = self.hit(pt);
         self.reveal_cursor = true;
         self.preferred_x = None;
+    }
+
+    fn move_selection(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = &mut self.drag else { return };
+        if event.pressed_button != Some(MouseButton::Left)
+            || !self.focus.is_focused(window)
+            || !window.is_window_active()
+        {
+            self.drag = None;
+            return;
+        }
+        if drag.pointer != event.position {
+            drag.pointer = event.position;
+            drag.last_frame.get_or_insert_with(Instant::now);
+            self.reveal_cursor = false;
+            cx.notify();
+        }
+    }
+
+    fn end_selection(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        if let Some(drag) = self.drag.take()
+            && (drag.last_frame.is_some() || drag.pointer != event.position)
+            && self.focus.is_focused(window)
+            && let Some(layout) = &mut self.layout
+        {
+            let (byte, row, _) = layout.drag_hit::<MULTILINE>(event.position, Duration::ZERO);
+            self.buffer.cursor = byte.min(self.buffer.text.len());
+            self.row_hint = Some(row);
+            cx.notify();
+        }
     }
 
     fn shape(&self, bounds: Bounds<Pixels>, window: &Window, cx: &App) -> Option<InputLayout> {
@@ -231,36 +311,57 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
             return;
         };
         let colors = theme::palette(window, cx);
-        let row = layout.row_at(self.buffer.cursor, self.row_hint);
-        let x = layout.x(row, self.buffer.cursor);
-        let y = layout.height * row;
-        if MULTILINE {
-            if self.reveal_cursor || self.bounds.is_some_and(|old| old.size != bounds.size) {
-                self.scroll.y = self
+        let focused = self.focus.is_focused(window);
+        if !focused || !window.is_window_active() {
+            self.drag = None;
+        }
+        layout.scroll = self.scroll;
+        if self.reveal_cursor || self.bounds.is_some_and(|old| old.size != bounds.size) {
+            let row = layout.row_at(self.buffer.cursor, self.row_hint);
+            if MULTILINE {
+                let y = layout.height * row;
+                layout.scroll.y = layout
                     .scroll
                     .y
                     .min(y)
                     .max(y + layout.height - bounds.size.height);
+            } else {
+                let x = layout.x(row, self.buffer.cursor);
+                layout.scroll.x = layout
+                    .scroll
+                    .x
+                    .min(x)
+                    .max(x + CARET_SPACE - bounds.size.width);
             }
-            self.scroll.y = self.scroll.y.clamp(px(0.), layout.max_scroll_y());
-        } else {
-            self.scroll.x = self
-                .scroll
-                .x
-                .min(x)
-                .max(x - bounds.size.width + px(2.))
-                .max(px(0.));
         }
-        layout.scroll = self.scroll;
+        if MULTILINE {
+            layout.scroll.y = layout.scroll.y.clamp(px(0.), layout.max_scroll_y());
+        } else {
+            layout.scroll.x = layout.scroll.x.clamp(px(0.), layout.max_scroll_x());
+        }
+        if let Some(drag) = &mut self.drag
+            && let Some(last) = &mut drag.last_frame
+        {
+            let now = Instant::now();
+            let (byte, row, moving) = layout.drag_hit::<MULTILINE>(drag.pointer, now - *last);
+            *last = now;
+            self.buffer.cursor = byte.min(self.buffer.text.len());
+            self.row_hint = Some(row);
+            if moving {
+                window.request_animation_frame();
+            }
+        }
+        self.scroll = layout.scroll;
         self.reveal_cursor = false;
         self.bounds = Some(bounds);
-        let focused = self.focus.is_focused(window);
         let selection = self.buffer.selection();
         if focused {
             layout.paint_range(selection.clone(), false, colors.selection, window);
         }
         layout.paint_text(window, cx);
         if focused && selection.is_empty() {
+            let row = layout.row_at(self.buffer.cursor, self.row_hint);
+            let x = layout.x(row, self.buffer.cursor);
             window.paint_quad(fill(
                 Bounds::new(
                     layout.origin(row) + point(x, px(2.)),
@@ -279,7 +380,10 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
 impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let field = cx.entity();
+        let editable = !self.buffer.read_only;
         let focus = self.focus.clone();
+        let move_selection = cx.listener(Self::move_selection);
+        let end_selection = cx.listener(Self::end_selection);
         Ui::new(window, cx)
             .input_frame("input", &focus)
             .when(MULTILINE, |field| {
@@ -310,26 +414,37 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
                         v.buffer.anchor = 0;
                         v.buffer.cursor = v.buffer.text.len();
                     }
+                    v.drag = (!v.buffer.text.is_empty()).then_some(SelectionDrag {
+                        pointer: e.position,
+                        last_frame: None,
+                    });
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(|v, e: &MouseMoveEvent, w, cx| {
-                if e.pressed_button == Some(MouseButton::Left) && v.focus.is_focused(w) {
-                    v.point_cursor(e.position);
-                    cx.notify();
-                }
-            }))
             .child(
                 div().size_full().overflow_hidden().child(
                     canvas(
                         |_, _, _| (),
                         move |bounds, _, w, cx| {
-                            w.handle_input(
-                                &focus,
-                                ElementInputHandler::new(bounds, field.clone()),
-                                cx,
-                            );
+                            if editable {
+                                w.handle_input(
+                                    &focus,
+                                    ElementInputHandler::new(bounds, field.clone()),
+                                    cx,
+                                );
+                            }
                             field.update(cx, |v, cx| v.paint(bounds, w, cx));
+                            // Keep the drag that began in this input when the pointer leaves its bounds.
+                            w.on_mouse_event(move |event, phase, w, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    move_selection(event, w, cx);
+                                }
+                            });
+                            w.on_mouse_event(move |event, phase, w, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    end_selection(event, w, cx);
+                                }
+                            });
                         },
                     )
                     .size_full(),

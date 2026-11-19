@@ -8,6 +8,7 @@ use crate::components::{
     },
     tooltip,
 };
+use crate::pages::device::DeviceSettings;
 
 mod dock;
 mod drag;
@@ -28,6 +29,10 @@ const WORKSPACE_SIZE: Size<Pixels> = size(px(990.), px(720.));
 enum Page {
     Home,
     Settings,
+    Device {
+        peer: SharedString,
+        view: Entity<DeviceSettings>,
+    },
     Terminal {
         peer: SharedString,
         view: Entity<terminal::Terminal>,
@@ -39,14 +44,16 @@ impl Page {
         match self {
             Self::Home => "P2P Tunnel".into(),
             Self::Settings => "Settings — P2P Tunnel".into(),
+            Self::Device { peer, .. } => format!("{peer} — Device settings").into(),
             Self::Terminal { peer, .. } => format!("{peer} — Terminal").into(),
         }
     }
 
-    fn icon(&self) -> Icon {
+    fn icon(&self, cx: &App) -> Icon {
         match self {
             Self::Home => Icon::Home,
             Self::Settings => Icon::Settings,
+            Self::Device { view, .. } => Icon::device(view.read(cx).platform(cx)),
             Self::Terminal { .. } => Icon::Terminal,
         }
     }
@@ -55,14 +62,21 @@ impl Page {
         match self {
             Self::Home => "Home".into(),
             Self::Settings => "Settings".into(),
-            Self::Terminal { peer, .. } => peer.clone(),
+            Self::Device { peer, .. } | Self::Terminal { peer, .. } => peer.clone(),
         }
     }
 
-    fn tab(&self, ui: Ui, settings: DockSettings, selected: bool, close: impl IntoElement) -> Div {
+    fn tab(
+        &self,
+        ui: Ui,
+        settings: DockSettings,
+        selected: bool,
+        close: impl IntoElement,
+        cx: &App,
+    ) -> Div {
         ui.tab(
             settings,
-            self.icon(),
+            self.icon(cx),
             self.label(),
             selected,
             (*self != Self::Home).then_some(close),
@@ -71,6 +85,7 @@ impl Page {
 
     fn element_id(&self) -> ElementId {
         match self {
+            Self::Device { view, .. } => ("device-tab", view.entity_id()).into(),
             Self::Terminal { view, .. } => ("terminal-tab", view.entity_id()).into(),
             _ => self.label().into(),
         }
@@ -254,12 +269,34 @@ impl Workspace {
                 return;
             }
             if page == Page::Settings {
-                self.dashboard.update(cx, |d, _| d.name_field = None);
+                self.dashboard.update(cx, |d, _| {
+                    d.name_field = None;
+                    d.settings_scroll = ScrollHandle::new();
+                });
             }
             self.tabs.push(page.clone());
             self.refresh_title(w);
         }
         self.focus_tab(page, w, cx);
+    }
+
+    pub(crate) fn open_device(&mut self, peer: &str, w: &mut Window, cx: &mut Context<Self>) {
+        let matches =
+            |page: &Page| matches!(page, Page::Device { peer: name, .. } if name.as_ref() == peer);
+        if let Some(page) = self.tabs.iter().find(|p| matches(p)).cloned() {
+            self.focus_tab(page, w, cx);
+            return;
+        }
+        if let Some(other) = self.other_window_with(w, cx, matches)
+            && other
+                .update(cx, |v, w, cx| v.open_device(peer, w, cx))
+                .is_ok()
+        {
+            return;
+        }
+        let peer: SharedString = peer.to_owned().into();
+        let view = DeviceSettings::new(peer.clone(), self.dashboard.clone(), cx);
+        self.show_page(Page::Device { peer, view }, w, cx);
     }
 
     pub(super) fn open_terminal(&mut self, peer: &str, w: &mut Window, cx: &mut Context<Self>) {
@@ -282,25 +319,19 @@ impl Workspace {
             return;
         }
         let ipc = self.dashboard.read(cx).address.clone();
-        match terminal::Terminal::open(peer, ipc.as_deref(), w.viewport_size(), cx) {
-            Ok(view) => {
-                let page = Page::Terminal {
-                    peer: peer.to_owned().into(),
-                    view,
-                };
-                if let Some(index) = existing {
-                    self.tabs[index] = page.clone();
-                } else {
-                    self.tabs.push(page.clone());
-                }
-                self.focus_tab(page, w, cx);
-                self.refresh_title(w);
-            }
-            Err(e) => self.dashboard.update(cx, |d, cx| {
-                d.action_error = Some(format!("Open terminal for {peer}: {e:#}"));
-                cx.notify();
-            }),
+        let runtime = self.dashboard.read(cx).runtime.clone();
+        let view = terminal::Terminal::open(peer, &runtime, ipc.as_deref(), w, cx);
+        let page = Page::Terminal {
+            peer: peer.to_owned().into(),
+            view,
+        };
+        if let Some(index) = existing {
+            self.tabs[index] = page.clone();
+        } else {
+            self.tabs.push(page.clone());
         }
+        self.focus_tab(page, w, cx);
+        self.refresh_title(w);
     }
 
     fn take_tab(&mut self, page: &Page, w: &mut Window, cx: &mut Context<Self>) {
@@ -413,7 +444,7 @@ impl Workspace {
             let close =
                 ui.tab_close_button(cx.listener(move |v, _, w, cx| v.close_tab(&closing, w, cx)));
             let tab = page
-                .tab(ui, settings, self.active == *page, close)
+                .tab(ui, settings, self.active == *page, close, cx)
                 .id(page.element_id())
                 .tooltip(tooltip(page.label()))
                 .when(*page != Page::Home, |tab| {
@@ -460,11 +491,18 @@ impl Workspace {
         match &self.active {
             Page::Home => DockPanel::scroll(
                 "home-scroll",
+                self.dashboard.read(cx).home_scroll.clone(),
                 self.dashboard.update(cx, |d, cx| d.home(ui, workspace, cx)),
             ),
             Page::Settings => DockPanel::scroll(
                 "settings-scroll",
+                self.dashboard.read(cx).settings_scroll.clone(),
                 self.dashboard.update(cx, |d, cx| d.settings(ui, cx)),
+            ),
+            Page::Device { view, .. } => DockPanel::scroll(
+                ("device-scroll", view.entity_id()),
+                view.read(cx).scroll.clone(),
+                view.clone(),
             ),
             Page::Terminal { view, .. } => DockPanel::fill(view.clone()),
         }
@@ -516,7 +554,7 @@ impl Render for Workspace {
                 dock.dragging(
                     drag.clone(),
                     drag.page
-                        .tab(ui, self.dock.read(cx).settings(), true, ui.tab_close()),
+                        .tab(ui, self.dock.read(cx).settings(), true, ui.tab_close(), cx),
                 )
             })
             .on_action(cx.listener(|v, _: &ReconnectTerminal, w, cx| {

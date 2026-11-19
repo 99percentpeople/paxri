@@ -3,11 +3,10 @@
 use clap::Parser;
 use gpui::{prelude::*, *};
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
-use tunnel_control::{Command, Destination, Direction, Forward, PortAccess, SshProfile, Status};
+use tunnel_control::{Command, Status};
 mod chrome;
 mod components;
 mod pages;
-mod peer_settings;
 mod terminal;
 mod theme;
 mod workspace;
@@ -22,141 +21,58 @@ struct Options {
     ipc: Option<PathBuf>,
 }
 
-struct RuleForm {
-    edit: bool,
-    name: Entity<Input>,
-    listen: Entity<Input>,
-    peer: String,
-    service: Entity<Input>,
-    target: Entity<Input>,
-    mode: RuleMode,
-}
+type OnComplete = Box<dyn FnOnce(Result<(), String>, &mut App)>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RuleMode {
-    Local,
-    Remote,
-    Service,
+struct GatewayRequest {
+    command: Command,
+    on_complete: Option<OnComplete>,
 }
 
 struct Dashboard {
-    rule: Option<RuleForm>,
-    ssh_form: Option<peer_settings::SshForm>,
-    ports_form: Option<peer_settings::PortsForm>,
+    home_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
+    terminal_settings: Entity<pages::TerminalSettings>,
     name_field: Option<Entity<Input>>,
-    removing: Option<String>,
+    pairing_input: Entity<Input>,
+    local_code: Entity<Input>,
+    copied_feedback: Option<Task<()>>,
     saving: bool,
     address: Option<PathBuf>,
     runtime: tokio::runtime::Handle,
     status: Option<Status>,
     error: Option<String>,
     busy: bool,
-    pending: VecDeque<Command>,
+    pending: VecDeque<GatewayRequest>,
     action_error: Option<String>,
 }
 
 impl Dashboard {
-    fn open_rule(&mut self, name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(status) = &self.status else { return };
-        let f = name.and_then(|n| status.forwards.get(n));
-        let form = RuleForm {
-            edit: f.is_some(),
-            name: Input::new(name.unwrap_or_default(), "Rule name", cx),
-            listen: Input::new(
-                f.map_or("127.0.0.1:8080", |f| &f.listen),
-                "127.0.0.1:8080",
-                cx,
-            ),
-            peer: f
-                .map(|f| f.peer.clone())
-                .or_else(|| status.peers.keys().next().cloned())
-                .unwrap_or_default(),
-            service: Input::new(f.map_or("", |f| &f.service), "ssh", cx),
-            target: Input::new(
-                f.and_then(|f| f.target.as_deref()).unwrap_or(""),
-                "127.0.0.1:3000",
-                cx,
-            ),
-            mode: match f {
-                Some(f) if f.direction == Direction::Remote => RuleMode::Remote,
-                Some(f) if f.target.is_none() => RuleMode::Service,
-                _ => RuleMode::Local,
-            },
-        };
-        if form.edit { &form.listen } else { &form.name }
-            .read(cx)
-            .focus
-            .focus(window);
-        self.rule = Some(form);
-        self.removing = None;
-        self.action_error = None;
-        cx.notify();
-    }
-
-    fn save_rule(&mut self, cx: &mut Context<Self>) {
-        if self.saving {
-            return;
-        }
-        let Some(f) = &self.rule else { return };
-        let name = f.name.read(cx).text().to_owned();
-        let name = if f.edit { name } else { name.trim().to_owned() };
-        let Ok(listen) = tunnel_control::listen_address(f.listen.read(cx).text().trim()) else {
-            self.action_error = Some(
-                "Enter a listen address with a port, such as 127.0.0.1:8080 or [::1]:8080.".into(),
-            );
-            cx.notify();
-            return;
-        };
-        if name.is_empty() || f.peer.is_empty() {
-            self.action_error = Some("Enter a rule name and choose a paired device.".into());
-            cx.notify();
-            return;
-        }
-        let destination = if f.mode == RuleMode::Service {
-            Destination::Service(f.service.read(cx).text().trim().to_owned())
-        } else {
-            match tunnel_control::tcp_target(f.target.read(cx).text().trim()) {
-                Ok(target) => Destination::Target(target),
-                Err(e) => {
-                    self.action_error = Some(e);
-                    cx.notify();
-                    return;
-                }
-            }
-        };
-        self.send(
-            Command::SaveForward {
-                name,
-                edit: f.edit,
-                rule: Forward {
-                    listen,
-                    peer: f.peer.clone(),
-                    destination,
-                    direction: if f.mode == RuleMode::Remote {
-                        Direction::Remote
-                    } else {
-                        Direction::Local
-                    },
-                },
+    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.request(
+            GatewayRequest {
+                command,
+                on_complete: None,
             },
             cx,
         );
     }
-    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
-        let changing = !matches!(command, Command::Status);
-        let rule_saved = matches!(command, Command::SaveForward { .. });
-        let name_saved = matches!(command, Command::SetDeviceName { .. });
-        let ssh_saved = matches!(command, Command::SetSshProfile { .. });
-        let ports_saved = matches!(command, Command::SetPortAccess { .. });
-        let removed = matches!(command, Command::RemoveForward { .. });
+
+    fn request(&mut self, request: GatewayRequest, cx: &mut Context<Self>) {
+        let changing = !matches!(request.command, Command::Status);
         if self.busy {
             if changing {
                 self.saving = true;
-                self.pending.push_back(command);
+                self.pending.push_back(request);
                 cx.notify();
             }
             return;
         }
+        let GatewayRequest {
+            command,
+            on_complete,
+        } = request;
+        let name_saved = matches!(command, Command::SetDeviceName { .. });
+        let joined = matches!(command, Command::JoinPairing { .. });
         self.busy = true;
         self.saving = changing || !self.pending.is_empty();
         cx.notify();
@@ -175,39 +91,44 @@ impl Dashboard {
             let _ = this.update(cx, |view, cx| {
                 view.busy = false;
                 view.saving = false;
+                let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 match result {
                     Ok(status) => {
-                        if rule_saved {
-                            view.rule = None;
-                        }
                         if name_saved {
                             view.name_field = None;
                         }
-                        if ssh_saved {
-                            view.ssh_form = None;
+                        if joined {
+                            view.pairing_input =
+                                Input::new("", "Paste the other device’s code", cx);
                         }
-                        if ports_saved {
-                            view.ports_form = None;
-                        }
-                        if removed {
-                            view.removing = None;
+                        let code = status.pairing.code.as_deref().unwrap_or_default();
+                        if view
+                            .local_code
+                            .update(cx, |field, cx| field.set_text(code, cx))
+                        {
+                            view.copied_feedback = None;
                         }
                         view.status = Some(status);
                         view.error = None;
-                        if changing {
+                        if changing && on_complete.is_none() {
                             view.action_error = None;
                         }
                     }
                     Err(error) if changing => {
-                        view.action_error = Some(error);
+                        if on_complete.is_none() {
+                            view.action_error = Some(error);
+                        }
                     }
                     Err(error) => {
                         view.status = None;
                         view.error = Some(error);
                     }
                 }
+                if let Some(callback) = on_complete {
+                    callback(outcome, cx);
+                }
                 if let Some(next) = view.pending.pop_front() {
-                    view.send(next, cx);
+                    view.request(next, cx);
                 }
                 cx.notify();
             });
@@ -221,11 +142,13 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
-            rule: None,
-            ssh_form: None,
-            ports_form: None,
+            home_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
+            terminal_settings: cx.new(|_| pages::TerminalSettings::default()),
             name_field: None,
-            removing: None,
+            local_code: Input::read_only("", cx),
+            copied_feedback: None,
+            pairing_input: Input::new("", "Paste the other device’s code", cx),
             saving: false,
             address,
             runtime,
@@ -266,6 +189,7 @@ fn main() {
         })
         .detach();
         theme::Appearance::init(cx);
+        theme::TerminalAppearance::init(cx);
         let dashboard = cx.new(|cx| Dashboard::new(address, handle, cx));
         Workspace::open_home(dashboard, cx).expect("open gateway window");
         cx.activate(true);

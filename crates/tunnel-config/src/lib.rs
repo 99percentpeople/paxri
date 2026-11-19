@@ -9,11 +9,12 @@ use url::{Host, Url};
 pub struct Config {
     pub version: u32,
     pub device_name: Option<String>,
+    pub pairing_code: Option<String>,
     #[serde(default)]
     pub native: Native,
     #[serde(default)]
     pub peers: BTreeMap<String, Peer>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tcp_services")]
     pub services: BTreeMap<String, Service>,
     #[serde(default)]
     pub forwards: BTreeMap<String, Forward>,
@@ -30,25 +31,56 @@ pub struct Native {
 pub struct Peer {
     pub endpoint_id: String,
     pub ticket: Option<String>,
-    pub ssh: Option<SshProfile>,
+    pub platform: Option<DevicePlatform>,
+    // Accept profiles written by versions with the OpenSSH client.
+    #[serde(rename = "ssh", default)]
+    _legacy_ssh: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    pub allow_terminal: bool,
     #[serde(default)]
     pub ports: PortAccess,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SshProfile {
-    pub user: Option<String>,
-    pub service: String,
-    pub identity_file: Option<String>,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DevicePlatform {
+    Windows,
+    Linux,
+    MacOs,
+    Web,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
-impl Default for SshProfile {
-    fn default() -> Self {
-        Self {
-            user: None,
-            service: "ssh".into(),
-            identity_file: None,
+impl DevicePlatform {
+    pub fn current() -> Self {
+        match std::env::consts::OS {
+            "windows" => Self::Windows,
+            "linux" => Self::Linux,
+            "macos" => Self::MacOs,
+            "unknown" | "emscripten" if cfg!(target_family = "wasm") => Self::Web,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Windows => "Windows",
+            Self::Linux => "Linux",
+            Self::MacOs => "macOS",
+            Self::Web => "Web",
+            Self::Unknown => "Unknown platform",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Windows => "windows",
+            Self::Linux => "linux",
+            Self::MacOs => "macos",
+            Self::Web => "web",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -60,27 +92,47 @@ pub struct PortAccess {
     pub listen: Vec<SocketAddr>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Service {
-    pub target: ServiceTarget,
+    pub target: String,
     pub allow_peers: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
-pub enum ServiceTarget {
-    Tcp(String),
-    OpenSsh { sshd_config: std::path::PathBuf },
-}
-
-impl std::fmt::Display for ServiceTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tcp(address) => f.write_str(address),
-            Self::OpenSsh { sshd_config } => write!(f, "OpenSSH ({})", sshd_config.display()),
-        }
+// Read older files in place. A retired per-connection sshd handler publishes no service.
+fn tcp_services<'de, D: serde::Deserializer<'de>>(
+    data: D,
+) -> Result<BTreeMap<String, Service>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        target: Target,
+        allow_peers: Vec<String>,
     }
+    #[derive(Deserialize)]
+    #[serde(untagged, deny_unknown_fields)]
+    enum Target {
+        Tcp(String),
+        Retired {
+            #[serde(rename = "sshd_config")]
+            _path: std::path::PathBuf,
+        },
+    }
+    let entries = BTreeMap::<String, Entry>::deserialize(data)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            let Target::Tcp(target) = entry.target else {
+                return None;
+            };
+            Some((
+                name,
+                Service {
+                    target,
+                    allow_peers: entry.allow_peers,
+                },
+            ))
+        })
+        .collect())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,40 +216,15 @@ pub fn parse(input: &str) -> Result<Config, String> {
         {
             return Err(format!("peers.{name}.endpoint_id requires 64 hex digits"));
         }
-        if let Some(profile) = &peer.ssh {
-            for text in std::iter::once(&profile.service)
-                .chain(&profile.user)
-                .chain(&profile.identity_file)
-            {
-                if text.trim().is_empty() || text.chars().any(char::is_control) {
-                    return Err(format!(
-                        "peers.{name}.ssh requires non-empty single-line values"
-                    ));
-                }
-            }
-        }
         for address in &mut peer.ports.connect {
             *address = tcp_target(address)?;
         }
     }
     for (name, service) in &config.services {
-        match &service.target {
-            ServiceTarget::Tcp(address) if !valid_target(address) => {
-                return Err(format!(
-                    "services.{name}.target requires a host and TCP port"
-                ));
-            }
-            ServiceTarget::OpenSsh { .. } if !cfg!(target_os = "linux") => {
-                return Err(format!(
-                    "services.{name}: the sshd_config backend requires Linux"
-                ));
-            }
-            ServiceTarget::OpenSsh { sshd_config } if !sshd_config.is_absolute() => {
-                return Err(format!(
-                    "services.{name}.target.sshd_config requires an absolute path"
-                ));
-            }
-            _ => {}
+        if !valid_target(&service.target) {
+            return Err(format!(
+                "services.{name}.target requires a host and TCP port"
+            ));
         }
         for peer in &service.allow_peers {
             if !config.peers.contains_key(peer) {

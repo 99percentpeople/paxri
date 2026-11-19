@@ -6,8 +6,8 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
 };
 use tokio::{
     io::Join,
@@ -19,7 +19,9 @@ use tunnel_config::Config;
 use tunnel_core::{PROTOCOL, Transport};
 
 use crate::{CONNECT_TIMEOUT, EndpointTicket};
+pub mod pairing;
 mod reverse;
+mod terminal;
 pub use reverse::{BindingState, RemoteForward};
 use tokio::sync::watch;
 
@@ -30,7 +32,7 @@ struct Destination {
 
 pub struct NativeTransport {
     endpoint: Endpoint,
-    peers: BTreeMap<String, Destination>,
+    peers: RwLock<BTreeMap<String, Arc<Destination>>>,
     config: watch::Sender<Arc<Config>>,
 }
 
@@ -38,7 +40,7 @@ impl Transport for NativeTransport {
     type Stream = Join<RecvStream, SendStream>;
 
     async fn open(&self, peer: &str) -> Result<Self::Stream> {
-        let dest = self.peers.get(peer).context("unknown peer")?;
+        let dest = self.peer(peer)?;
         timeout(CONNECT_TIMEOUT, async {
             let connection = {
                 let mut slot = dest.connection.lock().await;
@@ -63,28 +65,71 @@ impl Transport for NativeTransport {
 }
 
 impl NativeTransport {
+    fn peer(&self, name: &str) -> Result<Arc<Destination>> {
+        self.peers
+            .read()
+            .expect("peer map")
+            .get(name)
+            .cloned()
+            .context("unknown peer")
+    }
+
+    pub fn set_peer(&self, name: String, ticket: EndpointTicket) {
+        let address = ticket.into();
+        let mut peers = self.peers.write().expect("peer map");
+        if peers.get(&name).is_none_or(|dest| dest.address != address) {
+            peers.insert(
+                name,
+                Arc::new(Destination {
+                    address,
+                    connection: Mutex::new(None),
+                }),
+            );
+        }
+    }
+
+    pub async fn initial_pairing_ticket(&self, direct_only: bool) -> Result<EndpointTicket> {
+        crate::ticket(&self.endpoint, direct_only).await
+    }
+
+    pub fn contact(&self, name: String) -> pairing::Contact {
+        pairing::Contact {
+            name,
+            ticket: EndpointTicket::new(self.endpoint.addr()),
+            platform: Some(tunnel_config::DevicePlatform::current()),
+        }
+    }
+
     pub fn update_config(&self, config: Arc<Config>) {
         self.config.send_replace(config);
+    }
+    pub fn subscribe_config(&self) -> watch::Receiver<Arc<Config>> {
+        self.config.subscribe()
     }
     pub fn id(&self) -> String {
         self.endpoint.id().to_string()
     }
-    pub fn ticket(&self) -> String {
-        EndpointTicket::new(self.endpoint.addr()).to_string()
+    pub fn current_ticket(&self) -> EndpointTicket {
+        EndpointTicket::new(self.endpoint.addr())
     }
 }
 
 #[derive(Debug)]
 struct Services {
     config: watch::Receiver<Arc<Config>>,
-    paired: BTreeSet<EndpointId>,
     streams: Arc<Semaphore>,
 }
 
 impl ProtocolHandler for Services {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let peer = connection.remote_id();
-        if !self.paired.contains(&peer) {
+        let peer = connection.remote_id().to_string();
+        if !self
+            .config
+            .borrow()
+            .peers
+            .values()
+            .any(|p| p.endpoint_id.eq_ignore_ascii_case(&peer))
+        {
             connection.close(1u32.into(), b"peer not allowed");
             return Ok(());
         }
@@ -99,9 +144,10 @@ impl ProtocolHandler for Services {
                         continue;
                     };
                     let config = self.config.clone();
+                    let peer = peer.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
-                        if let Err(e) = tunnel_core::serve(|| config.borrow().clone(), &peer.to_string(), tokio::io::join(recv, send)).await {
+                        if let Err(e) = tunnel_core::serve(|| config.borrow().clone(), &peer, tokio::io::join(recv, send)).await {
                             eprintln!("inbound stream from {peer}: {e:#}");
                         }
                     });
@@ -117,9 +163,9 @@ pub async fn start(
     key: SecretKey,
     config: Arc<Config>,
     no_relay: bool,
+    incoming: tokio::sync::mpsc::Sender<pairing::Incoming>,
 ) -> Result<(NativeTransport, Router)> {
     let mut peers = BTreeMap::new();
-    let mut paired = BTreeSet::new();
     for (name, peer) in &config.peers {
         let id: EndpointId = peer
             .endpoint_id
@@ -142,16 +188,40 @@ pub async fn start(
             );
             EndpointAddr::new(id)
         };
-        paired.insert(id);
         peers.insert(
             name.clone(),
-            Destination {
+            Arc::new(Destination {
                 address,
                 connection: Mutex::new(None),
-            },
+            }),
         );
     }
-    let endpoint = if !no_relay && config.native.relay_url.is_none() {
+    // With no relay or discovery the saved code's LAN ports are its only introduction path.
+    let saved = config
+        .pairing_code
+        .as_deref()
+        .and_then(|code| pairing::Invitation::parse(code).ok())
+        .filter(|invite| no_relay && invite.ticket.endpoint_addr().id == key.public());
+    let endpoint = if let Some(saved) = saved {
+        let mut builder = Endpoint::builder(presets::Minimal)
+            .secret_key(key.clone())
+            .ca_tls_config(iroh::tls::CaTlsConfig::system())
+            .relay_mode(iroh::RelayMode::Disabled);
+        let address = saved.ticket.endpoint_addr();
+        if let Some(v4) = address.ip_addrs().find(|a| a.is_ipv4()) {
+            builder = builder.bind_addr((std::net::Ipv4Addr::UNSPECIFIED, v4.port()))?;
+        }
+        if let Some(v6) = address.ip_addrs().find(|a| a.is_ipv6()) {
+            builder = builder.bind_addr_with_opts(
+                (std::net::Ipv6Addr::UNSPECIFIED, v6.port()),
+                iroh::endpoint::BindOpts::default().set_is_required(false),
+            )?;
+        }
+        match builder.bind().await {
+            Ok(endpoint) => endpoint,
+            Err(_) => crate::bind(key, &config.native, true).await?,
+        }
+    } else if !no_relay && config.native.relay_url.is_none() {
         Endpoint::builder(presets::N0)
             .secret_key(key)
             .ca_tls_config(iroh::tls::CaTlsConfig::system())
@@ -163,6 +233,11 @@ pub async fn start(
     let (config, settings) = watch::channel(config);
     let streams = Arc::new(Semaphore::new(256));
     let router = Router::builder(endpoint.clone())
+        .accept(pairing::PROTOCOL, pairing::PairingHandler::new(incoming))
+        .accept(
+            tunnel_terminal::PROTOCOL,
+            terminal::Terminals::new(settings.clone()),
+        )
         .accept(
             tunnel_core::reverse::PROTOCOL,
             reverse::Listeners::new(settings.clone(), streams.clone()),
@@ -171,7 +246,6 @@ pub async fn start(
             PROTOCOL,
             Services {
                 config: settings,
-                paired,
                 streams,
             },
         )
@@ -179,7 +253,7 @@ pub async fn start(
     Ok((
         NativeTransport {
             endpoint,
-            peers,
+            peers: RwLock::new(peers),
             config,
         },
         router,

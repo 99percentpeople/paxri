@@ -14,8 +14,10 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use tunnel_config::{
-    Destination, Direction, Forward, PortAccess, SshProfile, listen_address, tcp_target,
+    Destination, DevicePlatform, Direction, Forward, PortAccess, listen_address, tcp_target,
 };
+
+pub use tunnel_terminal as terminal;
 
 const VERSION: u16 = 1;
 const MAX_FRAME: usize = 1024 * 1024;
@@ -25,25 +27,45 @@ const DEADLINE: Duration = Duration::from_secs(5);
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    RefreshPairingCode,
+    CancelPairing,
+    JoinPairing {
+        code: String,
+    },
+    AnswerPairing {
+        device_id: String,
+        request_id: Option<String>,
+        accept: bool,
+    },
     SetForward {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_peer: Option<String>,
         enabled: bool,
     },
     SaveForward {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_peer: Option<String>,
         edit: bool,
         #[serde(flatten)]
         rule: Forward,
     },
     RemoveForward {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_peer: Option<String>,
     },
     SetDeviceName {
         name: Option<String>,
     },
-    SetSshProfile {
+    SetTerminalAccess {
         peer: String,
-        profile: Option<SshProfile>,
+        allowed: bool,
+    },
+    OpenTerminal {
+        peer: String,
+        size: terminal::Size,
     },
     SetPortAccess {
         peer: String,
@@ -62,7 +84,7 @@ struct Request {
     command: Command,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ForwardStatus {
     pub listen: String,
     pub bound: Option<String>,
@@ -105,8 +127,27 @@ impl ForwardStatus {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PairingStatus {
+    pub code: Option<String>,
+    pub incoming: Vec<PairingPeer>,
+    pub outgoing: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PairingPeer {
+    pub request_id: String,
+    pub name: String,
+    pub device_id: String,
+    #[serde(default)]
+    pub platform: DevicePlatform,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub pairing: PairingStatus,
     pub device_id: String,
     #[serde(default)]
     pub computer_name: String,
@@ -115,7 +156,9 @@ pub struct Status {
     pub ticket: String,
     pub peers: BTreeMap<String, String>,
     #[serde(default)]
-    pub ssh_profiles: BTreeMap<String, SshProfile>,
+    pub peer_platforms: BTreeMap<String, DevicePlatform>,
+    #[serde(default)]
+    pub terminal_access: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub port_access: BTreeMap<String, PortAccess>,
     pub services: BTreeMap<String, String>,
@@ -123,6 +166,10 @@ pub struct Status {
 }
 
 impl Status {
+    pub fn peer_platform(&self, peer: &str) -> DevicePlatform {
+        self.peer_platforms.get(peer).copied().unwrap_or_default()
+    }
+
     pub fn display_name(&self) -> &str {
         self.device_name.as_deref().unwrap_or_else(|| {
             if self.computer_name.is_empty() {
@@ -341,6 +388,20 @@ pub async fn connect(path: &Path, peer: String, service: String) -> Result<Strea
     let (socket, ()) = begin(
         path,
         Command::Connect { peer, service },
+        Duration::from_secs(50),
+    )
+    .await?;
+    Ok(socket)
+}
+
+/// Open a native interactive terminal. After the reply, IPC carries terminal frames directly.
+pub async fn open_terminal(path: &Path, peer: String, size: terminal::Size) -> Result<Stream> {
+    let (socket, ()) = begin(
+        path,
+        Command::OpenTerminal {
+            peer,
+            size: size.validate()?,
+        },
         Duration::from_secs(50),
     )
     .await?;

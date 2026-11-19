@@ -105,3 +105,15 @@ pub static DARK: Palette = Palette {
         ],
     },
 };
+
+// A cool dark terminal with its own normal and bright ANSI colors.
+pub(super) const MIDNIGHT: TerminalPalette = TerminalPalette {
+    surface: pair(0x152033, 0xe0e9f5),
+    selection: pair(0x354d70, 0xffffff),
+    composition: 0x30425e,
+    cursor: 0x82dce4,
+    ansi: [
+        0x29364b, 0xef9097, 0x91d4aa, 0xeac388, 0x88b4ef, 0xc1a2eb, 0x80d3dc, 0xcbd6e5, 0x7589a4,
+        0xffabb1, 0xadeac1, 0xffdda5, 0xa9cafa, 0xd9bfff, 0xaff0f4, 0xf4f8ff,
+    ],
+};

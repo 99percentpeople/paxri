@@ -39,7 +39,7 @@ python3 scripts/sync-windows.py --watch  # 持续同步本地修改，Ctrl+C 退
 
 ### 自动更新两端的开发程序
 
-在 Linux 开发机运行 `python3 scripts/sync-windows.py --watch --dev`，会持续把源码同步到 `yzzpc`。Rust 源码或 Cargo 配置变化时，两台机器各自增量构建三个程序。两边都编译成功且构建期间源码稳定后，更新各自 `target/debug` 的产物。文档变更只同步源码。编译失败会保留当前程序，修正后自动重试。监听地址、配对、SSH 配置和设备密钥保存在原位置。
+在 Linux 开发机运行 `python3 scripts/sync-windows.py --watch --dev`，会持续把源码同步到 `yzzpc`。Rust 源码或 Cargo 配置变化时，两台机器各自增量构建三个程序。两边都编译成功且构建期间源码稳定后，更新各自 `target/debug` 的产物。文档变更只同步源码。编译失败会保留当前程序，修正后自动重试。监听地址、配对、终端授权和设备密钥保存在原位置。
 
 更新器只重启二进制发生变化的开发进程。Linux 复用当前用户的 `p2p-tunnel-gateway.service` 和 `p2p-tunnel-gui.service`。Windows 通过当前登录用户的桌面会话重新启动正在使用此开发目录的网关或 GUI，保留原启动参数。重启网关会中断该网关的活动连接，重启 GUI 会关闭其终端标签。仅更新 CLI 时，已运行的界面和网关可继续使用。两端需要可用的 Rust 工具链，Windows 更新正在运行的桌面程序时需要用户已登录。
 
@@ -52,13 +52,28 @@ systemctl --user status p2p-tunnel-dev-watch.service
 journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 ```
 
+### 配对和设备设置
+
+首次运行时，两台电脑的网关配置都可以只写 `version = 1`，分别使用自己的设备密钥。打开两端的 **Home**。
+
+1. 第一台的 **Your pairing code** 用单行只读输入框显示本机配对码。点击复制图标（**Copy code**）可复制完整配对码，成功后图标短暂显示为勾号。也可以选中框内文字，用 Ctrl+C（macOS 用 Cmd+C）复制，再把配对码发给另一台的使用者。重启或配对成功后，这个码仍可用。
+2. 在第二台的 **Pair with another device** 粘贴配对码，点击 **Pair device**。
+3. 在第一台核对请求里的设备名和设备 ID，点击 **Accept**。双方的 **Paired devices** 都会出现对方。选择 **Decline** 可以拒绝该次请求。点击刷新图标（**Refresh code**）会更换本机配对码，并撤销旧码下的待确认请求。已配对设备继续使用原有连接和权限。
+
+配对请求和设备列表显示对端报告的平台图标及名称。已有设备在两端升级并连通后自动补齐，离线时沿用已保存的信息。平台未知时显示通用电脑图标。CLI 可用 `tunnel status` 查看同一信息。
+4. 点击设备旁的 **Device settings** 打开它的标签页。这里可以授权和打开原生终端、管理这台设备的转发规则，以及设置对方可以访问的本机地址。
+
+同一流程也可混用 CLI 和 GUI。发码端用 `tunnel pair code` 查看当前码，用 `tunnel pair refresh` 手动更换。另一端运行 `tunnel pair join <CODE>`。发码端用 `tunnel pair status` 查看请求，再运行 `tunnel pair accept <DEVICE_ID>` 或 `tunnel pair decline <DEVICE_ID>`。
+
+同一台电脑上，连接同一个网关的 CLI 和 GUI 共用 `tunnel-gateway --config` 指定的 TOML。配对身份、终端授权、端口授权和转发规则都由网关写入。另一端的网关使用它自己的文件。配对后需要访问哪些服务和地址，由各端的服务和端口授权决定。
+
 ### 启动两个网关转发 TCP
 
 以下命令名对应 `target/debug` 里的可执行文件，Windows 文件名带 `.exe`。
 
 1. 在家里电脑执行 `tunnel identity home.key`，在笔记本执行 `tunnel identity laptop.key`。互相核对输出的公钥，分别填入[家里配置](examples/home.toml)和[笔记本配置](examples/laptop.toml)的 `peers` 条目。在家里先启动目标服务，例如监听 `127.0.0.1:3000` 的开发服务器。
 2. 在家里运行 `tunnel-gateway --config home.toml --key home.key`，笔记本运行 `tunnel-gateway --config laptop.toml --key laptop.key`。使用默认中继时，网关通过 iroh 的公共地址发现按公钥寻址。两端也可以显式设置同一个 `native.relay_url`，使用自己的中继。
-3. 在笔记本运行 `tunnel status` 查看实际监听地址，再访问 `http://127.0.0.1:8080`。每条连接通过授权服务名 `dev-web` 到达家里电脑的目标。打开 `tunnel-gui`，在 **Home → Port forwarding → Add rule → Named service** 填写规则名、监听地址（如 `127.0.0.1:8080`），选择已配对设备，填写它发布的服务名。保存后立即开始监听。主页也支持修改、暂停、恢复和删除规则。
+3. 在笔记本运行 `tunnel status` 查看实际监听地址，再访问 `http://127.0.0.1:8080`。每条连接通过授权服务名 `dev-web` 到达家里电脑的目标。打开 `tunnel-gui`，在 **Home → Device settings → Port forwarding → Add rule → Named service** 填写规则名、监听地址（如 `127.0.0.1:8080`），填写该设备发布的服务名。保存后立即开始监听。设备页也支持修改、暂停、恢复和删除规则。
 
 `tunnel forward pause home-web` 会释放监听端口，现有连接继续传输。`tunnel forward resume home-web` 会重新绑定端口。暂停只影响本次运行。重启后重新加载 TOML。查看机器可读状态可用 `tunnel status --json`。
 
@@ -70,11 +85,13 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 在 Windows 和 Linux 的 X11 桌面会话中，把独立窗口的标签拖进另一个工作区的顶栏或侧栏，标签会在鼠标仍然按住时并入。继续沿栏移动可以调整插入位置，再次越过阈值可以拆出，松手确定位置。经过页面正文时窗口保持分离。在 Windows 上，拆窗拖动途中按 **Esc** 可恢复原来的布局。
 
-在 **Menu → Settings → Appearance** 点击 **Theme** 右侧的图标按钮，可以选择 **System**、**Light** 或 **Dark**，默认跟随系统。切换会同时更新所有窗口、拖动中的标签和 SSH 终端。主题偏好保存在当前桌面用户配置目录的 `p2p-tunnel/appearance`，网关离线时也可以修改。
+在 **Menu → Settings → Appearance** 点击 **Theme** 右侧的图标按钮，可以选择 **System**、**Light** 或 **Dark**，默认跟随系统。切换会同时更新所有窗口和拖动中的标签。主题偏好保存在当前桌面用户配置目录的 `p2p-tunnel/appearance`，网关离线时也可以修改。
+
+在 **Settings → Terminal** 中，**Color scheme** 默认跟随应用主题，也可以选择 **Neutral light**、**Neutral dark** 或 **Midnight**。**Default cursor shape** 与 **Default cursor blink** 设置本机默认光标。远端 shell 或编辑器可以移动、隐藏光标，指定方块、竖线、下划线、闪烁和颜色，复位后恢复本机设置。设置保存在当前桌面用户配置目录的 `p2p-tunnel/terminal.toml`。
 
 在 Wayland 桌面会话中可以拖出标签建立独立窗口。
 
-**Settings** 显示本机名称、设备 ID 和已发布的服务，并提供复制连接票据的入口。名称默认取自网关所在电脑。选择 **Change name** 可覆盖显示名，清空后保存即可恢复使用电脑名。显示名和配对使用的公钥相互独立，已配置的对端别名保持有效。名称覆盖和转发规则写入网关启动时使用的 TOML，网关账户需要对配置文件及所在目录有写权限。
+**Settings** 显示本机名称、设备 ID 和已发布的服务。名称默认取自网关所在电脑。选择 **Change name** 可覆盖显示名，清空后保存即可恢复使用电脑名。显示名和配对使用的公钥相互独立，已配置的对端别名保持有效。名称覆盖和转发规则写入网关启动时使用的 TOML，网关账户需要对配置文件及所在目录有写权限。
 
 在局域网做离线测试时，可在两端加 `--no-relay`。先启动服务提供端，用 `tunnel ticket` 复制其票据，填入发起端的 `peers.home.ticket`，再启动发起端。票据中的公钥必须匹配已配对公钥。默认公网发现只在启用中继且未指定自托管中继时使用。
 
@@ -82,14 +99,14 @@ CLI、GUI 和 gateway 都接受 `--ipc` 或环境变量 `TUNNEL_IPC`。Unix 使�
 
 ### 在本地或对端监听 TCP 端口
 
-在 **Home → Port forwarding → Add rule** 选择监听位置。假设你正在操作笔记本，对端别名是 `home`。
+在 **Home → Device settings → Port forwarding → Add rule** 选择监听位置。假设你正在操作笔记本，对端别名是 `home`。
 
 | 模式 | 客户端连接的入口 | 隧道另一端连接的目标 |
 | --- | --- | --- |
 | **Listen locally** | 笔记本的 `127.0.0.1:8080` | 家里电脑的 `127.0.0.1:3000` |
 | **Listen on peer** | 家里电脑的 `127.0.0.1:9000` | 笔记本的 `127.0.0.1:5000` |
 
-在家里电脑的 **Settings → Port access → laptop → Edit access**，填写允许笔记本连接的目标或监听的地址。两个输入框都支持每行一个地址，也可用逗号分隔。已向笔记本发布的 TCP 服务也可以直接按相同的目标地址连接。CLI 等价操作如下，`port-access set` 会替换该设备的两张端口授权列表。
+在家里电脑的 **Home → laptop 的 Device settings → Port access → Edit access**，填写允许笔记本连接的目标或监听的地址。两个输入框都支持每行一个地址，也可用逗号分隔。已向笔记本发布的 TCP 服务也可以直接按相同的目标地址连接。CLI 等价操作如下，`port-access set` 会替换该设备的两张端口授权列表。
 
 ```sh
 # 家里电脑
@@ -101,77 +118,24 @@ tunnel forward add laptop-web --remote --peer home --listen 9000 --target 5000
 tunnel forward list
 ```
 
-单独填写端口会使用 `127.0.0.1`。监听地址也可以是指定 IP、`[::1]:8080` 或显式的 `0.0.0.0:8080`。远端授权按请求的地址和端口匹配。监听端口填 `0` 会由操作系统分配，实际地址可在主页或 `tunnel status` 查看。远端监听规则在对端离线或绑定失败时显示状态并自动重试。用 `tunnel forward edit` 更新规则，或用 `pause`、`resume`、`remove` 管理它。
+单独填写端口会使用 `127.0.0.1`。监听地址也可以是指定 IP、`[::1]:8080` 或显式的 `0.0.0.0:8080`。远端授权按请求的地址和端口匹配。监听端口填 `0` 会由操作系统分配，实际地址可在设备页或 `tunnel status` 查看。远端监听规则在对端离线或绑定失败时显示状态并自动重试。用 `tunnel forward edit` 更新规则，或用 `pause`、`resume`、`remove` 管理它。
 
-### 通过隧道 SSH 登录
+### 打开原生远程终端
 
-在两台已配对的电脑上使用以下规则。假设家里电脑的 SSH 服务正在监听 `127.0.0.1:22`，家里配置中的笔记本别名为 `laptop`，笔记本配置中的家里电脑别名为 `home`。
+两台设备配对后，在被访问的电脑上打开 **Device settings → Native terminal**，点击 **Allow access** 授权这台对端。连接方在对应设备页点击 **Open terminal**。网关会以运行它的普通用户身份创建 PTY。Windows 使用 ConPTY，优先启动 PowerShell 7（`pwsh.exe`），找不到可用的 7 时启动系统自带的 Windows PowerShell 5.1。Linux 和 macOS 使用账户的默认 shell。两端只需运行网关，桌面端直接通过本机 IPC 打开终端。
 
-在家里电脑的 TOML 中发布 SSH 服务。
+在 GUI 终端里，启用了鼠标报告的远端程序可以接收点击、拖动和滚轮。按住 **Shift** 可以在本机拖选文字或查看滚动历史。程序启用焦点报告后，切换标签页或激活窗口也会通知远端。详细的事件方向和兼容范围见[原生终端协议](docs/native-protocol.md#原生终端)。
 
-```toml
-[services.ssh]
-target = "127.0.0.1:22"
-allow_peers = ["laptop"]
-```
-
-在笔记本的 TOML 中添加本地监听。
-
-```toml
-[forwards.home-ssh]
-listen = "127.0.0.1:2222"
-peer = "home"
-service = "ssh"
-```
-
-重启两端网关以加载配置，在笔记本执行以下命令，将 `alice` 换成家里电脑的 SSH 用户名。
+要从 `laptop` 连接 `home`，可以在两台设备的交互式命令行分别运行下面的命令。
 
 ```sh
-ssh -p 2222 alice@127.0.0.1
+# 在 home 上授权 laptop
+tunnel terminal-access allow laptop
+# 在 laptop 上打开 home 的 shell
+tunnel shell home
 ```
 
-首次连接时核对家里电脑的 SSH 主机密钥指纹，随后使用该账户原有的 SSH 密钥或允许的认证方式登录。路由器无需向公网开放 TCP 22。
-
-### 按服务名登录 SSH
-
-启动两端网关后，可以在本机终端直接登录配对设备。`home` 是本机配置中的设备别名。省略用户名时，OpenSSH 使用其客户端配置或当前用户名。
-
-```sh
-tunnel ssh-config set home --user alice --service ssh --identity ~/.ssh/id_ed25519
-tunnel ssh home
-tunnel ssh-config show home
-tunnel ssh home -l alice --service admin-ssh -i ~/.ssh/id_ed25519
-```
-
-在 **Home → Paired devices** 选择设备旁的 **SSH settings**，可以保存登录名、服务名和本机身份文件路径。点击 **Open SSH** 会直接在设备标签页登录。未填写时使用 OpenSSH 的账户和密钥配置，服务名默认为 `ssh`。再次打开同一设备会切回已有会话。切换标签、拖出独立窗口或合并窗口时会保留连接和终端内容。关闭终端标签会断开该会话。连接结束后，点击 **Reconnect** 或在终端按回车可以重新登录。拖动鼠标选择文本，双击选词，三击选行，按住 Shift 点击可扩展选区。用 Ctrl+Shift+C 复制、Ctrl+Shift+V 粘贴（macOS 使用 Cmd+C 和 Cmd+V）。有选区时复制选区，没有选区时复制当前屏幕。Windows 和 Linux 的 Ctrl+C 在有选区时复制，其他时候向远端发送中断。
-
-命令行选项可以临时覆盖已保存的值。`tunnel ssh-config reset home` 恢复默认设置。`tunnel ssh --prompt home` 可以在本次登录手动选择账户和服务。配置文件只记录身份文件路径，私钥和密码由 OpenSSH 管理。
-
-两种入口都需要本机安装 OpenSSH 客户端。桌面端从自身所在目录启动 `tunnel`，部署时将两个程序放在一起。主机密钥确认、密码提示、SSH agent 和用户私钥由 OpenSSH 处理。在 CLI 中可用 `-F` 指定客户端配置。
-
-笔记本只需配对家里设备。省略 `[forwards.home-ssh]`，把 `tunnel` 放入 PATH，然后用 OpenSSH 直接打开家里设备的 `ssh` 服务。
-
-```sh
-ssh -o "ProxyCommand=tunnel connect home ssh" alice@home
-```
-
-也可以把下面的条目放进客户端的 `~/.ssh/config`，以后运行 `ssh home-p2p`。OpenSSH 用这个别名记录和校验主机密钥。
-
-```sshconfig
-Host home-p2p
-    User alice
-    ProxyCommand tunnel connect home ssh
-```
-
-目标端可以继续使用上一节的 TCP 服务。在 Linux 上，还可把家里网关的服务改为以下配置，让每次已授权的连接启动一个 `/usr/sbin/sshd -i` 进程。这样两端都无需监听 SSH 的 TCP 端口。
-
-```toml
-[services.ssh]
-target = { sshd_config = "/etc/p2p-tunnel/sshd_config" }
-allow_peers = ["laptop"]
-```
-
-`sshd_config` 是本机管理员准备的 OpenSSH 服务端配置。网关启动时会运行 `sshd -t -f` 检查它。使用普通账户运行时，可为该账户提供可读的专用 `HostKey`、自己的 `AuthorizedKeysFile` 并设 `UsePAM no`，登录同一账户。要使用系统现有的多账户登录策略，可以直接选已有的 TCP 目标。Windows 和 macOS 网关目前使用 TCP 目标来提供 SSH 服务。Linux 上可运行 `python3 scripts/check-gateway.py --ssh-stdio` 验证一次使用临时密钥的完整登录。
+`tunnel terminal-access show laptop` 查看本机给该设备的权限。点击 **Revoke access** 或运行 `tunnel terminal-access deny laptop` 会断开该设备的原生终端。每个方向分别授权。配置项是 `peers.<别名>.allow_terminal`，默认为 `false`。接收端网关以普通用户身份运行时可托管 shell。root 或提升权限的 Windows 网关会拒绝此请求。升级时旧的 SSH 登录配置和按连接启动 sshd 的服务会被忽略。原生终端仍须逐设备授权。
 
 ### 用两台电脑测试打洞
 

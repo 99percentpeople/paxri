@@ -3,7 +3,7 @@ mod sidebar;
 mod state;
 mod tabs;
 
-use super::{Ui, track_keyboard_focus};
+use super::{Scrollbar, Ui, track_keyboard_focus};
 use crate::{
     chrome,
     theme::{BUTTON_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4},
@@ -40,7 +40,7 @@ impl DockHeader {
 #[derive(IntoElement)]
 pub struct DockPanel {
     content: AnyElement,
-    scroll: Option<ElementId>,
+    scroll: Option<(ElementId, ScrollHandle)>,
 }
 
 impl DockPanel {
@@ -51,24 +51,39 @@ impl DockPanel {
         }
     }
 
-    pub fn scroll(id: impl Into<ElementId>, content: impl IntoElement) -> Self {
+    pub fn scroll(
+        id: impl Into<ElementId>,
+        handle: ScrollHandle,
+        content: impl IntoElement,
+    ) -> Self {
         Self {
             content: content.into_any_element(),
-            scroll: Some(id.into()),
+            scroll: Some((id.into(), handle)),
         }
     }
 }
 
 impl RenderOnce for DockPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let panel = div().flex_1().min_h_0().min_w_0().child(self.content);
+        let panel = div().flex_1().min_h_0().min_w_0();
         match self.scroll {
-            Some(id) => panel
-                .id(id)
-                .overflow_y_scroll()
-                .p(SPACE_4)
+            Some((id, handle)) => panel
+                .relative()
+                .child(
+                    div()
+                        .id(id.clone())
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&handle)
+                        .p(SPACE_4)
+                        .child(self.content),
+                )
+                .child(Scrollbar::vertical((id, "bar"), handle))
                 .into_any_element(),
-            None => panel.overflow_hidden().into_any_element(),
+            None => panel
+                .overflow_hidden()
+                .child(self.content)
+                .into_any_element(),
         }
     }
 }

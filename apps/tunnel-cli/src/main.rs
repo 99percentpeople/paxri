@@ -9,9 +9,9 @@ use tunnel_config::Config;
 use tunnel_native::{self as native, EndpointTicket};
 
 mod management;
-mod ssh;
+mod shell;
 mod stdio;
-use management::{ForwardAction, PortAction, SshAction};
+use management::{ForwardAction, PairAction, PortAction};
 
 #[derive(Parser)]
 #[command(name = "tunnel", about = "Native P2P Tunnel tools")]
@@ -30,24 +30,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Pair two devices using a device code and explicit approval
+    Pair {
+        #[command(subcommand)]
+        action: PairAction,
+    },
     /// Export the running gateway connection ticket
     Ticket,
-    /// Open a peer service on stdin/stdout (for example, an SSH ProxyCommand)
+    /// Open a peer service on stdin/stdout
     Connect { peer: String, service: String },
-    /// Open an interactive SSH session on a paired device
-    Ssh(ssh::Options),
-    /// Manage saved SSH login settings for a paired device
-    SshConfig {
+    /// Open the paired device's native interactive shell
+    Shell { peer: String },
+    /// Manage a paired device's permission to open a shell on this device
+    TerminalAccess {
         #[command(subcommand)]
-        action: SshAction,
+        action: management::TerminalAccess,
     },
     /// Manage the TCP addresses a peer may connect to or listen on here
     PortAccess {
         #[command(subcommand)]
         action: PortAction,
     },
-    #[command(hide = true)]
-    SshProxy,
     /// Manage local and remote TCP listeners
     #[command(
         after_help = "Examples\n  tunnel forward add web --peer home --listen 8080 --target 3000\n  tunnel forward add preview --remote --peer home --listen 9000 --target 5000"
@@ -117,10 +120,18 @@ fn load_config(path: &Path) -> Result<Config> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Command::Ssh(options) = cli.command {
-        return ssh::run(options, cli.ipc);
+    if let Command::Shell { peer } = cli.command {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let ipc = cli.ipc.unwrap_or_else(tunnel_control::default_address);
+        let result = runtime.block_on(shell::run(&ipc, peer));
+        runtime.shutdown_background();
+        let code = result?;
+        if code != 0 {
+            std::process::exit(code as i32);
+        }
+        return Ok(());
     }
-    let uses_stdio = matches!(cli.command, Command::Connect { .. } | Command::SshProxy);
+    let uses_stdio = matches!(cli.command, Command::Connect { .. });
     let runtime = tokio::runtime::Runtime::new()?;
     let result = runtime.block_on(run(cli));
     if uses_stdio {
@@ -133,12 +144,8 @@ fn main() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     let ipc = cli.ipc.unwrap_or_else(tunnel_control::default_address);
     match cli.command {
-        Command::Ssh(_) => unreachable!(),
-        Command::SshProxy => {
-            let peer = std::env::var("P2P_TUNNEL_SSH_PEER")?;
-            let service = std::env::var("P2P_TUNNEL_SSH_SERVICE")?;
-            connect_stdio(&ipc, peer, service).await?;
-        }
+        Command::Shell { .. } => unreachable!(),
+        Command::TerminalAccess { action } => action.run(&ipc).await?,
         Command::Connect { peer, service } => {
             connect_stdio(&ipc, peer, service).await?;
         }
@@ -154,8 +161,8 @@ async fn run(cli: Cli) -> Result<()> {
                     status.peers.len(),
                     status.services.len()
                 );
-                for (name, id) in status.peers {
-                    println!("peer {name} {id}");
+                for (name, id) in &status.peers {
+                    println!("peer {name} {id} ({})", status.peer_platform(name).label());
                 }
                 for (name, target) in status.services {
                     println!("service {name} -> {target}");
@@ -165,6 +172,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Pair { action } => action.run(&ipc).await?,
         Command::Ticket => println!(
             "{}",
             tunnel_control::request(&ipc, tunnel_control::Command::Status)
@@ -172,7 +180,6 @@ async fn run(cli: Cli) -> Result<()> {
                 .ticket
         ),
         Command::Forward { action } => action.run(&ipc).await?,
-        Command::SshConfig { action } => action.run(&ipc).await?,
         Command::PortAccess { action } => action.run(&ipc).await?,
         Command::Config {
             command: ConfigCommand::Check { file },

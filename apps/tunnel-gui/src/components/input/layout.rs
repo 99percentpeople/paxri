@@ -1,6 +1,9 @@
 //! Byte positions and hit testing for the visual rows produced by GPUI's text shaper.
 use gpui::*;
-use std::ops::Range;
+use std::{ops::Range, time::Duration};
+
+// Leave room for the caret at the end of an unwrapped line.
+pub(super) const CARET_SPACE: Pixels = px(2.);
 
 struct Row {
     logical_line: usize,
@@ -97,6 +100,43 @@ impl InputLayout {
         (self.height * self.row_count() - self.bounds.size.height).max(px(0.))
     }
 
+    pub fn max_scroll_x(&self) -> Pixels {
+        let width = self
+            .lines
+            .first()
+            .map_or(px(0.), |line| line.unwrapped_layout.width);
+        (width + CARET_SPACE - self.bounds.size.width).max(px(0.))
+    }
+
+    /// Hit-test against the newly scrolled text, even if the pointer stayed still.
+    pub fn drag_hit<const MULTILINE: bool>(
+        &mut self,
+        mut pointer: Point<Pixels>,
+        elapsed: Duration,
+    ) -> (usize, usize, bool) {
+        let moving = if MULTILINE {
+            let limit = self.max_scroll_y();
+            pan_selection(
+                &mut pointer.y,
+                self.bounds.top()..self.bounds.bottom(),
+                &mut self.scroll.y,
+                limit,
+                elapsed,
+            )
+        } else {
+            let limit = self.max_scroll_x();
+            pan_selection(
+                &mut pointer.x,
+                self.bounds.left()..self.bounds.right(),
+                &mut self.scroll.x,
+                limit,
+                elapsed,
+            )
+        };
+        let (byte, row) = self.hit(pointer);
+        (byte, row, moving)
+    }
+
     pub fn paint_text(&self, window: &mut Window, cx: &mut App) {
         let mut origin = self.origin(0);
         for line in &self.lines {
@@ -156,5 +196,80 @@ impl InputLayout {
                 ));
             }
         }
+    }
+}
+
+/// Pan faster further into or beyond the edge. Return whether another frame can advance.
+fn pan_selection(
+    pointer: &mut Pixels,
+    viewport: Range<Pixels>,
+    scroll: &mut Pixels,
+    limit: Pixels,
+    elapsed: Duration,
+) -> bool {
+    let edge = px(12.).min((viewport.end - viewport.start) / 2.);
+    let near_start = (viewport.start + edge - *pointer).max(px(0.));
+    let near_end = (*pointer - (viewport.end - edge)).max(px(0.));
+    let speed = ((near_end - near_start) * 75.).clamp(px(-1800.), px(1800.));
+    *scroll = (*scroll + speed * elapsed.as_secs_f32().min(0.1)).clamp(px(0.), limit);
+
+    // The far edge is exclusive. This matters when a textarea ends exactly on a line boundary.
+    let end = (viewport.end - px(0.01)).max(viewport.start);
+    *pointer = (*pointer).clamp(viewport.start, end);
+    (speed < px(0.) && *scroll > px(0.)) || (speed > px(0.) && *scroll < limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pan_selection;
+    use gpui::px;
+    use std::time::Duration;
+
+    #[test]
+    fn holding_the_edge_advances_until_the_end_and_can_reverse() {
+        let mut offset = px(0.);
+        let limit = px(250.);
+        let dt = Duration::from_millis(16);
+        for position in [99., -40.] {
+            let mut frames = 0;
+            loop {
+                // Each frame receives the same physical pointer position.
+                let mut pointer = px(position);
+                let moving = pan_selection(&mut pointer, px(0.)..px(100.), &mut offset, limit, dt);
+                assert!((px(0.)..px(100.)).contains(&pointer));
+                if !moving {
+                    break;
+                }
+                frames += 1;
+                assert!(frames < 60);
+            }
+            assert!(frames > 1);
+            assert_eq!(offset, if position > 0. { limit } else { px(0.) });
+        }
+    }
+
+    #[test]
+    fn dragging_in_the_middle_or_in_a_field_that_fits_does_not_pan() {
+        let dt = Duration::from_millis(16);
+        let mut offset = px(30.);
+        let mut pointer = px(60.);
+        assert!(!pan_selection(
+            &mut pointer,
+            px(10.)..px(110.),
+            &mut offset,
+            px(100.),
+            dt
+        ));
+        assert_eq!((offset, pointer), (px(30.), px(60.)));
+
+        pointer = px(108.);
+        assert!(!pan_selection(
+            &mut pointer,
+            px(10.)..px(110.),
+            &mut offset,
+            px(0.),
+            dt
+        ));
+        assert_eq!((offset, pointer), (px(0.), px(108.)));
     }
 }

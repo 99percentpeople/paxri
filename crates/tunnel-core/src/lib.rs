@@ -8,7 +8,7 @@ use tokio::{
     net::TcpStream,
     time::timeout,
 };
-use tunnel_config::{Config, Destination, ServiceTarget};
+use tunnel_config::{Config, Destination, DevicePlatform};
 pub mod reverse;
 
 pub const PROTOCOL: &[u8] = b"tcp-forward/1";
@@ -27,12 +27,14 @@ pub trait Transport: Send + Sync {
 enum Request {
     Open { service: String },
     OpenTcp { target: String },
+    DeviceInfo,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "UPPERCASE")]
+#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 enum Answer {
     Ok,
     Error { code: String },
+    DeviceInfo { platform: DevicePlatform },
 }
 
 async fn read_frame<T: DeserializeOwned>(stream: &mut (impl AsyncRead + Unpin)) -> Result<T> {
@@ -70,6 +72,16 @@ pub async fn open_service<T: Transport>(
     open_destination(transport, peer, &Destination::Service(service.to_owned())).await
 }
 
+pub async fn peer_platform(transport: &impl Transport, peer: &str) -> Result<DevicePlatform> {
+    let mut stream = transport.open(peer).await?;
+    write_frame(&mut stream, &Request::DeviceInfo).await?;
+    match read_frame(&mut stream).await? {
+        Answer::DeviceInfo { platform } => Ok(platform),
+        Answer::Error { code } => bail!("remote device info: {code}"),
+        Answer::Ok => bail!("missing remote device info"),
+    }
+}
+
 async fn open_destination<T: Transport>(
     transport: &T,
     peer: &str,
@@ -88,6 +100,7 @@ async fn open_destination<T: Transport>(
     match read_frame(&mut stream).await? {
         Answer::Error { code } => bail!("remote service {}: {code}", destination.address()),
         Answer::Ok => Ok(stream),
+        Answer::DeviceInfo { .. } => bail!("unexpected device info in service response"),
     }
 }
 
@@ -109,50 +122,6 @@ async fn accept_service(
     write_frame(stream, &Answer::Ok).await?;
     tokio::io::copy_bidirectional(stream, &mut target).await?;
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-const SSHD: &str = "/usr/sbin/sshd";
-
-#[cfg(target_os = "linux")]
-pub async fn check_sshd_configs(config: &Config) -> Result<()> {
-    for (name, service) in &config.services {
-        if let ServiceTarget::OpenSsh { sshd_config } = &service.target {
-            let status = tokio::process::Command::new(SSHD)
-                .args(["-t", "-f"])
-                .arg(sshd_config)
-                .status()
-                .await
-                .with_context(|| format!("check sshd configuration for service {name}"))?;
-            ensure!(
-                status.success(),
-                "sshd rejected {} for service {name}",
-                sshd_config.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn start_sshd(config: &std::path::Path) -> Result<(tokio::net::UnixStream, tokio::process::Child)> {
-    use std::{
-        os::{fd::OwnedFd, unix::net::UnixStream},
-        process::Stdio,
-    };
-    let (gateway, child) = UnixStream::pair()?;
-    gateway.set_nonblocking(true)?;
-    let gateway = tokio::net::UnixStream::from_std(gateway)?;
-    let stdin = OwnedFd::from(child.try_clone()?);
-    let stdout = OwnedFd::from(child);
-    let process = tokio::process::Command::new(SSHD)
-        .args(["-i", "-e", "-f"])
-        .arg(config)
-        .stdin(Stdio::from(stdin))
-        .stdout(Stdio::from(stdout))
-        .kill_on_drop(true)
-        .spawn()?;
-    Ok((gateway, process))
 }
 
 pub async fn serve(
@@ -184,8 +153,25 @@ pub async fn serve(
                 .is_some_and(|p| p.endpoint_id.eq_ignore_ascii_case(authenticated_id))
         })
     };
-    let tcp;
     let authorized = match &request {
+        Request::DeviceInfo => {
+            if config
+                .peers
+                .values()
+                .any(|p| p.endpoint_id.eq_ignore_ascii_case(authenticated_id))
+            {
+                write_frame(
+                    &mut stream,
+                    &Answer::DeviceInfo {
+                        platform: DevicePlatform::current(),
+                    },
+                )
+                .await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+            None
+        }
         Request::Open { service } => config
             .services
             .get(service)
@@ -197,42 +183,22 @@ pub async fn serve(
                 p.endpoint_id.eq_ignore_ascii_case(authenticated_id)
                     && p.ports.connect.contains(target)
             });
-            tcp = ServiceTarget::Tcp(target.clone());
-            if grant {
-                Some(&tcp)
-            } else {
-                config
-                    .services
-                    .values()
-                    .find(|s| {
-                        allowed(s)
-                            && matches!(&s.target, ServiceTarget::Tcp(addr) if addr == target)
-                    })
-                    .map(|s| &s.target)
-            }
+            let published = config
+                .services
+                .values()
+                .any(|s| allowed(s) && &s.target == target);
+            (grant || published).then_some(target)
         }
     };
     let code = match authorized {
         None => "DENIED",
-        Some(ServiceTarget::Tcp(address)) => {
-            match timeout(TARGET_CONNECT, TcpStream::connect(address)).await {
-                Ok(Ok(tcp)) => return accept_service(&mut stream, tcp).await,
-                Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => "TARGET_REFUSED",
-                Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => "TARGET_TIMEOUT",
-                Ok(Err(_)) => "TARGET_UNREACHABLE",
-                Err(_) => "TARGET_TIMEOUT",
-            }
-        }
-        #[cfg(target_os = "linux")]
-        Some(ServiceTarget::OpenSsh { sshd_config }) => match start_sshd(sshd_config) {
-            Ok((socket, _child)) => return accept_service(&mut stream, socket).await,
-            Err(error) => {
-                eprintln!("start sshd: {error:#}");
-                "TARGET_UNREACHABLE"
-            }
+        Some(address) => match timeout(TARGET_CONNECT, TcpStream::connect(address)).await {
+            Ok(Ok(tcp)) => return accept_service(&mut stream, tcp).await,
+            Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => "TARGET_REFUSED",
+            Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => "TARGET_TIMEOUT",
+            Ok(Err(_)) => "TARGET_UNREACHABLE",
+            Err(_) => "TARGET_TIMEOUT",
         },
-        #[cfg(not(target_os = "linux"))]
-        Some(ServiceTarget::OpenSsh { .. }) => "TARGET_UNREACHABLE",
     };
     write_frame(&mut stream, &Answer::Error { code: code.into() }).await?;
     stream.shutdown().await?;

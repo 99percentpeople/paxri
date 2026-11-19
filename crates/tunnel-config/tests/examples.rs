@@ -44,15 +44,10 @@ fn port_rules_have_one_destination_and_remote_listeners_need_a_tcp_target() {
 }
 
 #[test]
-fn sshd_targets_require_linux_and_an_absolute_config_path() {
-    let target = r#""127.0.0.1:3000""#;
-    let relative = HOME.replace(target, r#"{ sshd_config = "sshd_config" }"#);
-    assert!(parse(&relative).is_err());
-    let absolute = HOME.replace(target, r#"{ sshd_config = "/etc/ssh/sshd_config" }"#);
-    assert_eq!(parse(&absolute).is_ok(), cfg!(target_os = "linux"));
-    let typo = HOME.replace(
-        target,
-        r#"{ sshd_config = "/etc/sshd_config", extra = true }"#,
-    );
-    assert!(parse(&typo).is_err());
+fn retired_ssh_entries_are_inert_and_normal_tcp_services_still_work() {
+    let config = parse(&format!("{HOME}\n[peers.laptop.ssh]\nuser='alice'\n[services.legacy]\ntarget={{sshd_config='/old/sshd_config'}}\nallow_peers=['laptop']\n[services.tcp22]\ntarget='127.0.0.1:22'\nallow_peers=['laptop']")).unwrap();
+    assert!(!config.services.contains_key("legacy"));
+    assert!(!config.peers["laptop"].allow_terminal);
+    assert_eq!(config.services["tcp22"].target, "127.0.0.1:22");
+    assert!(parse(&HOME.replace("\"127.0.0.1:3000\"", "{ typo = true }")).is_err());
 }

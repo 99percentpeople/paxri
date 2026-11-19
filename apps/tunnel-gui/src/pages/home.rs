@@ -1,15 +1,43 @@
-use super::short_id;
+use super::{peer_detail, short_id};
 use crate::{
     Dashboard, Workspace,
     components::{
-        ButtonVariant::{Destructive, Primary, Secondary},
-        Icon, ListItem, Ui, actions, heading, page, row,
+        ButtonVariant::{Ghost, Primary, Secondary},
+        Icon, ListItem, Ui, actions, page, row,
     },
 };
 use gpui::{prelude::*, *};
 use tunnel_control::Command;
 
 impl Dashboard {
+    fn copy_pairing_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let code = self.local_code.read(cx).text().to_owned();
+        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+        // Clipboard ownership can change asynchronously. Check the value after the platform event.
+        let dashboard = cx.weak_entity();
+        window.on_next_frame(move |_, cx| {
+            let _ = dashboard.update(cx, |view, cx| {
+                if view.local_code.read(cx).text() != code {
+                    return;
+                }
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                view.copied_feedback = (copied.as_deref() == Some(code.as_str())).then(|| {
+                    cx.spawn(async |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1500))
+                            .await;
+                        let _ = this.update(cx, |view, cx| {
+                            view.copied_feedback = None;
+                            cx.notify();
+                        });
+                    })
+                });
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
     pub(crate) fn home(
         &self,
         ui: Ui,
@@ -17,180 +45,155 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Div {
         let page = page("Home");
-        let Some(s) = &self.status else {
+        let Some(status) = &self.status else {
             return page.child(self.gateway_notice(ui, cx));
         };
-        let mut peers = ui.section("Paired devices");
-        if s.peers.is_empty() {
-            peers = peers.child(ui.muted("No paired devices configured."));
+        let pairing = &status.pairing;
+        let mut card = ui.section("Pair devices");
+        let mut code_actions = actions();
+        if pairing.code.is_some() {
+            let (icon, label) = if self.copied_feedback.is_some() {
+                (Icon::Check, "Copied")
+            } else {
+                (Icon::Copy, "Copy code")
+            };
+            code_actions =
+                code_actions.child(ui.icon_button(Ghost, "copy-code", icon, label).on_click(
+                    cx.listener(|view, _, window, cx| view.copy_pairing_code(window, cx)),
+                ));
         }
-        for (name, id) in &s.peers {
-            let peer = name.clone();
-            let settings_peer = name.clone();
-            let mut info = short_id(id);
-            if let Some(profile) = s.ssh_profiles.get(name) {
-                let login = profile.user.as_deref().unwrap_or("OpenSSH default");
-                info = format!("{login} · {} · {info}", profile.service);
-            }
-            let workspace = workspace.clone();
-            peers = peers.child(ui.separator()).child(
-                ListItem::new(name.clone())
-                    .leading(ui.avatar(name))
-                    .detail(ui.muted(info))
+        code_actions = code_actions.child(
+            ui.icon_button(Ghost, "refresh-code", Icon::Refresh, "Refresh code")
+                .on_click(cx.listener(|v, _, _, cx| {
+                    if !v.saving {
+                        v.send(Command::RefreshPairingCode, cx);
+                    }
+                })),
+        );
+        card = card
+            .child(row().child("Your pairing code").child(code_actions))
+            .when(pairing.code.is_some(), |card| {
+                card.child(self.local_code.clone())
+            });
+        for peer in &pairing.incoming {
+            let approve_request = peer.request_id.clone();
+            let decline_request = peer.request_id.clone();
+            let approve_id = peer.device_id.clone();
+            let decline_id = peer.device_id.clone();
+            card = card.child(ui.separator()).child(
+                ListItem::new(format!("Pair with {}?", peer.name))
+                    .leading(ui.device_icon(peer.platform))
+                    .detail(ui.muted(peer_detail(peer.platform, &peer.device_id)))
                     .trailing(
                         actions()
                             .child(
                                 ui.button(
                                     Secondary,
-                                    SharedString::from(format!("ssh-settings-{name}")),
-                                    "SSH settings",
+                                    SharedString::from(format!("decline-{}", peer.device_id)),
+                                    "Decline",
                                 )
-                                .on_click(
-                                    cx.listener(move |v, _, w, cx| {
-                                        v.edit_ssh(&settings_peer, w, cx)
-                                    }),
-                                ),
+                                .on_click(cx.listener(
+                                    move |v, _, _, cx| {
+                                        if !v.saving {
+                                            v.send(
+                                                Command::AnswerPairing {
+                                                    device_id: decline_id.clone(),
+                                                    request_id: Some(decline_request.clone()),
+                                                    accept: false,
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                )),
                             )
                             .child(
                                 ui.button(
-                                    Secondary,
-                                    SharedString::from(format!("ssh-{name}")),
-                                    "Open SSH",
+                                    Primary,
+                                    SharedString::from(format!("accept-{}", peer.device_id)),
+                                    "Accept",
                                 )
-                                .icon(Icon::Terminal)
-                                .on_click(move |_, w, cx| {
-                                    let _ =
-                                        workspace.update(cx, |v, cx| v.open_terminal(&peer, w, cx));
-                                }),
+                                .on_click(cx.listener(
+                                    move |v, _, _, cx| {
+                                        if !v.saving {
+                                            v.send(
+                                                Command::AnswerPairing {
+                                                    device_id: approve_id.clone(),
+                                                    request_id: Some(approve_request.clone()),
+                                                    accept: true,
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                )),
                             ),
                     ),
             );
-            if let Some(form) = self.ssh_form.as_ref().filter(|f| f.peer == *name) {
-                peers = peers.child(self.ssh_settings(form, ui, cx));
-            }
         }
-        let mut rules = ui
-            .card()
-            .child(row().child(heading("Port forwarding")).when(
-                self.rule.is_none() && !s.peers.is_empty(),
-                |d| {
-                    d.child(
-                        ui.button(Primary, "add-rule", "Add rule")
-                            .icon(Icon::Plus)
-                            .on_click(cx.listener(|v, _, w, cx| v.open_rule(None, w, cx))),
-                    )
-                },
-            ));
-        if let Some(f) = &self.rule {
-            rules = rules
-                .child(ui.separator())
-                .child(self.rule_form(f, s, ui, cx));
-        }
-        if s.forwards.is_empty() && self.rule.is_none() {
-            rules = rules.child(ui.muted(if s.peers.is_empty() {
-                "Configure a paired device to add a forwarding rule."
-            } else {
-                "No forwarding rules yet."
-            }));
-        }
-        for (name, f) in &s.forwards {
-            let edit = name.clone();
-            let toggle = name.clone();
-            let remove = name.clone();
-            let enabled = f.enabled();
-            let rule_actions = div()
-                .flex()
-                .gap_1()
-                .items_center()
-                .child(
-                    ui.button(
-                        Secondary,
-                        SharedString::from(format!("edit-{name}")),
-                        "Edit",
-                    )
-                    .on_click(cx.listener(move |v, _, w, cx| {
-                        if !v.saving {
-                            v.open_rule(Some(&edit), w, cx);
-                        }
-                    })),
-                )
-                .child(
-                    ui.button(
-                        Secondary,
-                        SharedString::from(format!("toggle-{name}")),
-                        if enabled { "Pause" } else { "Resume" },
-                    )
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        v.send(
-                            Command::SetForward {
-                                name: toggle.clone(),
-                                enabled: !enabled,
-                            },
-                            cx,
-                        )
-                    })),
-                )
-                .child(
-                    ui.button(
-                        Secondary,
-                        SharedString::from(format!("remove-{name}")),
-                        "Remove",
-                    )
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        if !v.saving {
-                            v.removing = Some(remove.clone());
-                            v.rule = None;
-                            v.action_error = None;
-                            cx.notify();
-                        }
-                    })),
-                );
-            rules = rules.child(ui.separator()).child(
+        card = card.child(ui.separator());
+        if let Some(id) = &pairing.outgoing {
+            card = card.child(
+                row()
+                    .child(ui.muted(format!("Waiting for {} to confirm…", short_id(id))))
+                    .child(
+                        ui.button(Secondary, "cancel-pairing", "Cancel request")
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                if !v.saving {
+                                    v.send(Command::CancelPairing, cx);
+                                }
+                            })),
+                    ),
+            );
+        } else {
+            card = card.child("Pair with another device").child(
                 row()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                actions()
-                                    .child(name.clone())
-                                    .child(ui.muted(f.state().to_owned())),
-                            )
-                            .child(ui.muted(f.route())),
+                            .flex_1()
+                            .min_w(px(165.))
+                            .child(self.pairing_input.clone()),
                     )
-                    .child(rule_actions),
+                    .child(
+                        ui.button(Primary, "pair-device", "Pair device")
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                if !v.saving {
+                                    let code = v.pairing_input.read(cx).text().trim().to_owned();
+                                    v.send(Command::JoinPairing { code }, cx);
+                                }
+                            })),
+                    ),
             );
-            if self.removing.as_ref() == Some(name) {
-                let name = name.clone();
-                rules = rules.child(
-                    row()
-                        .child(ui.muted(format!("Remove the forwarding rule “{name}”?")))
-                        .child(
-                            actions()
-                                .child(ui.button(Secondary, "cancel-remove", "Cancel").on_click(
-                                    cx.listener(|v, _, _, cx| {
-                                        if !v.saving {
-                                            v.removing = None;
-                                            cx.notify();
-                                        }
-                                    }),
-                                ))
-                                .child(
-                                    ui.button(Destructive, "confirm-remove", "Remove rule")
-                                        .on_click(cx.listener(move |v, _, _, cx| {
-                                            if !v.saving {
-                                                v.send(
-                                                    Command::RemoveForward { name: name.clone() },
-                                                    cx,
-                                                );
-                                            }
-                                        })),
-                                ),
-                        ),
-                );
-            }
         }
-        page.child(peers).child(rules)
+        if let Some(message) = &pairing.message {
+            card = card.child(ui.muted(message.clone()));
+        }
+
+        let mut peers = ui.section("Paired devices");
+        if status.peers.is_empty() {
+            peers = peers.child(ui.muted("No paired devices yet."));
+        }
+        for (name, id) in &status.peers {
+            let platform = status.peer_platform(name);
+            let peer = name.clone();
+            let workspace = workspace.clone();
+            peers = peers.child(ui.separator()).child(
+                ListItem::new(name.clone())
+                    .leading(ui.device_icon(platform))
+                    .detail(ui.muted(peer_detail(platform, id)))
+                    .trailing(
+                        ui.button(
+                            Secondary,
+                            SharedString::from(format!("device-{name}")),
+                            "Device settings",
+                        )
+                        .icon(Icon::Settings)
+                        .on_click(move |_, w, cx| {
+                            let _ = workspace.update(cx, |v, cx| v.open_device(&peer, w, cx));
+                        }),
+                    ),
+            );
+        }
+        page.child(card).child(peers)
     }
 }

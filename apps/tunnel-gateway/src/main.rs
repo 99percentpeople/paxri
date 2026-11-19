@@ -8,6 +8,8 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tunnel_config::{Config, Destination, Direction, Forward};
+mod pairing;
+mod platforms;
 mod settings;
 use settings::SettingsFile;
 use tunnel_control::{Command, ControlListener, ControlStream, ForwardStatus, Status};
@@ -82,6 +84,7 @@ impl Listener {
 }
 
 struct Gateway {
+    pairing: pairing::Pairings,
     config: Arc<Config>,
     file: SettingsFile,
     direct_only: bool,
@@ -91,7 +94,31 @@ struct Gateway {
 }
 
 impl Gateway {
-    async fn set_forward(&mut self, name: &str, enabled: bool) -> Result<()> {
+    fn apply_config(&mut self, config: Config) {
+        self.config = Arc::new(config);
+        self.transport.update_config(self.config.clone());
+    }
+
+    fn check_forward_peer(&self, name: &str, expected: Option<&str>) -> Result<()> {
+        if let Some(peer) = expected {
+            anyhow::ensure!(
+                self.config
+                    .forwards
+                    .get(name)
+                    .is_some_and(|f| f.peer == peer),
+                "Forward {name} no longer belongs to {peer}"
+            );
+        }
+        Ok(())
+    }
+
+    async fn set_forward(
+        &mut self,
+        name: &str,
+        enabled: bool,
+        expected_peer: Option<&str>,
+    ) -> Result<()> {
+        self.check_forward_peer(name, expected_peer)?;
         let rule = self
             .config
             .forwards
@@ -170,6 +197,18 @@ impl Gateway {
     }
 
     async fn change_settings(&mut self, change: Command) -> Result<()> {
+        if let Command::SaveForward {
+            name,
+            expected_peer,
+            ..
+        }
+        | Command::RemoveForward {
+            name,
+            expected_peer,
+        } = &change
+        {
+            self.check_forward_peer(name, expected_peer.as_deref())?;
+        }
         let (text, config) = self.file.prepare(&change)?;
         // Reserve any new port before saving. The active rule survives a bind or disk error.
         let mut replace = false;
@@ -216,28 +255,30 @@ impl Gateway {
                     listener.update_destination(rule);
                 }
             }
-            Command::RemoveForward { name } => {
+            Command::RemoveForward { name, .. } => {
                 if let Some(old) = self.listeners.remove(&name) {
                     old.stop().await;
                 }
             }
             _ => {}
         }
-        self.config = Arc::new(config);
-        self.transport.update_config(self.config.clone());
+        self.apply_config(config);
         Ok(())
     }
 
-    fn status(&self) -> Status {
+    fn status(&mut self) -> Status {
+        let ticket = self.transport.current_ticket().to_string();
         let config = &self.config;
         Status {
+            pairing: self.pairing.status(config.pairing_code.as_deref()),
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),
             device_name: config.device_name.clone(),
-            ssh_profiles: config
+            terminal_access: config
                 .peers
                 .iter()
-                .filter_map(|(name, p)| Some((name.clone(), p.ssh.clone()?)))
+                .filter(|(_, p)| p.allow_terminal)
+                .map(|(name, _)| name.clone())
                 .collect(),
             port_access: config
                 .peers
@@ -245,7 +286,12 @@ impl Gateway {
                 .filter(|(_, p)| !p.ports.connect.is_empty() || !p.ports.listen.is_empty())
                 .map(|(name, p)| (name.clone(), p.ports.clone()))
                 .collect(),
-            ticket: self.transport.ticket(),
+            ticket,
+            peer_platforms: config
+                .peers
+                .iter()
+                .filter_map(|(name, peer)| Some((name.clone(), peer.platform?)))
+                .collect(),
             peers: config
                 .peers
                 .iter()
@@ -254,7 +300,7 @@ impl Gateway {
             services: config
                 .services
                 .iter()
-                .map(|(name, s)| (name.clone(), s.target.to_string()))
+                .map(|(name, s)| (name.clone(), s.target.clone()))
                 .collect(),
             forwards: config
                 .forwards
@@ -302,11 +348,38 @@ async fn handle_client(
             let status = gateway.lock().await.status();
             tunnel_control::respond(&mut socket, Ok(status)).await
         }
-        Command::SetForward { name, enabled } => {
+        Command::RefreshPairingCode
+        | Command::CancelPairing
+        | Command::JoinPairing { .. }
+        | Command::AnswerPairing { .. } => {
+            let mut state = gateway.lock().await;
+            let result = match command {
+                Command::RefreshPairingCode => {
+                    let ticket = state.transport.current_ticket();
+                    state.refresh_pairing(&ticket)
+                }
+                Command::CancelPairing => state.pairing.cancel(),
+                Command::JoinPairing { code } => state.join_pairing(&code, &gateway),
+                Command::AnswerPairing {
+                    device_id,
+                    request_id,
+                    accept,
+                } => state.answer_pairing(&device_id, request_id.as_deref(), accept),
+                _ => unreachable!(),
+            }
+            .map(|_| state.status());
+            drop(state);
+            tunnel_control::respond(&mut socket, result).await
+        }
+        Command::SetForward {
+            name,
+            enabled,
+            expected_peer,
+        } => {
             let result = {
                 let mut gateway = gateway.lock().await;
                 gateway
-                    .set_forward(&name, enabled)
+                    .set_forward(&name, enabled, expected_peer.as_deref())
                     .await
                     .map(|_| gateway.status())
             };
@@ -315,7 +388,7 @@ async fn handle_client(
         Command::SaveForward { .. }
         | Command::RemoveForward { .. }
         | Command::SetDeviceName { .. }
-        | Command::SetSshProfile { .. }
+        | Command::SetTerminalAccess { .. }
         | Command::SetPortAccess { .. } => {
             let result = {
                 let mut gateway = gateway.lock().await;
@@ -326,7 +399,7 @@ async fn handle_client(
             };
             tunnel_control::respond(&mut socket, result).await
         }
-        Command::Connect { peer, service } => {
+        open @ (Command::Connect { .. } | Command::OpenTerminal { .. }) => {
             let (transport, permit) = {
                 let gateway = gateway.lock().await;
                 (
@@ -342,6 +415,28 @@ async fn handle_client(
                 .await;
             };
             drop(management_slot);
+            if let Command::OpenTerminal { peer, size } = open {
+                use tokio::io::AsyncReadExt;
+                let opened = tokio::select! {
+                    result = transport.open_terminal(&peer, size) => result,
+                    _ = socket.read_u8() => return Ok(()),
+                };
+                let (_connection, mut send, mut recv) = match opened {
+                    Ok(connection) => connection,
+                    Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
+                };
+                tunnel_control::respond(&mut socket, Ok(())).await?;
+                let (mut input, mut output) = tokio::io::split(socket);
+                // Closing the tab or the peer's terminal closes the session in both directions.
+                tokio::select! {
+                    r = tokio::io::copy(&mut input, &mut send) => r?,
+                    r = tokio::io::copy(&mut recv, &mut output) => r?,
+                };
+                return Ok(());
+            }
+            let Command::Connect { peer, service } = open else {
+                unreachable!()
+            };
             let stream = match tunnel_core::open_service(&*transport, &peer, &service).await {
                 Ok(stream) => stream,
                 Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
@@ -363,16 +458,16 @@ async fn run(
     let text = std::fs::read_to_string(&options.config)
         .with_context(|| format!("read {}", options.config.display()))?;
     let config = Arc::new(tunnel_config::parse(&text).map_err(anyhow::Error::msg)?);
-    #[cfg(target_os = "linux")]
-    tunnel_core::check_sshd_configs(&config).await?;
     let key = tunnel_native::identity::load(&options.key)?;
     let path = options.ipc.unwrap_or_else(tunnel_control::default_address);
     let control = ControlListener::bind(&path)
         .await
         .with_context(|| format!("bind IPC {}", path.display()))?;
+    let (pair_tx, mut pair_requests) = tokio::sync::mpsc::channel(16);
     let (transport, router) =
-        tunnel_native::gateway::start(key, config.clone(), options.no_relay).await?;
+        tunnel_native::gateway::start(key, config.clone(), options.no_relay, pair_tx).await?;
     let mut gateway = Gateway {
+        pairing: Default::default(),
         config: config.clone(),
         file: SettingsFile {
             path: options.config.canonicalize()?,
@@ -383,8 +478,11 @@ async fn run(
         listeners: BTreeMap::new(),
         streams: Arc::new(Semaphore::new(256)),
     };
+    if let Err(e) = gateway.init_pairing().await {
+        gateway.pairing.message = Some(format!("Pairing code unavailable: {e:#}"));
+    }
     for name in config.forwards.keys() {
-        gateway.set_forward(name, true).await?;
+        gateway.set_forward(name, true, None).await?;
     }
     ready()?;
     eprintln!(
@@ -395,10 +493,12 @@ async fn run(
     let gateway = Arc::new(Mutex::new(gateway));
     let management = Arc::new(Semaphore::new(32));
     let mut clients = JoinSet::new();
+    clients.spawn(platforms::fill_missing(gateway.clone()));
     tokio::pin!(stop);
     let result = loop {
         tokio::select! {
             result = &mut stop => break result,
+            Some(request) = pair_requests.recv() => gateway.lock().await.pairing.receive(request),
             accepted = async {
                 let slot = management.clone().acquire_owned().await?;
                 Ok::<_, anyhow::Error>((control.accept().await?, slot))

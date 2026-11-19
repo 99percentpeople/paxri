@@ -2,6 +2,7 @@ use std::ops::Range;
 
 pub(super) struct TextBuffer<const MULTILINE: bool> {
     pub text: String,
+    pub read_only: bool,
     pub anchor: usize,
     pub cursor: usize,
     pub marked: Option<Range<usize>>,
@@ -30,10 +31,20 @@ impl<const MULTILINE: bool> TextBuffer<MULTILINE> {
     pub fn new(text: &str) -> Self {
         let text = normalize(text, MULTILINE);
         Self {
+            read_only: false,
             anchor: text.len(),
             cursor: text.len(),
             text,
             marked: None,
+        }
+    }
+
+    pub fn read_only(text: &str) -> Self {
+        Self {
+            read_only: true,
+            anchor: 0,
+            cursor: 0,
+            ..Self::new(text)
         }
     }
 
@@ -46,6 +57,9 @@ impl<const MULTILINE: bool> TextBuffer<MULTILINE> {
     }
 
     pub fn replace(&mut self, range: Option<Range<usize>>, value: &str) -> Range<usize> {
+        if self.read_only {
+            return self.cursor..self.cursor;
+        }
         let range = range
             .map(|r| byte_at_utf16(&self.text, r.start)..byte_at_utf16(&self.text, r.end))
             .or_else(|| self.marked.clone())
@@ -84,6 +98,23 @@ mod form_controls {
         input.replace(None, "\rc\nd");
         assert_eq!(input.text, "abcd");
         assert_eq!(input.selection(), 4..4);
+    }
+
+    #[test]
+    fn read_only_input_keeps_text_and_selection_during_edits_and_composition() {
+        let mut buffer = TextBuffer::<false>::read_only("p2p1.α\nβ");
+        assert_eq!(buffer.selection(), 0..0);
+        buffer.anchor = "p2p1.α".len();
+        buffer.cursor = "p2p1.".len();
+        let selection = buffer.selection();
+        buffer.replace(None, "");
+        buffer.replace(None, "pasted");
+        let added = buffer.replace(Some(0..4), "漢");
+        buffer.mark(added, "漢", Some(1..1));
+        assert_eq!(buffer.text, "p2p1.αβ");
+        assert_eq!(buffer.selection(), selection);
+        assert_eq!(&buffer.text[selection], "α");
+        assert!(buffer.marked.is_none());
     }
 
     #[test]

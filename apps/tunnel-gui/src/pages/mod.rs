@@ -1,6 +1,10 @@
+pub(crate) mod device;
 mod home;
+mod peer_settings;
 mod rules;
 mod settings;
+mod terminal_settings;
+pub(crate) use terminal_settings::TerminalSettings;
 
 use crate::{
     Dashboard,
@@ -15,6 +19,10 @@ fn short_id(id: &str) -> String {
     } else {
         id.into()
     }
+}
+
+fn peer_detail(platform: tunnel_control::DevicePlatform, id: &str) -> String {
+    format!("{} · {}", platform.label(), short_id(id))
 }
 
 impl Dashboard {

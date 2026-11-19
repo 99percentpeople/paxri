@@ -220,11 +220,11 @@ struct RemoteSession {
 
 impl RemoteSession {
     async fn bind(transport: &NativeTransport, peer: &str, listen: SocketAddr) -> Result<Self> {
-        let address = &transport.peers.get(peer).context("Unknown peer")?.address;
+        let dest = transport.peer(peer)?;
         timeout(CONNECT_TIMEOUT, async {
             let conn = transport
                 .endpoint
-                .connect(address.clone(), wire::PROTOCOL)
+                .connect(dest.address.clone(), wire::PROTOCOL)
                 .await?;
             let (mut tx, mut rx) = conn.open_bi().await?;
             let bound = wire::request(&mut tx, &mut rx, listen).await?;

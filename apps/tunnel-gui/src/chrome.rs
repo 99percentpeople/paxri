@@ -42,6 +42,19 @@ mod mac {
         None
     }
 
+    // GPUI reports the active window as hovered on macOS, even after the pointer leaves it.
+    pub fn pointer_over_window(w: &Window) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let hit = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
+            NSEvent::mouseLocation(),
+            0,
+            mtm,
+        );
+        with_window(w, |win, _| win.windowNumber()) == Some(hit)
+    }
+
     // AppKit's hit test honors windows from other applications. Skip the
     // moving window only when it actually covers the pointer.
     pub fn tab_dock_sample(
@@ -160,7 +173,14 @@ mod mac {
 pub use mac::hide_system_buttons;
 
 #[cfg(target_os = "macos")]
-pub(super) use mac::{drag as start_tab_window_move, mac_drag_events, tab_dock_sample};
+pub(super) use mac::{
+    drag as start_tab_window_move, mac_drag_events, pointer_over_window, tab_dock_sample,
+};
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn pointer_over_window(window: &Window) -> bool {
+    window.is_window_hovered()
+}
 
 fn caption(content: Div, _w: &mut Window, _cx: &mut App) -> impl IntoElement {
     let area = div()

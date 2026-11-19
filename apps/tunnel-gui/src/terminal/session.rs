@@ -1,25 +1,59 @@
-use anyhow::{Context, Result};
-use async_channel::{Receiver, Sender};
-use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
-use std::{
-    io::{Read, Write},
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
+use async_channel::{Receiver, Sender, TrySendError};
+use std::path::Path;
+use tokio::{runtime::Handle, task::JoinHandle};
+use tunnel_control::terminal::{
+    self as wire,
+    pty::{self, ExitStatus, PtySize},
 };
 
-pub enum Output {
-    Bytes(Vec<u8>),
-    Error(String),
-    Exited(std::io::Result<ExitStatus>),
-}
+pub use pty::Output;
 
 pub struct Session {
-    pub input: Sender<Vec<u8>>,
-    sizes: Sender<PtySize>,
+    pub io: pty::Session,
+    pub input: Input,
+    task: JoinHandle<()>,
+}
+
+// The UI cannot block on a full channel. A queued write waits for its predecessor
+// so a mouse release, key or terminal reply cannot overtake an earlier write.
+pub struct Input {
+    sender: Sender<Vec<u8>>,
+    runtime: Handle,
+    pending: Option<Receiver<()>>,
+}
+
+impl Input {
+    pub fn send(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let previous = self.pending.take().filter(|done| !done.is_closed());
+        let bytes = if previous.is_none() {
+            match self.sender.try_send(bytes) {
+                Ok(()) | Err(TrySendError::Closed(_)) => return,
+                Err(TrySendError::Full(bytes)) => bytes,
+            }
+        } else {
+            bytes
+        };
+        let sender = self.sender.clone();
+        let (done, pending) = async_channel::bounded(1);
+        self.pending = Some(pending);
+        self.runtime.spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.recv().await;
+            }
+            let _ = sender.send(bytes).await;
+            drop(done);
+        });
+    }
+
+    pub fn pending(&self) -> Option<Receiver<()>> {
+        self.pending
+            .as_ref()
+            .filter(|done| !done.is_closed())
+            .cloned()
+    }
 }
 
 impl Session {
@@ -27,102 +61,66 @@ impl Session {
         peer: &str,
         ipc: Option<&Path>,
         size: PtySize,
-    ) -> Result<(Self, Receiver<Output>)> {
-        let cli = std::env::current_exe()?
-            .with_file_name(format!("tunnel{}", std::env::consts::EXE_SUFFIX));
-        let mut cmd = CommandBuilder::new(&cli);
-        // portable-pty merges the Windows registry environment over the
-        // process environment. Use the same SSH search path as the GUI caller.
-        #[cfg(windows)]
-        if let Some(path) = std::env::var_os("PATH") {
-            cmd.env("PATH", path);
-        }
-        if let Some(path) = ipc {
-            cmd.arg("--ipc");
-            cmd.arg(path);
-        }
-        cmd.args(["ssh", "--", peer]);
-        cmd.env("TERM", "xterm-256color");
-        let pair = native_pty_system()
-            .openpty(size)
-            .context("open a terminal")?;
-        let mut reader = pair.master.try_clone_reader()?;
-        let mut writer = pair.master.take_writer()?;
-        let mut child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| format!("start {}", cli.display()))?;
-        drop(pair.slave);
+        runtime: &Handle,
+    ) -> (Self, Receiver<Output>) {
+        let (io, keys, sizes) = pty::Session::channels();
         let (output, events) = async_channel::bounded(32);
-        let ended = Arc::new(AtomicBool::new(false));
-        let (sizes, changes) = async_channel::bounded(1);
-        let mut killer = child.clone_killer();
-        let finished = ended.clone();
-        let control_output = output.clone();
-        // Resizing or closing a Windows pseudoconsole can wait for its clients and
-        // output pipe. Keep the UI free to drain output while that happens.
-        thread::spawn(move || {
-            let master = pair.master;
-            while let Ok(size) = changes.recv_blocking() {
-                if let Err(e) = master.resize(size) {
-                    let _ = control_output.try_send(Output::Error(format!("Resize failed: {e}")));
-                }
+        let address = ipc
+            .map(Path::to_owned)
+            .unwrap_or_else(tunnel_control::default_address);
+        let peer = peer.to_owned();
+        let task = runtime.spawn(async move {
+            let result = async {
+                let stream = tunnel_control::open_terminal(&address, peer, size.into()).await?;
+                wire::client(stream, keys, sizes, &output).await
             }
-            if !finished.load(Ordering::Acquire) {
-                let _ = killer.kill();
-            }
+            .await;
+            let status = result
+                .map(ExitStatus::with_exit_code)
+                .map_err(|e| std::io::Error::other(format!("{e:#}")));
+            let _ = output.send(Output::Exited(status)).await;
         });
-        let exit_output = output.clone();
-        thread::spawn(move || {
-            let status = child.wait();
-            ended.store(true, Ordering::Release);
-            let _ = exit_output.send_blocking(Output::Exited(status));
-        });
-        let errors = output.clone();
-        thread::spawn(move || {
-            let mut buf = [0; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if output
-                            .send_blocking(Output::Bytes(buf[..n].to_vec()))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    // A Unix PTY can report EIO when the last slave closes.
-                    #[cfg(unix)]
-                    Err(e) if e.raw_os_error() == Some(5) => break,
-                    Err(e) => {
-                        let _ = output.send_blocking(Output::Error(e.to_string()));
-                        break;
-                    }
-                }
-            }
-        });
-        let (input, keys) = async_channel::bounded::<Vec<u8>>(128);
-        thread::spawn(move || {
-            while let Ok(data) = keys.recv_blocking() {
-                if let Err(e) = writer.write_all(&data).and_then(|_| writer.flush()) {
-                    let _ = errors.send_blocking(Output::Error(e.to_string()));
-                    break;
-                }
-            }
-        });
-        Ok((Self { input, sizes }, events))
-    }
-
-    pub fn resize(&self, size: PtySize) {
-        let _ = self.sizes.force_send(size);
+        let input = Input {
+            sender: io.input.clone(),
+            runtime: runtime.clone(),
+            pending: None,
+        };
+        (Self { io, input, task }, events)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.input.close();
-        self.sizes.close();
+        self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn backpressure_preserves_input_and_query_reply_order() {
+        let (sender, receiver) = async_channel::bounded(1);
+        let mut input = Input {
+            sender,
+            runtime: Handle::current(),
+            pending: None,
+        };
+        let expected = [
+            b"key".as_slice(),
+            b"\x1b[<0;4;8M",
+            b"\x1b[5;8R",
+            b"\x1b[<0;4;8m",
+        ];
+        for bytes in expected {
+            input.send(bytes.to_vec());
+        }
+        let drained = input.pending().unwrap();
+        for bytes in expected {
+            assert_eq!(receiver.recv().await.unwrap(), bytes);
+        }
+        assert!(drained.recv().await.is_err());
+        assert!(input.pending().is_none());
     }
 }

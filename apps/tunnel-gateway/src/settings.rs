@@ -3,7 +3,7 @@ use std::{fs, io::Write, path::PathBuf};
 use anyhow::{Context, Result, ensure};
 use tempfile::NamedTempFile;
 use toml_edit::{Array, DocumentMut, Table, TableLike, value};
-use tunnel_config::{Config, Destination, Direction};
+use tunnel_config::{Config, Destination, DevicePlatform, Direction};
 use tunnel_control::Command;
 
 pub struct SettingsFile {
@@ -28,7 +28,57 @@ fn subtable<'a>(table: &'a mut dyn TableLike, key: &str) -> Result<&'a mut dyn T
         .context("Expected a settings table")
 }
 
+fn checked_document(doc: DocumentMut) -> Result<(String, Config)> {
+    let text = doc.to_string();
+    let config = tunnel_config::parse(&text).map_err(anyhow::Error::msg)?;
+    Ok((text, config))
+}
+
 impl SettingsFile {
+    pub fn prepare_pairing_code(&self, code: &str) -> Result<(String, Config)> {
+        let mut doc: DocumentMut = self.text.parse()?;
+        doc["pairing_code"] = value(code);
+        checked_document(doc)
+    }
+
+    pub fn prepare_peer(
+        &self,
+        alias: &str,
+        id: &str,
+        ticket: &str,
+        platform: Option<DevicePlatform>,
+    ) -> Result<(String, Config)> {
+        let mut doc: DocumentMut = self.text.parse()?;
+        let peers = subtable(doc.as_table_mut(), "peers")?;
+        let peer = subtable(peers, alias)?;
+        if let Some(existing) = peer.get("endpoint_id") {
+            ensure!(
+                existing
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case(id)),
+                "Device name already belongs to a different identity"
+            );
+        }
+        peer.insert("endpoint_id", value(id));
+        peer.insert("ticket", value(ticket));
+        if let Some(platform) = platform {
+            if platform != DevicePlatform::Unknown || !peer.contains_key("platform") {
+                peer.insert("platform", value(platform.as_str()));
+            }
+        }
+        checked_document(doc)
+    }
+
+    pub fn prepare_peer_platform(
+        &self,
+        alias: &str,
+        platform: DevicePlatform,
+    ) -> Result<(String, Config)> {
+        let mut doc: DocumentMut = self.text.parse()?;
+        peer_table(&mut doc, alias)?.insert("platform", value(platform.as_str()));
+        checked_document(doc)
+    }
+
     /// Edit only the affected fields so comments, aliases and custom settings survive.
     pub fn prepare(&self, change: &Command) -> Result<(String, Config)> {
         let mut doc: DocumentMut = self.text.parse()?;
@@ -39,23 +89,12 @@ impl SettingsFile {
                     doc.remove("device_name");
                 }
             },
-            Command::SetSshProfile { peer, profile } => {
-                let peer = peer_table(&mut doc, peer)?;
-                if let Some(profile) = profile {
-                    let ssh = subtable(peer, "ssh")?;
-                    ssh.insert("service", value(&profile.service));
-                    for (key, entry) in [
-                        ("user", &profile.user),
-                        ("identity_file", &profile.identity_file),
-                    ] {
-                        if let Some(text) = entry {
-                            ssh.insert(key, value(text));
-                        } else {
-                            ssh.remove(key);
-                        }
-                    }
+            Command::SetTerminalAccess { peer, allowed } => {
+                let table = peer_table(&mut doc, peer)?;
+                if *allowed {
+                    table.insert("allow_terminal", value(true));
                 } else {
-                    peer.remove("ssh");
+                    table.remove("allow_terminal");
                 }
             }
             Command::SetPortAccess { peer, ports } => {
@@ -84,6 +123,7 @@ impl SettingsFile {
                 name,
                 edit,
                 rule: forward,
+                ..
             } => {
                 ensure!(
                     !name.trim().is_empty() && !name.chars().any(char::is_control),
@@ -126,7 +166,7 @@ impl SettingsFile {
                 rule.remove(other);
                 rule.insert(key, value(forward.destination.address()));
             }
-            Command::RemoveForward { name } => {
+            Command::RemoveForward { name, .. } => {
                 ensure!(
                     doc.get_mut("forwards")
                         .and_then(|v| v.as_table_like_mut())
@@ -137,9 +177,7 @@ impl SettingsFile {
             }
             _ => anyhow::bail!("Expected a settings change"),
         }
-        let text = doc.to_string();
-        let config = tunnel_config::parse(&text).map_err(anyhow::Error::msg)?;
-        Ok((text, config))
+        checked_document(doc)
     }
 
     pub fn persist(&mut self, text: String) -> Result<()> {
@@ -166,6 +204,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pairing_with_older_peers_preserves_saved_platform_and_grants() -> Result<()> {
+        let id = "ab".repeat(32);
+        let file = SettingsFile {
+            path: PathBuf::new(),
+            text: format!(
+                "version=1\n[peers.lab]\nendpoint_id='{id}'\nplatform='macos'\nallow_terminal=true\n"
+            ),
+        };
+        for reported in [
+            None,
+            Some(DevicePlatform::Unknown),
+            Some(DevicePlatform::Web),
+        ] {
+            let (_, cfg) = file.prepare_peer("lab", &id, "updated-ticket", reported)?;
+            let peer = &cfg.peers["lab"];
+            let expected = if reported == Some(DevicePlatform::Web) {
+                DevicePlatform::Web
+            } else {
+                DevicePlatform::MacOs
+            };
+            assert_eq!(peer.platform, Some(expected));
+            assert!(peer.allow_terminal);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn edit_native_config_and_preserve_external_changes() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("node.toml");
@@ -180,6 +245,7 @@ mod tests {
         };
         let mut rule = Command::SaveForward {
             name: "Web UI".into(),
+            expected_peer: None,
             edit: false,
             rule: tunnel_config::Forward {
                 direction: Direction::Local,
@@ -207,6 +273,7 @@ mod tests {
         }
         let (text, cfg) = file.prepare(&Command::RemoveForward {
             name: "Web UI".into(),
+            expected_peer: None,
         })?;
         assert!(cfg.forwards.is_empty());
         fs::write(&path, "# updated externally\nversion=1\n")?;

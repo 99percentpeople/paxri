@@ -1,9 +1,8 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::{net::SocketAddr, path::Path};
 use tunnel_control::{
-    Command, Destination, Direction, Forward, PortAccess, SshProfile, listen_address, request,
-    tcp_target,
+    Command, Destination, Direction, Forward, PortAccess, listen_address, request, tcp_target,
 };
 
 #[derive(Subcommand)]
@@ -77,15 +76,27 @@ impl ForwardAction {
                     args.name.clone(),
                     Command::SaveForward {
                         name: args.name,
+                        expected_peer: None,
                         edit,
                         rule,
                     },
                 )
             }
-            Self::Remove { name } => (name.clone(), Command::RemoveForward { name }),
-            Self::Resume { name } | Self::Pause { name } => {
-                (name.clone(), Command::SetForward { name, enabled })
-            }
+            Self::Remove { name } => (
+                name.clone(),
+                Command::RemoveForward {
+                    name,
+                    expected_peer: None,
+                },
+            ),
+            Self::Resume { name } | Self::Pause { name } => (
+                name.clone(),
+                Command::SetForward {
+                    name,
+                    enabled,
+                    expected_peer: None,
+                },
+            ),
         };
         let status = request(ipc, command).await?;
         if let Some(f) = status.forwards.get(&name) {
@@ -93,70 +104,6 @@ impl ForwardAction {
         } else {
             println!("Removed {name}");
         }
-        Ok(())
-    }
-}
-
-#[derive(Subcommand)]
-pub enum SshAction {
-    Show {
-        peer: String,
-    },
-    /// Replace the saved settings. Omitted fields use their normal defaults.
-    Set {
-        peer: String,
-        #[arg(short = 'l', long)]
-        user: Option<String>,
-        #[arg(long, default_value = "ssh")]
-        service: String,
-        #[arg(short = 'i', long)]
-        identity: Option<String>,
-    },
-    Reset {
-        peer: String,
-    },
-}
-
-impl SshAction {
-    pub async fn run(self, ipc: &Path) -> Result<()> {
-        let (peer, command) = match self {
-            Self::Set {
-                peer,
-                user,
-                service,
-                identity,
-            } => (
-                peer.clone(),
-                Command::SetSshProfile {
-                    peer,
-                    profile: Some(SshProfile {
-                        user,
-                        service,
-                        identity_file: identity,
-                    }),
-                },
-            ),
-            Self::Reset { peer } => (
-                peer.clone(),
-                Command::SetSshProfile {
-                    peer,
-                    profile: None,
-                },
-            ),
-            Self::Show { peer } => (peer, Command::Status),
-        };
-        let mut status = request(ipc, command).await?;
-        ensure!(status.peers.contains_key(&peer), "Unknown peer {peer}");
-        let profile = status.ssh_profiles.remove(&peer).unwrap_or_default();
-        println!(
-            "Login: {}\nService: {}\nIdentity: {}",
-            profile.user.as_deref().unwrap_or("OpenSSH default"),
-            profile.service,
-            profile
-                .identity_file
-                .as_deref()
-                .unwrap_or("OpenSSH default")
-        );
         Ok(())
     }
 }
@@ -205,6 +152,106 @@ impl PortAction {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        Ok(())
+    }
+}
+
+#[derive(Subcommand)]
+pub enum PairAction {
+    /// Print this device's current pairing code
+    Code,
+    /// Replace this device's code and dismiss requests made with the old code
+    Refresh,
+    /// Request pairing with another device
+    Join { code: String },
+    /// Show pending requests and the last pairing result
+    Status,
+    /// Withdraw this device's outgoing request
+    Cancel,
+    /// Approve the pending request from this device ID
+    Accept { device_id: String },
+    /// Decline the pending request from this device ID
+    Decline { device_id: String },
+}
+
+impl PairAction {
+    pub async fn run(self, ipc: &Path) -> Result<()> {
+        let show_code = matches!(self, Self::Code | Self::Refresh);
+        let command = match self {
+            Self::Code | Self::Status => Command::Status,
+            Self::Refresh => Command::RefreshPairingCode,
+            Self::Join { code } => Command::JoinPairing { code },
+            Self::Cancel => Command::CancelPairing,
+            Self::Accept { device_id } => Command::AnswerPairing {
+                device_id,
+                request_id: None,
+                accept: true,
+            },
+            Self::Decline { device_id } => Command::AnswerPairing {
+                device_id,
+                request_id: None,
+                accept: false,
+            },
+        };
+        let pairing = request(ipc, command).await?.pairing;
+        if show_code {
+            println!(
+                "{}",
+                pairing.code.context(
+                    pairing
+                        .message
+                        .unwrap_or_else(|| "Gateway did not return a pairing code".into())
+                )?
+            );
+            return Ok(());
+        }
+        if pairing.incoming.is_empty() && pairing.outgoing.is_none() && pairing.message.is_none() {
+            println!("No pairing in progress.");
+        }
+        for peer in pairing.incoming {
+            println!(
+                "Approval requested by {} ({} · {})",
+                peer.name,
+                peer.platform.label(),
+                peer.device_id
+            );
+        }
+        if let Some(id) = pairing.outgoing {
+            println!("Waiting for approval from {id}");
+        }
+        if let Some(message) = pairing.message {
+            println!("{message}");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Subcommand)]
+pub enum TerminalAccess {
+    Show { peer: String },
+    Allow { peer: String },
+    Deny { peer: String },
+}
+
+impl TerminalAccess {
+    pub async fn run(self, ipc: &Path) -> Result<()> {
+        let (peer, allowed) = match self {
+            Self::Show { peer } => (peer, None),
+            Self::Allow { peer } => (peer, Some(true)),
+            Self::Deny { peer } => (peer, Some(false)),
+        };
+        let cmd = allowed.map_or(Command::Status, |allowed| Command::SetTerminalAccess {
+            peer: peer.clone(),
+            allowed,
+        });
+        let status = request(ipc, cmd).await?;
+        ensure!(status.peers.contains_key(&peer), "Unknown peer {peer}");
+        let access = if status.terminal_access.contains(&peer) {
+            "allowed"
+        } else {
+            "denied"
+        };
+        println!("Native terminal access for {peer} on this device: {access}");
         Ok(())
     }
 }

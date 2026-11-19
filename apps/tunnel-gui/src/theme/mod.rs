@@ -1,6 +1,8 @@
 //! Appearance is a desktop preference shared by every workspace window in this process.
 mod palette;
+mod terminal;
 pub use palette::{Palette, TerminalPalette};
+pub use terminal::{CursorShape, TerminalAppearance, TerminalScheme};
 
 use anyhow::{Context as _, Result};
 use gpui::{App, Global, Pixels, Window, WindowAppearance, px};
@@ -40,13 +42,6 @@ impl Appearance {
         }
     }
 
-    fn path() -> Result<PathBuf> {
-        Ok(dirs::config_dir()
-            .context("cannot find the user configuration directory")?
-            .join("p2p-tunnel")
-            .join("appearance"))
-    }
-
     fn load(path: &Path) -> Result<Self> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -60,16 +55,11 @@ impl Appearance {
     }
 
     fn save(self, path: &Path) -> Result<()> {
-        let dir = path.parent().context("missing preference directory")?;
-        fs::create_dir_all(dir)?;
-        let mut file = NamedTempFile::new_in(dir)?;
-        writeln!(file, "{}", self.label())?;
-        file.persist(path)?;
-        Ok(())
+        save_preference(path, &format!("{}\n", self.label()))
     }
 
     pub fn init(cx: &mut App) {
-        let mode = Self::path()
+        let mode = preference_path("appearance")
             .and_then(|path| Self::load(&path))
             .unwrap_or_else(|err| {
                 eprintln!("Load appearance: {err}");
@@ -80,7 +70,7 @@ impl Appearance {
 
     pub fn apply(self, cx: &mut App) -> Result<()> {
         if *cx.global::<Self>() != self {
-            self.save(&Self::path()?)?;
+            self.save(&preference_path("appearance")?)?;
             cx.set_global(self);
             cx.refresh_windows();
         }
@@ -96,6 +86,22 @@ impl Appearance {
             _ => &palette::LIGHT,
         }
     }
+}
+
+fn preference_path(name: &str) -> Result<PathBuf> {
+    Ok(dirs::config_dir()
+        .context("cannot find the user configuration directory")?
+        .join("p2p-tunnel")
+        .join(name))
+}
+
+fn save_preference(path: &Path, contents: &str) -> Result<()> {
+    let dir = path.parent().context("missing preference directory")?;
+    fs::create_dir_all(dir)?;
+    let mut file = NamedTempFile::new_in(dir)?;
+    file.write_all(contents.as_bytes())?;
+    file.persist(path)?;
+    Ok(())
 }
 
 pub fn palette(window: &Window, cx: &App) -> &'static Palette {

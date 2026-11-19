@@ -7,7 +7,8 @@
 ```text
 管理     CLI / GPUI ── 本机 IPC ── tunnel-gateway
 原生     本机应用 ── TCP ── tunnel-gateway A ══ iroh ══ tunnel-gateway B ── TCP ── 目标服务
-SSH      OpenSSH ── tunnel connect ── IPC ── 网关 A ══ iroh ══ Linux 网关 B ── sshd -i
+终端     CLI / GPUI ── IPC ── 网关 A ══ p2p-terminal/1 ══ 网关 B ── PTY ── 本机 shell
+终端     CLI / GPUI ── IPC ── 网关 A ══ iroh ══ 网关 B ── PTY / ConPTY
 未来 Web 浏览器内的应用 ══ WebRTC DataChannel ══ tunnel-gateway B ── TCP ── 目标服务
 ```
 
@@ -62,7 +63,7 @@ Start-Service P2PTunnelGateway
 
 ## CLI 与 GUI 的共同接口
 
-CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已实现状态查询、导出票据和逐条暂停或恢复监听。暂停释放监听端口并保留已有流，重启会按 TOML 恢复规则。主页通过本机 IPC 创建、修改和删除转发规则，设置页可以保存或清除 TOML 顶层的 `device_name`。网关校验配置并预绑定本地端口，再原子替换配置文件。远端端口由对方网关授权并绑定，主页显示实际地址或最近的绑定错误。同一监听地址修改目标只影响新连接。每个对端的 SSH 配置和 TCP 端口授权可通过 CLI 或 GUI 在线保存。设备配对和命名服务定义在 TOML 中，重启加载。下表记录后续管理协议的目标。当前已经实现的命令见[项目首页](../README.md)。
+CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已实现状态查询、导出票据和逐条暂停或恢复监听。暂停释放监听端口并保留已有流，重启会按 TOML 恢复规则。主页负责配对和设备列表，每台设备的设置标签通过本机 IPC 创建、修改和删除该设备的转发规则，设置页可以保存或清除 TOML 顶层的 `device_name`。网关校验配置并预绑定本地端口，再原子替换配置文件。远端端口由对方网关授权并绑定，设备页显示实际地址或最近的绑定错误。同一监听地址修改目标只影响新连接。每个对端的 终端授权和 TCP 端口授权可通过 CLI 或 GUI 在线保存。新配对的设备由两端网关在线写入并加载，手工编辑的命名服务在重启时加载。下表记录后续管理协议的目标。当前已经实现的命令见[项目首页](../README.md)。
 
 | 操作 | 后台行为 |
 | --- | --- |
@@ -73,7 +74,7 @@ CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已�
 
 网关串行处理设置变更，本地预绑定或写盘失败时保留原有规则。保存的远端监听在对端可用时生效。各工作区窗口共用一个网关控制器，每个窗口维护自己的标签列表，每次显示一个选中的页面。启动时打开 Home，通过菜单打开 Settings，点击标签上的 × 可关闭。后续计划通过拖动标签在同一窗口内分屏。设备终端由其标签持有，跨窗口拖动会保留会话、终端内容和选区，关闭标签后释放对应的 PTY。
 
-管理员也可以停止后台、手工修改 TOML，再启动加载。设备私钥与配置分开保存，本机管理接口只导出公开配对信息。已有探测用密钥由管理员显式选用或导入。已配置的身份读取失败时应报错并保留原文件。
+管理员也可以停止后台、手工修改 TOML，再启动加载。设备私钥与配置分开保存，本机管理接口可以读取或手动刷新设备配对码，私钥始终由网关持有。已有探测用密钥由管理员显式选用或导入。已配置的身份读取失败时应报错并保留原文件。
 
 ### GPUI 组件与主题
 
@@ -81,7 +82,7 @@ CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已�
 
 表单用 `Input::new` 编辑单行文本，用 `Textarea::new` 编辑多行文本，两者通过 `text()` 读取内容。`Select::new(id, value, on_change)` 接收当前值，通过 `.option(value, label)` 添加选项。Select 复用 Dropdown 的触发器、键盘导航和弹层。主题选择器使用 `.icon_trigger(icon, tooltip)`，菜单在当前模式旁显示勾选标记。
 
-每个原生窗口创建一个 `DockState::new(DockSettings::default(), window, cx)`。渲染时用 `DockHeader`、`DockTabs` 和 `DockPanel` 组合布局，每个标签使用稳定的键。Home 和 Settings 使用各自的滚动容器，SSH 终端用 `DockPanel::fill` 填满剩余空间并处理自己的滚动。
+每个原生窗口创建一个 `DockState::new(DockSettings::default(), window, cx)`。渲染时用 `DockHeader`、`DockTabs` 和 `DockPanel` 组合布局，每个标签使用稳定的键。Home、Settings 和每台设备的设置页使用各自的滚动容器，原生终端用 `DockPanel::fill` 填满剩余空间并处理自己的滚动。
 
 ```rust
 let header = DockHeader::new("P2P Tunnel", status, menu);
@@ -113,18 +114,17 @@ Dropdown::new(&menu, trigger, content)
 
 ## 按服务名直接开流
 
-应用用「对端设备 + 服务名」寻址，例如设备 `home` 上的 `ssh`。TCP 监听器和本机 IPC 都通过 `open_service` 请求同一项服务。目标设备先根据已认证的对端身份检查 `allow_peers`，再连接 TCP 目标或启动 SSH 服务。两种入口和两种目标可以独立组合。[原生开流握手](native-protocol.md#线上消息)
+TCP 监听器和本机 IPC 都可用「对端设备 + 服务名」打开已发布的 TCP 目标。目标网关核验设备公钥和访问授权，再连接服务地址。[原生开流握手](native-protocol.md#线上消息)
 
 | 使用方式 | 发起端如何取得流 | 目标设备如何处理流 |
 | --- | --- | --- |
-| 现有 SSH 转发 | SSH 客户端连接本机监听地址，例如 `127.0.0.1:2222` | 网关连接已经监听的 `127.0.0.1:22` |
-| SSH 终端 | `tunnel ssh alice@home` 调用系统 OpenSSH，通过本机网关开流。GPUI 在以配对设备命名的工作区标签中运行同一 CLI，标签可携带会话移入其他窗口，使用本地 PTY（Windows 上为 ConPTY）传递输入、输出和窗口尺寸 | 可以继续使用现有的 TCP 目标 |
-| 无端口 SSH 服务 | 复用同一个命令行入口 | Linux 网关授权后启动 `sshd -i`，通过独占的 Unix socketpair 交付本次连接 |
+| TCP 转发 | 客户端连接本机监听地址，例如 `127.0.0.1:8080` | 网关连接已发布的 TCP 服务 |
+| 原生终端 | `tunnel shell <peer>` 或设备页的 **Open terminal** 经本机 IPC 打开对端网关的 PTY。设备身份和逐对端授权用于鉴权，窗口尺寸直接传给主机 | Unix PTY 和 Windows ConPTY |
 | 规划的 Web 应用 | 浏览器应用通过 WebRTC DataChannel 打开指定设备的服务 | 网关将流交给应用内的处理器，例如 HTTP/1.1 处理器，也可转给已有 TCP 服务 |
 
-`tunnel connect <peer> <service>` 通过本机 IPC 请求常驻网关开流。CLI 将错误写到标准错误，标准输出专用于业务字节。远端接受服务后，网关在 IPC 回复成功并切换到数据模式。每帧由 4 字节大端长度和至多 32 KiB 的数据组成，零长度表示当前发送方向的 EOF。另一方向可继续发送。SSH 处理器使用自己的主机密钥，并负责用户认证和登录权限。[OpenSSH ProxyCommand](https://man.openbsd.org/ssh_config#ProxyCommand)
+`tunnel connect <peer> <service>` 通过本机 IPC 请求常驻网关开流。CLI 将错误写到标准错误，标准输出专用于业务字节。远端接受服务后，网关在 IPC 回复成功并切换到数据模式。每帧由 4 字节大端长度和至多 32 KiB 的数据组成，零长度表示当前发送方向的 EOF。另一方向可继续发送。
 
-虚拟化的是 SSH、HTTP 等业务的入口，网关仍需网络套接字来建立直连或使用中继。浏览器内的应用可以显式读写 DataChannel。如果希望普通网页用地址栏或标准 `fetch()` 访问隧道内服务，则需提供浏览器可访问的 HTTP(S) 入口。[WebRTC DataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
+命名服务可以承载 HTTP 等 TCP 业务，网关仍需网络套接字来建立直连或使用中继。浏览器内的应用可以显式读写 DataChannel。如果希望普通网页用地址栏或标准 `fetch()` 访问隧道内服务，则需提供浏览器可访问的 HTTP(S) 入口。[WebRTC DataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
 
 ## 工作区与落地顺序
 
@@ -134,5 +134,6 @@ Dropdown::new(&menu, trigger, content)
 | 已有 | `apps/tunnel-cli`、`apps/tunnel-gui` | CLI 与 GPUI 使用相同管理协议获取运行状态、导出票据、暂停或恢复转发。CLI 还提供独立探测。 |
 | 已有 | `crates/tunnel-control` | 版本化的请求和快照，基于 Unix socket 或 Windows 本机命名管道。 |
 | 已有 | `crates/tunnel-config`、`crates/tunnel-core` | TOML 校验以及独立于 iroh 的传输接口、服务授权、协议帧和 TCP 字节转发。 |
+| 已有 | `crates/tunnel-terminal` | 交互终端的二进制帧、窗口尺寸、退出状态和跨平台 PTY 生命周期。 |
 | 已有 | `crates/tunnel-native` | iroh 适配器，按设备复用 QUIC 会话，处理入站流和独立诊断探测。 |
 | 规划 | WebRTC 适配器与 Web 客户端 | 接入相同的流协议，增加信令入口并按需部署 TURN。 |
