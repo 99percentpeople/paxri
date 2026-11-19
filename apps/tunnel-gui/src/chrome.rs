@@ -1,10 +1,8 @@
 //! Client-drawn window frames shared by workspaces and device terminals.
+use crate::components::Ui;
 use gpui::{prelude::*, *};
 
 pub(super) const TITLEBAR_HEIGHT: f32 = 40.;
-
-const BAR: u32 = 0xe3ebeb;
-const FOREGROUND: u32 = 0x20383e;
 
 pub fn window_options(title: &str, dimensions: Size<Pixels>, cx: &App) -> WindowOptions {
     WindowOptions {
@@ -228,7 +226,7 @@ enum Control {
 }
 
 impl Control {
-    fn button(self, maximized: bool) -> Stateful<Div> {
+    fn button(self, maximized: bool, ui: Ui) -> Stateful<Div> {
         let (id, paths): (_, &[&[(f32, f32)]]) = match self {
             Self::Minimize => ("minimize-window", &[&[(1., 7.), (11., 7.)]]),
             Self::Maximize if maximized => (
@@ -272,10 +270,12 @@ impl Control {
             .flex()
             .items_center()
             .justify_center()
-            .text_color(rgb(FOREGROUND))
+            .text_color(rgb(ui.colors.chrome.foreground))
             .hover(move |s| match self {
-                Self::Close => s.bg(rgb(0xbf3434)).text_color(gpui::white()),
-                _ => s.bg(rgb(0xccdada)),
+                Self::Close => s
+                    .bg(rgb(ui.colors.destructive.background))
+                    .text_color(rgb(ui.colors.destructive.foreground)),
+                _ => s.bg(rgb(ui.colors.secondary_hover)),
             })
             .child(icon);
         match self {
@@ -294,9 +294,10 @@ impl Control {
 }
 
 pub fn titlebar(
+    ui: Ui,
     leading: impl IntoElement,
     caption_content: Div,
-    actions: Div,
+    actions: impl IntoElement,
     w: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -313,10 +314,10 @@ pub fn titlebar(
         .flex_none()
         .flex()
         .items_center()
-        .bg(rgb(BAR))
-        .text_color(rgb(FOREGROUND))
+        .bg(rgb(ui.colors.chrome.background))
+        .text_color(rgb(ui.colors.chrome.foreground))
         .border_b_1()
-        .border_color(rgb(super::BORDER))
+        .border_color(rgb(ui.colors.border))
         .child(leading)
         .child(caption(caption_content, w, cx))
         .child(actions)
@@ -328,12 +329,12 @@ pub fn titlebar(
                     .flex()
                     .items_center()
                     .when(supported.minimize, |d| {
-                        d.child(Control::Minimize.button(false))
+                        d.child(Control::Minimize.button(false, ui))
                     })
                     .when(supported.maximize, |d| {
-                        d.child(Control::Maximize.button(w.is_maximized()))
+                        d.child(Control::Maximize.button(w.is_maximized(), ui))
                     })
-                    .child(Control::Close.button(false)),
+                    .child(Control::Close.button(false, ui)),
             )
         })
 }

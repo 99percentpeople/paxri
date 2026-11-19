@@ -8,82 +8,6 @@ pub(super) use windows::prepare_detached_window;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod x11;
 
-// Distances are in GPUI logical pixels and scale with the display.
-const DETACH_DISTANCE: Pixels = px(24.);
-
-#[derive(Clone)]
-pub(super) struct TabDrag {
-    pub page: Page,
-    pub previous_active: Page,
-    pub offset: Point<Pixels>,
-    pub cursor: Point<Pixels>,
-}
-
-impl TabDrag {
-    pub(super) fn projected(
-        &self,
-        mut bounds: Bounds<Pixels>,
-        layout: &TabLayout,
-        axis: Axis,
-    ) -> Bounds<Pixels> {
-        if let Some((_, first)) = layout.tabs.first() {
-            let desired = (self.cursor - self.grab_in(bounds)).along(axis);
-            let start = first.origin.along(axis).max(layout.zone.origin.along(axis));
-            let end = layout.zone.bottom_right().along(axis) - bounds.size.along(axis);
-            bounds.origin = bounds
-                .origin
-                .apply_along(axis, |_| desired.clamp(start, end.max(start)));
-        }
-        bounds
-    }
-
-    fn grab_in(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
-        point(
-            self.offset.x.clamp(px(0.), bounds.size.width),
-            self.offset.y.clamp(px(0.), bounds.size.height),
-        )
-    }
-
-    pub(super) fn order(&self, pages: &[Page], layout: &TabLayout, axis: Axis) -> Vec<Page> {
-        let mut order: Vec<_> = pages
-            .iter()
-            .filter(|page| **page != self.page)
-            .cloned()
-            .collect();
-        // A move or release may arrive before the receiver's first layout.
-        let Some(slot) = layout.bounds(&self.page) else {
-            if let Some(index) = layout.insertion(self.cursor, axis) {
-                order.insert(index.min(order.len()), self.page.clone());
-                return order;
-            }
-            return pages.to_vec();
-        };
-        let projected = self.projected(slot, layout, axis);
-        // Cross a neighbour's midpoint with the leading edge of the moving tab,
-        // including when the two tabs have different widths.
-        let index = layout
-            .tabs
-            .iter()
-            .filter(|(page, bounds)| {
-                if *page == self.page {
-                    return false;
-                }
-                let edge = if bounds.origin.along(axis) < slot.origin.along(axis) {
-                    projected.origin
-                } else {
-                    projected.bottom_right()
-                };
-                // The pointer can enter trailing space while the grabbed tab
-                // still overlaps the last neighbour.
-                self.cursor.along(axis) >= bounds.bottom_right().along(axis)
-                    || edge.along(axis) > bounds.center().along(axis)
-            })
-            .count();
-        order.insert(index.min(order.len()), self.page.clone());
-        order
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct DropPlacement {
     pub display: DisplayId,
@@ -122,35 +46,6 @@ impl DropPlacement {
     }
 }
 
-fn window_grab_offset(grab: Point<Pixels>, sidebar: bool) -> Point<Pixels> {
-    point(
-        grab.x.clamp(px(0.), px(96.)) + px(4.),
-        grab.y.clamp(px(0.), px(31.)) + px(4. + if sidebar { chrome::TITLEBAR_HEIGHT } else { 0. }),
-    )
-}
-
-fn leaves_strip(
-    cursor: Point<Pixels>,
-    strip: Bounds<Pixels>,
-    viewport: Size<Pixels>,
-    sidebar: bool,
-) -> bool {
-    // Crossing the titlebar or the empty part of a sidebar along its length
-    // keeps the drag in the same window.
-    let area = if sidebar {
-        Bounds::new(
-            point(strip.left(), px(0.)),
-            size(strip.size.width, viewport.height),
-        )
-    } else {
-        Bounds::new(
-            point(px(0.), strip.top()),
-            size(viewport.width, strip.size.height),
-        )
-    };
-    !area.dilate(DETACH_DISTANCE).contains(&cursor)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DragEvent {
     Moved,
@@ -180,15 +75,34 @@ pub(super) struct DragWatch {
 }
 
 impl Workspace {
-    fn detached_tab_indent(&self, page: &Page) -> Pixels {
-        let Some((_, first)) = self.tab_layout.tabs.first() else {
-            return px(0.);
-        };
-        self.tab_layout.bounds(page).map_or(px(0.), |slot| {
-            (slot.origin - first.origin)
-                .along(self.tab_axis())
-                .max(px(0.))
-        })
+    pub(super) fn begin_tab_drag(
+        &mut self,
+        drag: &DraggedTab,
+        offset: Point<Pixels>,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor = w.mouse_position();
+        if let Some(bounds) = self.dock.read(cx).bounds(&drag.page) {
+            let (grab, previous_active) = self.tab_press.take().map_or_else(
+                || (offset, self.active.clone()),
+                |press| (press.position - bounds.origin, press.previous_active),
+            );
+            self.dragged_tab = Some(TabDrag {
+                page: drag.page.clone(),
+                previous_active,
+                offset: grab,
+                cursor,
+            });
+            cx.notify();
+        }
+        // GPUI installs its drag after this callback. Process the first movement
+        // even when the next input is already mouse-up.
+        let source = cx.weak_entity();
+        let drag = drag.clone();
+        w.defer(cx, move |w, cx| {
+            let _ = source.update(cx, |v, cx| v.update_tab_drag(drag, cursor, w, cx));
+        });
     }
 
     fn watch_drag<G: 'static>(
@@ -341,21 +255,14 @@ impl Workspace {
             return false;
         };
         tab.cursor = cursor;
-        if !single
-            && !leaves_strip(
-                cursor,
-                self.tab_layout.zone,
-                w.viewport_size(),
-                self.sidebar,
-            )
-        {
+        if !single && !self.dock.read(cx).leaves_strip(cursor, w.viewport_size()) {
             self.dragged_tab = Some(tab);
             cx.notify();
             return true;
         }
         self.dragged_tab = None;
         let page = tab.page.clone();
-        if let Some(bounds) = self.tab_layout.bounds(&page) {
+        if let Some(bounds) = self.dock.read(cx).bounds(&page) {
             tab.offset = tab.grab_in(bounds);
         }
         cx.stop_active_drag(w);
@@ -401,14 +308,17 @@ impl Workspace {
         #[cfg(not(target_os = "macos"))]
         {
             let source = drag.source;
-            let offset = if let Some(bounds) = self.tab_layout.bounds(&page) {
+            let offset = if let Some(bounds) = self.dock.read(cx).bounds(&page) {
                 bounds.origin + tab.offset
             } else {
-                window_grab_offset(tab.offset, self.sidebar)
+                self.dock
+                    .read(cx)
+                    .settings()
+                    .window_grab_offset(tab.offset, w.viewport_size().width)
             };
             let placement = DropPlacement::at(cursor, offset, w, cx);
             if !single {
-                let indent = self.detached_tab_indent(&page);
+                let indent = self.dock.read(cx).indent(&page);
                 #[cfg(windows)]
                 windows::tear_off(tab, placement, Some(offset), indent, w, cx);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -450,7 +360,7 @@ impl Workspace {
         match Self::open(
             self.dashboard.clone(),
             first,
-            self.sidebar,
+            self.dock.read(cx).settings(),
             WorkspaceWindow::Detached {
                 placement,
                 tab_indent: px(0.),
@@ -479,7 +389,7 @@ impl Workspace {
                     });
                     cx.notify();
                 });
-                self.tab_indent = self.detached_tab_indent(&page);
+                self.tab_indent = self.dock.read(cx).indent(&page);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 {
                     self.wayland_move_left_surface = false;
@@ -518,16 +428,19 @@ impl Workspace {
         tab.cursor = cursor;
         cx.stop_active_drag(w);
         if self.tabs.len() > 1
-            && leaves_strip(
-                tab.cursor,
-                self.tab_layout.zone,
-                w.viewport_size(),
-                self.sidebar,
-            )
+            && self
+                .dock
+                .read(cx)
+                .leaves_strip(tab.cursor, w.viewport_size())
         {
             // The window system can coalesce a final move into mouse-up.
-            let offset = self.tab_layout.bounds(&tab.page).map_or_else(
-                || window_grab_offset(tab.offset, self.sidebar),
+            let offset = self.dock.read(cx).bounds(&tab.page).map_or_else(
+                || {
+                    self.dock
+                        .read(cx)
+                        .settings()
+                        .window_grab_offset(tab.offset, w.viewport_size().width)
+                },
                 |bounds| bounds.origin + tab.grab_in(bounds),
             );
             let placement = DropPlacement::at(tab.cursor, offset, w, cx);
@@ -541,7 +454,7 @@ impl Workspace {
             #[cfg(not(windows))]
             self.detach(tab.page, placement, px(0.), w, cx);
         } else {
-            self.tabs = tab.order(&self.tabs, &self.tab_layout, self.tab_axis());
+            tab.reorder(&mut self.tabs, self.dock.read(cx), |page| page);
             self.select(tab.page, cx);
             self.refresh_title(w);
             self.focus_content(w, cx);
@@ -551,8 +464,6 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{leaves_strip, window_grab_offset};
-    use gpui::{Axis, Bounds, point, px, size};
 
     #[test]
     fn release_or_cancel_supersedes_queued_motion() {
@@ -571,131 +482,5 @@ mod tests {
             assert!(rx.try_recv() == Ok(end));
             assert!(rx.is_closed() && rx.is_empty());
         }
-    }
-
-    #[test]
-    fn tearing_off_requires_clearance() {
-        let viewport = size(px(900.), px(650.));
-        let top = Bounds::new(point(px(0.), px(0.)), size(px(280.), px(40.)));
-        assert!(!leaves_strip(
-            point(px(850.), px(60.)),
-            top,
-            viewport,
-            false
-        ));
-        assert!(!leaves_strip(
-            point(px(-15.), px(17.)),
-            top,
-            viewport,
-            false
-        ));
-        assert!(leaves_strip(point(px(95.), px(65.)), top, viewport, false));
-        assert!(leaves_strip(point(px(-25.), px(17.)), top, viewport, false));
-        let side = Bounds::new(point(px(0.), px(40.)), size(px(142.), px(610.)));
-        assert!(!leaves_strip(
-            point(px(164.), px(570.)),
-            side,
-            viewport,
-            true
-        ));
-        assert!(leaves_strip(
-            point(px(167.), px(210.)),
-            side,
-            viewport,
-            true
-        ));
-    }
-
-    #[test]
-    fn dragging_into_blank_space_tracks_the_pointer_and_appends_on_release() {
-        use super::{Page, TabDrag, TabLayout};
-        let mut layout = TabLayout {
-            zone: Bounds::new(point(px(0.), px(0.)), size(px(500.), px(40.))),
-            tabs: vec![
-                (
-                    Page::Home,
-                    Bounds::new(point(px(4.), px(4.)), size(px(96.), px(31.))),
-                ),
-                (
-                    Page::Settings,
-                    Bounds::new(point(px(104.), px(4.)), size(px(120.), px(31.))),
-                ),
-            ],
-        };
-        let mut drag = TabDrag {
-            page: Page::Home,
-            previous_active: Page::Home,
-            offset: point(px(40.), px(12.)),
-            cursor: point(px(355.), px(37.)),
-        };
-        let pages = [Page::Home, Page::Settings];
-        let home = layout.bounds(&Page::Home).unwrap();
-        let axis = Axis::Horizontal;
-        let preview = drag.projected(home, &layout, axis);
-        assert_eq!(preview.origin, point(px(315.), px(4.)));
-        assert!(preview.left() > layout.bounds(&Page::Settings).unwrap().right());
-        assert!(drag.order(&pages, &layout, axis) == [Page::Settings, Page::Home]);
-        drag.cursor.x = px(650.);
-        assert_eq!(
-            drag.projected(home, &layout, axis).right(),
-            layout.zone.right()
-        );
-        drag.cursor.x = px(-8.);
-        assert_eq!(drag.projected(home, &layout, axis), home);
-        assert!(drag.order(&pages, &layout, axis) == pages);
-
-        // Home is the only other tab when Settings arrives at its right edge.
-        drag.page = Page::Settings;
-        drag.offset.x = px(110.);
-        drag.cursor.x = home.right() + px(1.);
-        assert!(drag.order(&pages, &layout, axis) == pages);
-
-        // The button can be released at a new location before Settings has a slot.
-        layout.tabs.pop();
-        assert!(drag.order(&pages, &layout, axis) == pages);
-        drag.cursor.x = home.left();
-        assert!(drag.order(&pages, &layout, axis) == [Page::Settings, Page::Home]);
-    }
-
-    #[test]
-    fn sidebar_preview_can_reach_the_bottom_and_drop_last() {
-        use super::{Page, TabDrag, TabLayout};
-        let slot = |y| Bounds::new(point(px(4.), px(y)), size(px(134.), px(31.)));
-        let home = slot(44.);
-        let layout = TabLayout {
-            zone: Bounds::new(point(px(0.), px(40.)), size(px(142.), px(480.))),
-            tabs: vec![(Page::Home, home), (Page::Settings, slot(79.))],
-        };
-        let pages = [Page::Home, Page::Settings];
-        let axis = Axis::Vertical;
-        let mut drag = TabDrag {
-            page: Page::Home,
-            previous_active: Page::Home,
-            offset: point(px(40.), px(28.)),
-            cursor: point(px(65.), px(390.)),
-        };
-        assert_eq!(drag.projected(home, &layout, axis), slot(362.));
-        assert!(drag.order(&pages, &layout, axis) == [Page::Settings, Page::Home]);
-        drag.cursor.y = layout.zone.bottom() - px(1.);
-        assert_eq!(
-            drag.projected(home, &layout, axis).bottom(),
-            layout.zone.bottom()
-        );
-        drag.cursor.y = layout.zone.top();
-        assert_eq!(drag.projected(home, &layout, axis), home);
-        assert!(drag.order(&pages, &layout, axis) == pages);
-
-        // An incoming tab grabbed near its bottom still docks after Home
-        // when the pointer is just below Home's slot.
-        drag.page = Page::Settings;
-        drag.cursor.y = home.bottom() + px(1.);
-        assert!(drag.order(&pages, &layout, axis) == pages);
-    }
-
-    #[test]
-    fn floating_tab_keeps_the_pointer_over_its_label() {
-        let grab = point(px(35.), px(15.));
-        assert_eq!(window_grab_offset(grab, false), point(px(39.), px(19.)));
-        assert_eq!(window_grab_offset(grab, true), point(px(39.), px(59.)));
     }
 }

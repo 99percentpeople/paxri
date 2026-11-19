@@ -75,6 +75,38 @@ CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已�
 
 管理员也可以停止后台、手工修改 TOML，再启动加载。设备私钥与配置分开保存，本机管理接口只导出公开配对信息。已有探测用密钥由管理员显式选用或导入。已配置的身份读取失败时应报错并保留原文件。
 
+### GPUI 组件与主题
+
+`apps/tunnel-gui/src/theme/palette.rs` 定义浅色和深色的语义颜色，包括成对的背景和前景、交互状态及终端 ANSI 调色板。共用间距和圆角在 `theme/mod.rs`。页面渲染时从当前窗口取得 `Ui`，用 `ui.section`、`ui.button`、`ui.icon_button` 和 `ui.labeled` 等组件组合页面。输入框、菜单、真实标签与拖动预览都使用同一套组件。新增控件或交互状态时，先复用已有颜色角色，需要新角色时同时填写两套调色板。
+
+表单用 `Input::new` 编辑单行文本，用 `Textarea::new` 编辑多行文本，两者通过 `text()` 读取内容。`Select::new(id, value, on_change)` 接收当前值，通过 `.option(value, label)` 添加选项。Select 复用 Dropdown 的触发器、键盘导航和弹层。主题选择器使用 `.icon_trigger(icon, tooltip)`，菜单在当前模式旁显示勾选标记。
+
+每个原生窗口创建一个 `DockState::new(DockSettings::default(), window, cx)`。渲染时用 `DockHeader`、`DockTabs` 和 `DockPanel` 组合布局，每个标签使用稳定的键。Home 和 Settings 使用各自的滚动容器，SSH 终端用 `DockPanel::fill` 填满剩余空间并处理自己的滚动。
+
+```rust
+let header = DockHeader::new("P2P Tunnel", status, menu);
+let tabs = DockTabs::new("workspace-tab-list", &self.dock)
+    .item(Page::Home, home_tab)
+    .item(Page::Settings, settings_tab);
+DockLayout::new(header, tabs, DockPanel::scroll("home-scroll", home))
+```
+
+切换到 `DockPlacement::Left` 时，同一个标签栏会移至左侧。折叠状态和展开宽度由每个窗口的 `DockSettings` 保存，拆出的窗口继承这两项设置。Dock 组件测量标签及末尾空白区域，处理排序和拖动预览。工作区持有页面和终端会话，负责跨窗口转移及原生窗口事件。页面中的设备信息和权限列表用 `ListItem` 组合图标、说明和操作。编辑表单用 `ui.form_actions` 提供保存与取消，提交和校验由页面处理。
+
+下拉菜单把普通按钮作为触发器，把选项和回调放入 `DropdownContent`。视图创建时用 `DropdownState::new(window, cx)` 保存一份状态，下面的 `open_settings` 是接收窗口和应用上下文的回调。
+
+```rust
+let trigger = DropdownTrigger::new(
+    ui.button(Secondary, "workspace-menu", "Menu")
+        .disclosure(menu.read(cx).is_open()),
+);
+let content = DropdownContent::new()
+    .item("settings", Icon::Settings.label("Settings"), open_settings);
+Dropdown::new(&menu, trigger, content)
+```
+
+外观偏好由 GUI 按桌面用户保存。`System` 从各窗口读取系统外观并订阅变化事件，手动切换会重绘所有窗口。终端按主题解析默认色和前 16 个 ANSI 色，保留应用指定的 256 色扩展和真彩色。
+
 ## 监听方向
 
 本地监听端决定「在哪里接受连接」，服务端决定「允许连什么」。两台设备可以交换这两个角色。若要支持从 A 下令让 B 开监听的 `ssh -R` 式体验，需要另外定义远程创建、授权和回收监听器的控制操作。首版原生协议按监听器所在机器上的配置建立规则。

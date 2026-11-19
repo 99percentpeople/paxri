@@ -6,6 +6,8 @@ publish.workspace = true
 
 [dependencies]
 gpui = "0.2.2"
+dirs = "5"
+tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tunnel-control = { path = "../../crates/tunnel-control" }

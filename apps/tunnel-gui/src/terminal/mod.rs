@@ -3,8 +3,9 @@ mod keys;
 mod selection;
 mod session;
 
+use crate::components::{ButtonVariant::Primary, Ui};
 use anyhow::Result;
-use display::{BACKGROUND, COL, LINE};
+use display::{COL, LINE};
 use gpui::{prelude::*, *};
 use portable_pty::PtySize;
 use selection::{Selection, top_row};
@@ -282,7 +283,8 @@ impl Terminal {
 }
 
 impl Render for Terminal {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = Ui::new(window, cx);
         let entity = cx.entity();
         let focus = self.focus.clone();
         let screen = canvas(
@@ -347,8 +349,8 @@ impl Render for Terminal {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(0xddeee4))
+            .bg(rgb(ui.colors.terminal.surface.background))
+            .text_color(rgb(ui.colors.terminal.surface.foreground))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .when(!self.status.is_empty(), |d| {
@@ -360,11 +362,11 @@ impl Render for Terminal {
                         .flex()
                         .gap_2()
                         .items_center()
-                        .bg(rgb(super::SURFACE))
-                        .text_color(rgb(super::INK))
+                        .bg(rgb(ui.colors.canvas.background))
+                        .text_color(rgb(ui.colors.canvas.foreground))
                         .child(div().flex_1().text_sm().child(self.status.clone()))
                         .when(!self.is_running(), |bar| {
-                            bar.child(super::primary("reconnect", "Reconnect").on_click(
+                            bar.child(ui.button(Primary, "reconnect", "Reconnect").on_click(
                                 |_, w, cx| {
                                     w.dispatch_action(
                                         Box::new(super::workspace::ReconnectTerminal),

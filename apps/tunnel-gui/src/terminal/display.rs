@@ -1,4 +1,5 @@
 use super::selection::Selection;
+use crate::theme::{self, TerminalPalette};
 use gpui::{
     App, Bounds, FontStyle, FontWeight, Pixels, Point, TextRun, Window, fill, font, point, px, rgb,
     size,
@@ -7,18 +8,11 @@ use vt100::{Cell, Color, Screen};
 
 pub const COL: f32 = 9.;
 pub const LINE: f32 = 20.;
-pub const BACKGROUND: u32 = 0x101917;
-const FOREGROUND: u32 = 0xe4ede8;
-
-fn color(value: Color, default: u32) -> u32 {
-    const ANSI: [u32; 16] = [
-        0x192220, 0xe07572, 0x82c998, 0xe3c780, 0x80aee1, 0xc896d6, 0x70c5c1, 0xcbd4cd, 0x78847e,
-        0xff9290, 0xa3eeb2, 0xffdd94, 0xa2c7ff, 0xedb5ff, 0x94e9e2, 0xffffff,
-    ];
+fn color(value: Color, default: u32, palette: &TerminalPalette) -> u32 {
     match value {
         Color::Default => default,
         Color::Rgb(r, g, b) => u32::from_be_bytes([0, r, g, b]),
-        Color::Idx(i @ 0..16) => ANSI[i as usize],
+        Color::Idx(i @ 0..16) => palette.ansi[i as usize],
         Color::Idx(i @ 16..232) => {
             let i = i - 16;
             let scale = [0, 95, 135, 175, 215, 255];
@@ -45,10 +39,10 @@ struct Style {
     underline: bool,
 }
 
-impl From<&Cell> for Style {
-    fn from(cell: &Cell) -> Self {
-        let mut fg = color(cell.fgcolor(), FOREGROUND);
-        let mut bg = color(cell.bgcolor(), BACKGROUND);
+impl Style {
+    fn from_cell(cell: &Cell, palette: &TerminalPalette) -> Self {
+        let mut fg = color(cell.fgcolor(), palette.surface.foreground, palette);
+        let mut bg = color(cell.bgcolor(), palette.surface.background, palette);
         if cell.inverse() {
             std::mem::swap(&mut fg, &mut bg);
         }
@@ -66,12 +60,13 @@ fn paint_run(
     text: &str,
     cells: u16,
     style: Style,
+    palette: &TerminalPalette,
     at: Point<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let width = px(COL * f32::from(cells));
-    if style.bg != BACKGROUND {
+    if style.bg != palette.surface.background {
         window.paint_quad(fill(Bounds::new(at, size(width, px(LINE))), rgb(style.bg)));
     }
     if !text.trim_end_matches(' ').is_empty() {
@@ -119,6 +114,7 @@ pub fn paint(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let palette = &theme::palette(window, cx).terminal;
     let (rows, cols) = screen.size();
     let origin =
         |r: u16, c: u16| bounds.origin + point(px(f32::from(c) * COL), px(f32::from(r) * LINE));
@@ -126,10 +122,10 @@ pub fn paint(
         let selected =
             selection.map_or(0..0, |s| s.columns(top_row + usize::from(row), cols.get()));
         let cell_style = |cell: &Cell, col| {
-            let mut style = Style::from(cell);
+            let mut style = Style::from_cell(cell, palette);
             if selected.contains(&col) {
-                style.bg = 0x315f72;
-                style.fg = 0xf5fcff;
+                style.bg = palette.selection.background;
+                style.fg = palette.selection.foreground;
             }
             style
         };
@@ -159,7 +155,15 @@ pub fn paint(
                     break;
                 }
             }
-            paint_run(&text, col - first, style, origin(row, first), window, cx);
+            paint_run(
+                &text,
+                col - first,
+                style,
+                palette,
+                origin(row, first),
+                window,
+                cx,
+            );
         }
     }
     if !screen.hide_cursor() && screen.scrollback() == 0 {
@@ -170,12 +174,13 @@ pub fn paint(
                 marked,
                 marked.chars().count().min(200) as u16,
                 Style {
-                    fg: FOREGROUND,
-                    bg: 0x31443a,
+                    fg: palette.surface.foreground,
+                    bg: palette.composition,
                     bold: false,
                     italic: false,
                     underline: true,
                 },
+                palette,
                 at,
                 window,
                 cx,
@@ -183,8 +188,32 @@ pub fn paint(
         } else {
             window.paint_quad(fill(
                 Bounds::new(at + point(px(0.), px(LINE - 2.)), size(px(COL), px(2.))),
-                rgb(0x93ddad),
+                rgb(palette.cursor),
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Appearance;
+    use gpui::WindowAppearance;
+
+    #[test]
+    fn theme_changes_defaults_and_ansi_slots_but_keeps_explicit_terminal_colors() {
+        let mut parser = vt100::Parser::new(1.try_into().unwrap(), 5.try_into().unwrap(), 0);
+        parser.process(b"A\x1b[31mB\x1b[38;5;67mC\x1b[38;2;31;99;227mD\x1b[0;7mE");
+        for mode in [Appearance::Light, Appearance::Dark] {
+            let palette = &mode.resolve(WindowAppearance::Light).terminal;
+            let at = |col| Style::from_cell(parser.screen().cell(0, col).unwrap(), palette);
+            assert_eq!(at(0).fg, palette.surface.foreground);
+            assert_eq!(at(0).bg, palette.surface.background);
+            assert_eq!(at(1).fg, palette.ansi[1]);
+            assert_eq!(at(2).fg, u32::from_be_bytes([0, 95, 135, 175]));
+            assert_eq!(at(3).fg, u32::from_be_bytes([0, 31, 99, 227]));
+            assert_eq!(at(4).fg, palette.surface.background);
+            assert_eq!(at(4).bg, palette.surface.foreground);
         }
     }
 }

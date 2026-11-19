@@ -5,14 +5,13 @@ use gpui::{prelude::*, *};
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
 use tunnel_control::{Command, Destination, Direction, Forward, PortAccess, SshProfile, Status};
 mod chrome;
-mod field;
-mod icons;
+mod components;
 mod pages;
 mod peer_settings;
 mod terminal;
+mod theme;
 mod workspace;
-use field::Field;
-use icons::Icon;
+use components::Input;
 use workspace::Workspace;
 
 #[derive(Parser)]
@@ -25,11 +24,11 @@ struct Options {
 
 struct RuleForm {
     edit: bool,
-    name: Entity<Field>,
-    listen: Entity<Field>,
+    name: Entity<Input>,
+    listen: Entity<Input>,
     peer: String,
-    service: Entity<Field>,
-    target: Entity<Field>,
+    service: Entity<Input>,
+    target: Entity<Input>,
     mode: RuleMode,
 }
 
@@ -44,7 +43,7 @@ struct Dashboard {
     rule: Option<RuleForm>,
     ssh_form: Option<peer_settings::SshForm>,
     ports_form: Option<peer_settings::PortsForm>,
-    name_field: Option<Entity<Field>>,
+    name_field: Option<Entity<Input>>,
     removing: Option<String>,
     saving: bool,
     address: Option<PathBuf>,
@@ -56,77 +55,14 @@ struct Dashboard {
     action_error: Option<String>,
 }
 
-const INK: u32 = 0x182e37;
-const MUTED: u32 = 0x526770;
-const TEAL: u32 = 0x087965;
-const BORDER: u32 = 0xd7e1e2;
-const SURFACE: u32 = 0xf3f6f6;
-
-fn button_base(id: impl Into<ElementId>, title: impl IntoElement) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .child(title)
-}
-fn button(id: impl Into<ElementId>, title: impl IntoElement) -> Stateful<Div> {
-    button_base(id, title)
-        .bg(rgb(0xe7efed))
-        .text_color(rgb(0x205e53))
-        .hover(|s| s.bg(rgb(0xd3e4df)))
-}
-fn primary(id: impl Into<ElementId>, title: impl IntoElement) -> Stateful<Div> {
-    button_base(id, title)
-        .bg(rgb(TEAL))
-        .text_color(rgb(0xffffff))
-        .hover(|s| s.bg(rgb(0x076452)))
-}
-fn heading(text: impl Into<SharedString>) -> Div {
-    div()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_lg()
-        .child(text.into())
-}
-fn details(text: impl Into<SharedString>) -> Div {
-    div().text_sm().text_color(rgb(MUTED)).child(text.into())
-}
-fn line() -> Div {
-    div().w_full().h(px(1.)).flex_none().bg(rgb(BORDER))
-}
-fn bar() -> Div {
-    div()
-        .flex()
-        .flex_wrap()
-        .gap_2()
-        .items_center()
-        .justify_between()
-}
-fn card() -> Div {
-    div()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .p_4()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(0xffffff))
-}
-
 impl Dashboard {
     fn open_rule(&mut self, name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(status) = &self.status else { return };
         let f = name.and_then(|n| status.forwards.get(n));
         let form = RuleForm {
             edit: f.is_some(),
-            name: Field::new(name.unwrap_or_default(), "Rule name", cx),
-            listen: Field::new(
+            name: Input::new(name.unwrap_or_default(), "Rule name", cx),
+            listen: Input::new(
                 f.map_or("127.0.0.1:8080", |f| &f.listen),
                 "127.0.0.1:8080",
                 cx,
@@ -135,8 +71,8 @@ impl Dashboard {
                 .map(|f| f.peer.clone())
                 .or_else(|| status.peers.keys().next().cloned())
                 .unwrap_or_default(),
-            service: Field::new(f.map_or("", |f| &f.service), "ssh", cx),
-            target: Field::new(
+            service: Input::new(f.map_or("", |f| &f.service), "ssh", cx),
+            target: Input::new(
                 f.and_then(|f| f.target.as_deref()).unwrap_or(""),
                 "127.0.0.1:3000",
                 cx,
@@ -162,9 +98,9 @@ impl Dashboard {
             return;
         }
         let Some(f) = &self.rule else { return };
-        let name = f.name.read(cx).text.clone();
+        let name = f.name.read(cx).text().to_owned();
         let name = if f.edit { name } else { name.trim().to_owned() };
-        let Ok(listen) = tunnel_control::listen_address(f.listen.read(cx).text.trim()) else {
+        let Ok(listen) = tunnel_control::listen_address(f.listen.read(cx).text().trim()) else {
             self.action_error = Some(
                 "Enter a listen address with a port, such as 127.0.0.1:8080 or [::1]:8080.".into(),
             );
@@ -177,9 +113,9 @@ impl Dashboard {
             return;
         }
         let destination = if f.mode == RuleMode::Service {
-            Destination::Service(f.service.read(cx).text.trim().to_owned())
+            Destination::Service(f.service.read(cx).text().trim().to_owned())
         } else {
-            match tunnel_control::tcp_target(f.target.read(cx).text.trim()) {
+            match tunnel_control::tcp_target(f.target.read(cx).text().trim()) {
                 Ok(target) => Destination::Target(target),
                 Err(e) => {
                     self.action_error = Some(e);
@@ -329,6 +265,7 @@ fn main() {
             }
         })
         .detach();
+        theme::Appearance::init(cx);
         let dashboard = cx.new(|cx| Dashboard::new(address, handle, cx));
         Workspace::open_home(dashboard, cx).expect("open gateway window");
         cx.activate(true);

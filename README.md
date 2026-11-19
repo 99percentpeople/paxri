@@ -20,11 +20,11 @@ cargo build --locked
 cargo build --locked -p tunnel-gui
 target/debug/tunnel config check examples/home.toml
 target/debug/tunnel config check examples/laptop.toml
-cargo test --workspace --locked
-python3 scripts/check-gateway.py
 ```
 
-在 Windows 桌面安装 pywin32 后，可运行 `py scripts/check-tab-drag-windows.py`。脚本在独立窗口里检查按下未选中标签时的页面切换、排序和拆窗阈值、单标签拖窗，以及连续拖出和并入时的键盘焦点。
+开发时按改动范围运行测试。修改 GUI 表单控件可运行 `cargo test --locked -p tunnel-gui form_controls`。修改网关时可用 `python3 scripts/check-gateway.py` 检查网关交互。
+
+在 Windows 桌面安装 pywin32 后，可用 `py scripts/check-tab-drag-windows.py --sidebar-only` 单独验证侧栏折叠和拖宽。运行 `py scripts/check-tab-drag-windows.py` 可验证标签拖动。脚本在独立窗口里检查按下未选中标签时的页面切换、排序和拆窗阈值、单标签拖窗，以及连续拖出和并入时的键盘焦点。
 
 ### 同步源码到 Windows
 
@@ -64,9 +64,13 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 桌面端启动时只打开 **Home**。默认布局把标签放在窗口最上沿，右侧是菜单和自绘的最小化、最大化／还原、关闭按钮。拖动这一行的空白处可以移动窗口，双击可在最大化和还原之间切换。点击 **Menu** 会在按钮下方展开带图标的菜单。可用 ↑、↓ 选择，Enter 执行，Esc 或点击菜单外收起。菜单首项 **Settings** 始终可用。设置页已打开时，选择它会切到已有标签，并激活该标签所在的窗口。设置页已关闭时，选择它会在当前窗口打开设置。点击设置标签的 **×** 可以关闭它。菜单中的 **Tabs on left** 和 **Tabs on top** 切换标签栏位置。
 
+使用 **Tabs on left** 后，点击窗口左上角的侧栏图标可以收起或展开。拖动侧栏右边缘可调整宽度，拖到最左侧会收为图标栏，展开时会恢复之前的宽度。悬停标签可查看完整标题，鼠标中键可关闭设置或终端标签。
+
 按下标签时会立即显示对应页面，并将键盘焦点移到该标签。有多个标签时，可以按住标签沿顶栏横向排序，或沿侧栏纵向排序。顶栏末尾到设备状态之间、侧栏最后一个标签到窗口底部之间的空白区都可以拖入。按住时标签跟随鼠标，在空白处松手会排到末尾。鼠标垂直离开顶栏或横向离开侧栏超过 **24 个逻辑像素**，原窗口会切到剩余页面，拖出的页面沿用原窗口尺寸。鼠标按住期间，标签保留在新窗口标签栏中原来的位置，松手后移到第一格。沿栏拖到窗口边界以外也有相同的缓冲距离。只有一个标签时，拖动标签会直接移动整个窗口。
 
 在 Windows 和 Linux 的 X11 桌面会话中，把独立窗口的标签拖进另一个工作区的顶栏或侧栏，标签会在鼠标仍然按住时并入。继续沿栏移动可以调整插入位置，再次越过阈值可以拆出，松手确定位置。经过页面正文时窗口保持分离。在 Windows 上，拆窗拖动途中按 **Esc** 可恢复原来的布局。
+
+在 **Menu → Settings → Appearance** 点击 **Theme** 右侧的图标按钮，可以选择 **System**、**Light** 或 **Dark**，默认跟随系统。切换会同时更新所有窗口、拖动中的标签和 SSH 终端。主题偏好保存在当前桌面用户配置目录的 `p2p-tunnel/appearance`，网关离线时也可以修改。
 
 在 Wayland 桌面会话中可以拖出标签建立独立窗口。
 
@@ -85,7 +89,7 @@ CLI、GUI 和 gateway 都接受 `--ipc` 或环境变量 `TUNNEL_IPC`。Unix 使�
 | **Listen locally** | 笔记本的 `127.0.0.1:8080` | 家里电脑的 `127.0.0.1:3000` |
 | **Listen on peer** | 家里电脑的 `127.0.0.1:9000` | 笔记本的 `127.0.0.1:5000` |
 
-在家里电脑的 **Settings → Port access → laptop → Edit access**，填写允许笔记本连接的目标或监听的地址。已向笔记本发布的 TCP 服务也可以直接按相同的目标地址连接。CLI 等价操作如下，`port-access set` 会替换该设备的两张端口授权列表。
+在家里电脑的 **Settings → Port access → laptop → Edit access**，填写允许笔记本连接的目标或监听的地址。两个输入框都支持每行一个地址，也可用逗号分隔。已向笔记本发布的 TCP 服务也可以直接按相同的目标地址连接。CLI 等价操作如下，`port-access set` 会替换该设备的两张端口授权列表。
 
 ```sh
 # 家里电脑

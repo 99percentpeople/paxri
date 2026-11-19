@@ -1,5 +1,13 @@
 //! A workspace window owns its tabs; detached windows share the same gateway controller.
 use super::*;
+use crate::components::{
+    DropdownState, Icon, Ui,
+    dock::{
+        DockDrag, DockHeader, DockLayout, DockPanel, DockPlacement, DockSettings, DockState,
+        DockTabs,
+    },
+    tooltip,
+};
 
 mod dock;
 mod drag;
@@ -7,12 +15,13 @@ mod menu;
 
 gpui::actions!(workspace, [ReconnectTerminal]);
 
-use dock::{DockTarget, TabLayout};
+use dock::DockTarget;
 #[cfg(target_os = "macos")]
 pub(super) use drag::{DragEvent, DragSignal};
-use drag::{DragWatch, DropPlacement, TabDrag};
+use drag::{DragWatch, DropPlacement};
 
-const SIDEBAR_WIDTH: f32 = 142.;
+type TabDrag = DockDrag<Page>;
+
 const WORKSPACE_SIZE: Size<Pixels> = size(px(990.), px(720.));
 
 #[derive(Clone, PartialEq, Eq)]
@@ -50,6 +59,16 @@ impl Page {
         }
     }
 
+    fn tab(&self, ui: Ui, settings: DockSettings, selected: bool, close: impl IntoElement) -> Div {
+        ui.tab(
+            settings,
+            self.icon(),
+            self.label(),
+            selected,
+            (*self != Self::Home).then_some(close),
+        )
+    }
+
     fn element_id(&self) -> ElementId {
         match self {
             Self::Terminal { view, .. } => ("terminal-tab", view.entity_id()).into(),
@@ -81,9 +100,8 @@ pub(super) struct Workspace {
     dashboard: Entity<Dashboard>,
     tabs: Vec<Page>,
     active: Page,
-    sidebar: bool,
-    menu_index: Option<usize>,
-    menu_focus: FocusHandle,
+    dock: Entity<DockState<Page>>,
+    menu: Entity<DropdownState>,
     tab_focus: FocusHandle,
     dragged_tab: Option<TabDrag>,
     tab_press: Option<TabPress>,
@@ -91,7 +109,6 @@ pub(super) struct Workspace {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     wayland_move_left_surface: bool,
     drag_watch: Option<DragWatch>,
-    tab_layout: TabLayout,
 }
 
 impl Workspace {
@@ -99,13 +116,19 @@ impl Workspace {
         dashboard: Entity<Dashboard>,
         cx: &mut App,
     ) -> anyhow::Result<WindowHandle<Self>> {
-        Self::open(dashboard, Page::Home, false, WorkspaceWindow::Initial, cx)
+        Self::open(
+            dashboard,
+            Page::Home,
+            DockSettings::default(),
+            WorkspaceWindow::Initial,
+            cx,
+        )
     }
 
     fn open(
         dashboard: Entity<Dashboard>,
         page: Page,
-        sidebar: bool,
+        settings: DockSettings,
         kind: WorkspaceWindow,
         cx: &mut App,
     ) -> anyhow::Result<WindowHandle<Self>> {
@@ -135,15 +158,15 @@ impl Workspace {
         };
         cx.open_window(options, move |w, cx| {
             w.set_window_title(&title);
+            theme::observe(w);
             #[cfg(target_os = "macos")]
             chrome::hide_system_buttons(w);
             cx.new(|cx| {
                 cx.observe(&dashboard, |_, _, cx| cx.notify()).detach();
-                let menu_focus = cx.focus_handle().tab_stop(true);
-                menu_focus.focus(w);
+                let menu = DropdownState::new(w, cx);
+                menu.read(cx).focus_handle(cx).focus(w);
                 cx.observe_window_activation(w, |v: &mut Self, w, cx| {
                     if !w.is_window_active() {
-                        v.dismiss_menu(cx);
                         // Window managers briefly change focus while closing the floating window.
                         if v.drag_watch.is_none() {
                             v.cancel_tab_drag(w, cx);
@@ -155,9 +178,8 @@ impl Workspace {
                     dashboard,
                     tabs: vec![page.clone()],
                     active: page,
-                    sidebar,
-                    menu_index: None,
-                    menu_focus,
+                    dock: DockState::new(settings, w, cx),
+                    menu,
                     tab_focus: cx.focus_handle().tab_stop(true),
                     dragged_tab: None,
                     tab_press: None,
@@ -165,7 +187,6 @@ impl Workspace {
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                     wayland_move_left_surface: false,
                     drag_watch: None,
-                    tab_layout: TabLayout::default(),
                 }
             })
         })
@@ -204,7 +225,7 @@ impl Workspace {
 
     fn select(&mut self, page: Page, cx: &mut Context<Self>) {
         self.active = page;
-        self.menu_index = None;
+        self.menu.update(cx, DropdownState::dismiss);
         cx.notify();
     }
 
@@ -286,8 +307,8 @@ impl Workspace {
         self.dragged_tab = None;
         self.tab_indent = px(0.);
         self.tabs.retain(|p| p != page);
-        self.tab_layout.tabs.retain(|(p, _)| p != page);
-        self.menu_index = None;
+        self.dock.update(cx, |dock, _| dock.forget(page));
+        self.menu.update(cx, DropdownState::dismiss);
         if let Some(remaining) = self.tabs.first() {
             if self.active == *page {
                 self.active = remaining.clone();
@@ -345,7 +366,7 @@ impl Workspace {
         match Self::open(
             self.dashboard.clone(),
             page.clone(),
-            self.sidebar,
+            self.dock.read(cx).settings(),
             WorkspaceWindow::Detached {
                 placement,
                 tab_indent,
@@ -370,50 +391,6 @@ impl Workspace {
         }
     }
 
-    fn close_glyph() -> Div {
-        div()
-            .size(px(20.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_sm()
-            .child("×")
-    }
-
-    fn tab_face(page: &Page, selected: bool, close: impl IntoElement) -> Div {
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .rounded_md()
-            .px_3()
-            .h(px(31.))
-            .min_w(px(96.))
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .border_1()
-            .border_color(gpui::transparent_black())
-            .text_color(rgb(MUTED))
-            .when(selected, |tab| {
-                tab.bg(rgb(0xffffff))
-                    .border_color(rgb(BORDER))
-                    .text_color(rgb(0x12584e))
-            })
-            .child(page.icon().label(page.label()))
-            .when(*page != Page::Home, |tab| tab.child(close))
-    }
-
-    fn tab_axis(&self) -> Axis {
-        if self.sidebar {
-            Axis::Vertical
-        } else {
-            Axis::Horizontal
-        }
-    }
-
     fn settle_tab(&mut self, cx: &mut Context<Self>) {
         if self.tab_indent != px(0.) {
             self.tab_indent = px(0.);
@@ -421,63 +398,34 @@ impl Workspace {
         }
     }
 
-    fn tab_bar(&self, w: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn tab_bar(&self, ui: Ui, w: &Window, cx: &Context<Self>) -> DockTabs<Page> {
         let source = w
             .window_handle()
             .downcast::<Self>()
             .expect("workspace root");
-        let view = cx.weak_entity();
-        let pages = self.dragged_tab.as_ref().map_or_else(
-            || self.tabs.clone(),
-            |drag| drag.order(&self.tabs, &self.tab_layout, self.tab_axis()),
-        );
-        let mut strip = div();
-        for page in &pages {
+        let mut strip = DockTabs::new("workspace-tab-list", &self.dock).indent(self.tab_indent);
+        let settings = self.dock.read(cx).settings();
+        for page in &self.tabs {
+            let middle_close = page.clone();
             let closing = page.clone();
             let pressed = page.clone();
             let workspace = cx.weak_entity();
-            let close = Self::close_glyph()
-                .id("close-tab")
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0xd5e4df)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |v, _, w, cx| {
-                    cx.stop_propagation();
-                    v.close_tab(&closing, w, cx);
-                }));
-            let tab = Self::tab_face(page, self.active == *page, close)
+            let close =
+                ui.tab_close_button(cx.listener(move |v, _, w, cx| v.close_tab(&closing, w, cx)));
+            let tab = page
+                .tab(ui, settings, self.active == *page, close)
                 .id(page.element_id())
-                .when(self.tab_indent > px(0.), |tab| {
-                    if self.sidebar {
-                        tab.mt(self.tab_indent)
-                    } else {
-                        tab.ml(self.tab_indent)
-                    }
-                })
-                .cursor_pointer()
-                .when(self.active == *page, |tab| {
-                    tab.track_focus(&self.tab_focus).on_key_down(|e, w, cx| {
-                        let key = &e.keystroke;
-                        if key.key == "tab"
-                            && (!key.modifiers.modified() || key.modifiers == Modifiers::shift())
-                        {
-                            if key.modifiers.shift {
-                                w.focus_prev();
-                            } else {
-                                w.focus_next();
-                            }
-                            w.prevent_default();
+                .tooltip(tooltip(page.label()))
+                .when(*page != Page::Home, |tab| {
+                    tab.on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |v, _, w, cx| {
                             cx.stop_propagation();
-                        }
-                    })
+                            v.close_tab(&middle_close, w, cx);
+                        }),
+                    )
                 })
-                .when(
-                    self.dragged_tab
-                        .as_ref()
-                        .is_some_and(|drag| drag.page == *page),
-                    |tab| tab.opacity(0.),
-                )
-                .hover(|s| s.bg(rgb(0xf8fbfa)))
+                .when(self.active == *page, |tab| tab.track_focus(&self.tab_focus))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, e: &MouseDownEvent, w, cx| {
@@ -495,139 +443,31 @@ impl Workspace {
                         source,
                     },
                     move |drag, offset, w, cx| {
-                        let cursor = w.mouse_position();
-                        let _ = workspace.update(cx, |v, cx| {
-                            let bounds = v.tab_layout.bounds(&drag.page)?;
-                            let (grab, previous_active) = v.tab_press.take().map_or_else(
-                                || (offset, v.active.clone()),
-                                |press| (press.position - bounds.origin, press.previous_active),
-                            );
-                            v.dragged_tab = Some(TabDrag {
-                                page: drag.page.clone(),
-                                previous_active,
-                                offset: grab,
-                                cursor,
-                            });
-                            cx.notify();
-                            Some(())
-                        });
-                        // GPUI installs its drag after this callback. Process the first
-                        // movement as well, even if the next input is already mouse-up.
-                        let source = workspace.clone();
-                        let drag = drag.clone();
-                        w.defer(cx, move |w, cx| {
-                            let _ =
-                                source.update(cx, |v, cx| v.update_tab_drag(drag, cursor, w, cx));
-                        });
+                        let _ = workspace.update(cx, |v, cx| v.begin_tab_drag(drag, offset, w, cx));
                         cx.new(|_| Empty)
                     },
                 );
-            strip = strip.child(tab);
+            strip = strip.item(page.clone(), tab);
         }
         strip
-            // Freeze the resting slots while reordering. On first entry measure
-            // the incoming page together with its neighbours in their actual order.
-            .when(
-                self.dragged_tab
-                    .as_ref()
-                    .is_none_or(|tab| self.tab_layout.bounds(&tab.page).is_none()),
-                |d| {
-                    d.on_children_prepainted(move |bounds, _, cx| {
-                        let _ = view.update(cx, |v, _| {
-                            v.tab_layout.tabs.clear();
-                            v.tab_layout.tabs.extend(pages.iter().cloned().zip(bounds));
-                        });
-                    })
-                },
-            )
-            .id("workspace-tab-list")
-            .flex()
-            .min_w_0()
-            .when(!self.sidebar, |d| {
-                d.overflow_x_scroll().items_center().h_full()
-            })
-            .gap_1()
-            .bg(rgb(0xe3ebeb))
-            .p_1()
-            .when(self.sidebar, |d| {
-                d.flex_col().w(px(SIDEBAR_WIDTH)).flex_none()
-            })
             .on_drag_move::<DraggedTab>(cx.listener(Self::move_tab_drag))
             .capture_any_mouse_up(cx.listener(Self::release_tab))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::release_tab))
     }
 
-    fn tab_preview(&self, cx: &Context<Self>) -> Canvas<Option<AnyElement>> {
-        let view = cx.weak_entity();
-        canvas(
-            move |_, w, cx| {
-                // The strip and its available caption space have been measured
-                // earlier in this prepaint, even on the first frame after docking.
-                let workspace = view.upgrade()?;
-                let v = workspace.read(cx);
-                let drag = v.dragged_tab.as_ref()?;
-                let zone = v.tab_layout.zone;
-                let bounds = drag.projected(
-                    v.tab_layout.bounds(&drag.page)?,
-                    &v.tab_layout,
-                    v.tab_axis(),
-                );
-                let mut preview = div()
-                    .size_full()
-                    .overflow_hidden()
-                    .child(
-                        Self::tab_face(&drag.page, true, Self::close_glyph())
-                            .absolute()
-                            .left(bounds.left() - zone.left())
-                            .top(bounds.top() - zone.top())
-                            .w(bounds.size.width)
-                            .h(bounds.size.height)
-                            .shadow_sm(),
-                    )
-                    .into_any_element();
-                preview.prepaint_as_root(zone.origin, zone.size.into(), w, cx);
-                Some(preview)
-            },
-            |_, preview, w, cx| {
-                if let Some(mut preview) = preview {
-                    preview.paint(w, cx);
-                }
-            },
-        )
-        .absolute()
-        .inset_0()
-    }
-
-    fn active_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn active_panel(&self, ui: Ui, cx: &mut Context<Self>) -> DockPanel {
         let workspace = cx.weak_entity();
-        let (scroll_id, content) = match &self.active {
-            Page::Home => (
+        match &self.active {
+            Page::Home => DockPanel::scroll(
                 "home-scroll",
-                self.dashboard.update(cx, |d, cx| d.home(workspace, cx)),
+                self.dashboard.update(cx, |d, cx| d.home(ui, workspace, cx)),
             ),
-            Page::Settings => (
+            Page::Settings => DockPanel::scroll(
                 "settings-scroll",
-                self.dashboard.update(cx, |d, cx| d.settings(cx)),
+                self.dashboard.update(cx, |d, cx| d.settings(ui, cx)),
             ),
-            Page::Terminal { view, .. } => {
-                return div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(view.clone())
-                    .into_any_element();
-            }
-        };
-        div()
-            .id(scroll_id)
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scroll()
-            .p_4()
-            .child(content)
-            .into_any_element()
+            Page::Terminal { view, .. } => DockPanel::fill(view.clone()),
+        }
     }
 }
 
@@ -643,51 +483,21 @@ impl Render for Workspace {
                 self.wayland_move_left_surface = false;
             }
         }
+        let ui = Ui::new(window, cx);
         let data = self.dashboard.read(cx);
         let connected = data.status.is_some();
         let error = data.action_error.clone();
-        let view = cx.weak_entity();
         let status = div()
-            .w_full()
-            .h_full()
-            .pr_2()
+            .min_w_0()
             .flex()
-            .justify_end()
             .items_center()
             .gap_2()
-            .text_sm()
-            .when(!self.sidebar, |d| {
-                let view = view.clone();
-                // This spacer is the part of the window caption available to tabs.
-                d.child(
-                    canvas(
-                        move |space, _, cx| {
-                            let _ = view.update(cx, |v, _| {
-                                v.tab_layout.zone = Bounds::from_corners(
-                                    point(px(0.), space.top()),
-                                    space.bottom_right(),
-                                );
-                            });
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .flex_1()
-                    .min_w_0()
-                    .h_full(),
-                )
-            })
             .when(window.viewport_size().width >= px(660.), |d| {
                 d.when_some(data.status.as_ref(), |d, s| {
                     d.child(div().truncate().child(s.display_name().to_owned()))
                 })
             })
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(7.))
-                    .rounded_full()
-                    .bg(rgb(if connected { 0x298765 } else { 0xb77b29 })),
-            )
+            .child(ui.status_dot(connected))
             .when(window.viewport_size().width >= px(540.), |d| {
                 d.child(if connected {
                     "Online"
@@ -697,18 +507,18 @@ impl Render for Workspace {
                     "Connecting…"
                 })
             });
-        let leading = if self.sidebar {
-            div()
-                .pl_3()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("P2P Tunnel")
-                .into_any_element()
-        } else {
-            self.tab_bar(window, cx).into_any_element()
-        };
-        let actions = self.menu_button(window, cx);
-        let title = chrome::titlebar(leading, status, actions, window, cx);
-        let content = div()
+        let header = DockHeader::new("P2P Tunnel", status, self.workspace_menu(ui, cx));
+        let tabs = self.tab_bar(ui, window, cx);
+        let panel = self.active_panel(ui, cx);
+        DockLayout::new(header, tabs, panel)
+            .when_some(error, |dock, message| dock.banner(ui.alert(message)))
+            .when_some(self.dragged_tab.as_ref(), |dock, drag| {
+                dock.dragging(
+                    drag.clone(),
+                    drag.page
+                        .tab(ui, self.dock.read(cx).settings(), true, ui.tab_close()),
+                )
+            })
             .on_action(cx.listener(|v, _: &ReconnectTerminal, w, cx| {
                 if let Page::Terminal { peer, .. } = v.active.clone() {
                     v.open_terminal(&peer, w, cx);
@@ -720,45 +530,5 @@ impl Render for Workspace {
                     cx.stop_propagation();
                 }
             }))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(SURFACE))
-            .text_color(rgb(INK))
-            .child(title)
-            .when_some(error, |d, e| {
-                d.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .bg(rgb(0xffe6dd))
-                        .text_color(rgb(0x813721))
-                        .text_sm()
-                        .child(e),
-                )
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .flex()
-                    .when(self.sidebar, |d| {
-                        d.child(self.tab_bar(window, cx)).on_children_prepainted(
-                            move |children, _, cx| {
-                                if let Some(&bounds) = children.first() {
-                                    let _ = view.update(cx, |v, _| v.tab_layout.zone = bounds);
-                                }
-                            },
-                        )
-                    })
-                    .child(self.active_panel(cx)),
-            );
-        let content = content
-            .relative()
-            .when(self.dragged_tab.is_some() && self.tabs.len() > 1, |d| {
-                d.child(self.tab_preview(cx))
-            });
-        chrome::frame(content, window)
     }
 }

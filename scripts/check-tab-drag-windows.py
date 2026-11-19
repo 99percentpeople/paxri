@@ -14,7 +14,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 
-def check(binary):
+def check(binary, sidebar_only=False):
     import win32api as api
     import win32con as win
     import win32gui as gui
@@ -142,12 +142,90 @@ def check(binary):
         def home_point(x, y):
             return gui.ClientToScreen(home, (round(x * dpi), round(y * dpi)))
 
+        if sidebar_only:
+            key(home, win.VK_TAB)  # From the selected tab to Menu.
+            key(home, win.VK_UP)
+            key(home, win.VK_RETURN)  # Tabs on left.
+            probe_y = round(gui.GetClientRect(home)[3] / dpi) - 22
+
+            def expect_width(width):
+                # The divider is a one-pixel border even if the page and rail share a color.
+                edge, y = home_point(width, probe_y)
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    sides = {screen_color(home_point(width + dx, probe_y)) for dx in (-12, 12)}
+                    if any(screen_color((x, y)) not in sides
+                           for x in range(edge - round(2 * dpi), edge + 1)):
+                        return
+                    time.sleep(0.03)
+                raise AssertionError(f"Expected the sidebar divider at {width} logical pixels")
+
+            def check_compact_tab():
+                # Settings is the selected second tab. Its face is visible against the rail.
+                left, top = home_point(2, 77)
+                right, bottom = home_point(40, 115)
+                width, height = right - left, bottom - top
+                with screen_region((left, top), (width, height)) as read:
+                    pixels = read()
+                rail = pixels[:3]
+                x_edges, y_edges = [], []
+                for y in range(height):
+                    for x in range(width):
+                        offset = (y * width + x) * 4
+                        if pixels[offset:offset + 3] != rail:
+                            x_edges.append(x)
+                            y_edges.append(y)
+                if not x_edges:
+                    raise AssertionError("The selected compact tab is missing")
+                face_width = max(x_edges) - min(x_edges) + 1
+                face_height = max(y_edges) - min(y_edges) + 1
+                center = left + (min(x_edges) + max(x_edges) + 1) / 2
+                if (abs(face_width - 32 * dpi) > 1 or abs(face_height - 32 * dpi) > 1
+                        or abs(center - home_point(22, 96)[0]) > 1):
+                    raise AssertionError(f"Expected a centered 32px square tab, got {face_width}x{face_height} device pixels")
+
+            def toggle_sidebar():
+                api.SetCursorPos(home_point(20, 20))
+                api.mouse_event(down, 0, 0)
+                api.mouse_event(up, 0, 0)
+                time.sleep(0.12)
+
+            def resize_sidebar(old, new):
+                nonlocal pressed
+                api.SetCursorPos(home_point(old - 3, probe_y - 35))
+                api.mouse_event(down, 0, 0)
+                pressed = True
+                api.SetCursorPos(home_point(new - 3, probe_y - 35))
+                expect_width(new)
+                api.mouse_event(up, 0, 0)
+                pressed = False
+
+            expect_width(142)
+            resize_sidebar(142, 284)
+            toggle_sidebar()
+            expect_width(44)
+            check_compact_tab()
+            toggle_sidebar()
+            expect_width(284)
+            toggle_sidebar()
+            expect_width(44)
+            resize_sidebar(44, 192)
+            api.SetCursorPos(home_point(350, probe_y))
+            expect_width(192)
+            print("Passed. The compact tabs are centered squares and the sidebar resized and restored its width.")
+            return
+
         trailing_x = max(180, min(350, round(gui.GetClientRect(home)[2] / dpi) - 250))
         # Sample the selected face with the pointer off the tabs so its hover
         # color doesn't become the reference for the floating preview.
         api.SetCursorPos(home_point(149, 75))
         time.sleep(0.1)
         tab_fill = screen_color(home_point(149, 10))
+        api.SetCursorPos(home_point(149, 20))
+        time.sleep(0.1)
+        tab_hover_fill = screen_color(home_point(149, 10))
+        api.SetCursorPos(home_point(149, 75))
+        time.sleep(0.1)
 
         def check_trailing_preview():
             if trailing_x > 250:
@@ -209,8 +287,7 @@ def check(binary):
                 for x, y in probes:
                     point = gui.ClientToScreen(hwnd, (round(x * scale), round(y * scale)))
                     color = screen_color(point)
-                    # Both normal and hovered selected faces are lighter than the strip.
-                    selected.append(min(color.to_bytes(4, "little")[:3]) > 245)
+                    selected.append(color in (tab_fill, tab_hover_fill))
                 if selected == [not second, second]:
                     return
                 ctypes.windll.dwmapi.DwmFlush()
@@ -236,7 +313,10 @@ def check(binary):
 
             def glyph_edge(pixels):
                 for x in reversed(range(width)):
-                    if any(max(pixels[i:i + 3]) < 152
+                    # Compare against the background at the top of this column.
+                    # The close glyph can be lighter or darker than its tab.
+                    background = pixels[x * 4:x * 4 + 3]
+                    if any(max(abs(a - b) for a, b in zip(pixels[i:i + 3], background)) > 60
                            for i in range(x * 4, len(pixels), width * 4)):
                         return x
                 raise AssertionError("The Settings close glyph is missing")
@@ -446,7 +526,8 @@ def check(binary):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/tunnel-gui.exe"))
+    parser.add_argument("--sidebar-only", action="store_true", help="check sidebar resizing and collapse only")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.exit(2, "This check requires an interactive Windows desktop.\n")
-    check(args.binary.resolve())
+    check(args.binary.resolve(), args.sidebar_only)
