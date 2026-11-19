@@ -15,6 +15,7 @@ use tokio::{
 use tunnel_config::Config;
 use tunnel_terminal::{
     self as wire, Frame, Size,
+    exec::Invocation,
     pty::{CommandBuilder, Output, Session},
 };
 
@@ -24,23 +25,79 @@ impl NativeTransport {
         peer: &str,
         size: Size,
     ) -> Result<(Connection, SendStream, RecvStream)> {
+        self.open_pty(peer, size, None).await
+    }
+
+    pub async fn open_pty(
+        &self,
+        peer: &str,
+        size: Size,
+        invocation: Option<Invocation>,
+    ) -> Result<(Connection, SendStream, RecvStream)> {
         size.validate()?;
         let dest = self.peer(peer)?;
         timeout(CONNECT_TIMEOUT, async {
-            let conn = self.endpoint.connect(dest.address.clone(), wire::PROTOCOL).await
-                .context("connect to native terminal (both gateways must support native terminals)")?;
+            let (protocol, context) = if invocation.is_some() {
+                (wire::exec::PROTOCOL, "connect to remote command (both gateways must support terminal exec)")
+            } else {
+                (wire::PROTOCOL, "connect to native terminal (both gateways must support native terminals)")
+            };
+            let conn = self.endpoint.connect(dest.address.clone(), protocol).await.context(context)?;
             let (mut send, mut recv) = conn.open_bi().await?;
             size.write(&mut send).await?;
+            if let Some(command) = &invocation {
+                command.write(&mut send).await?;
+            }
             match recv.read_u8().await? {
                 wire::READY => Ok((conn, send, recv)),
                 wire::DENIED => bail!("Terminal access denied. On the remote device, allow this peer under Device settings → Native terminal."),
                 wire::BUSY => bail!("All native terminal sessions are in use"),
                 wire::PRIVILEGED => bail!("The remote gateway must run as a non-elevated user to host a terminal"),
+                wire::UNAVAILABLE if invocation.is_some() => bail!("The remote gateway could not start the requested program"),
                 wire::UNAVAILABLE => bail!("The remote gateway could not start its default shell"),
                 _ => bail!("Invalid terminal handshake"),
             }
         }).await.context("opening native terminal timed out")?
     }
+}
+
+async fn command_for(invocation: Option<Invocation>) -> Result<CommandBuilder> {
+    let mut builder = match invocation {
+        Some(Invocation::Program { program, args }) => {
+            let mut builder = CommandBuilder::new(program);
+            builder.args(args);
+            builder
+        }
+        default_or_script => {
+            #[cfg(windows)]
+            let mut shell = CommandBuilder::new(windows::default_shell().await?);
+            #[cfg(unix)]
+            let mut shell = CommandBuilder::new_default_prog();
+            if let Some(Invocation::Shell { script }) = default_or_script {
+                #[cfg(unix)]
+                {
+                    shell = CommandBuilder::new(shell.get_shell());
+                    shell.arg("-c");
+                }
+                #[cfg(windows)]
+                shell.args(["-NoLogo", "-NoProfile", "-Command"]);
+                shell.arg(script);
+            }
+            shell
+        }
+    };
+    builder.env("TERM", "xterm-256color");
+    #[cfg(windows)]
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        builder.cwd(home);
+    }
+    Ok(builder)
+}
+
+fn allowed(cfg: &Config, id: &str) -> bool {
+    cfg.peers
+        .values()
+        .any(|p| p.allow_terminal && p.endpoint_id.eq_ignore_ascii_case(id))
 }
 
 #[derive(Debug)]
@@ -59,11 +116,7 @@ impl Terminals {
 
     async fn serve(&self, conn: Connection) -> Result<()> {
         let id = conn.remote_id().to_string();
-        let permitted = |cfg: &Config| {
-            cfg.peers
-                .values()
-                .any(|p| p.allow_terminal && p.endpoint_id.eq_ignore_ascii_case(&id))
-        };
+        let permitted = |cfg: &Config| allowed(cfg, &id);
         let mut config = self.config.clone();
         if !config
             .borrow()
@@ -81,26 +134,28 @@ impl Terminals {
         } else if !can_host_shell()? {
             Err(wire::PRIVILEGED)
         } else if let Ok(slot) = self.slots.try_acquire() {
-            #[cfg(windows)]
-            let powershell = windows::default_shell().await;
+            let invocation = if conn.alpn() == wire::exec::PROTOCOL {
+                Some(timeout(CONNECT_TIMEOUT, Invocation::read(&mut recv)).await??)
+            } else {
+                None
+            };
+            let command = command_for(invocation).await;
+            let latest = config.clone();
+            let peer_id = id.clone();
             tokio::task::spawn_blocking(move || {
-                #[cfg(windows)]
-                let mut shell = CommandBuilder::new(powershell?);
-                #[cfg(not(windows))]
-                let mut shell = CommandBuilder::new_default_prog();
-                shell.env("TERM", "xterm-256color");
-                #[cfg(windows)]
-                if let Some(home) = std::env::var_os("USERPROFILE") {
-                    shell.cwd(home);
+                let grant = latest.borrow();
+                if !allowed(&grant, &peer_id) {
+                    return Err(wire::DENIED);
                 }
-                Session::spawn(shell, size.into())
+                command
+                    .and_then(|cmd| Session::spawn(cmd, size.into()))
+                    .map_err(|e| {
+                        eprintln!("start native terminal: {e:#}");
+                        wire::UNAVAILABLE
+                    })
             })
             .await?
             .map(|(session, events)| (session, events, slot))
-            .map_err(|e| {
-                eprintln!("start native terminal: {e:#}");
-                wire::UNAVAILABLE
-            })
         } else {
             Err(wire::BUSY)
         };

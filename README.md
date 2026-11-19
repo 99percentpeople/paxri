@@ -137,6 +137,17 @@ tunnel terminal-access allow laptop
 tunnel shell home
 ```
 
+`tunnel exec` 可以直接把一个程序作为远端 PTY 的前台进程启动。命令结束时 CLI 返回该程序的退出码。在终端窗口中，方向键、Ctrl+C、鼠标报告和窗口缩放沿用交互 shell 的通道。
+
+```sh
+tunnel exec home top
+tunnel exec home -- vim "notes from today.txt"
+tunnel exec home -c 'uname -s && uptime'
+tunnel exec yzzpc -c 'Get-Date'
+```
+
+程序名之后的参数逐项传递。`-c` 让远端默认 shell 解释一段命令，Windows 优先使用 PowerShell 7，再回退到 5.1。重定向输出时，远端 PTY 使用 80 列、24 行，CLI 会应答光标位置查询。捕获的输出包含程序的标准输出、标准错误和终端控制序列。重定向输入结束后 CLI 会等程序退出。需要输入结束键的程序可以按其终端模式接收 Ctrl+D 等按键。
+
 `tunnel terminal-access show laptop` 查看本机给该设备的权限。点击 **Revoke access** 或运行 `tunnel terminal-access deny laptop` 会断开该设备的原生终端。每个方向分别授权。配置项是 `peers.<别名>.allow_terminal`，默认为 `false`。接收端网关以普通用户身份运行时可托管 shell。root 或提升权限的 Windows 网关会拒绝此请求。升级时旧的 SSH 登录配置和按连接启动 sshd 的服务会被忽略。原生终端仍须逐设备授权。
 
 ### 用两台电脑测试打洞

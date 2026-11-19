@@ -76,11 +76,11 @@ def check_native_terminal(root, keys, call, start, cli, ipc):
     assert not host["terminal_access"] and "denied" in call("host", "terminal-access", "show", "client")
 
     @contextlib.contextmanager
-    def session():
+    def session(*command):
         master, slave = os.openpty()
         mode = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 31, 89, 0, 0))
-        child = subprocess.Popen([cli, "--ipc", ipc("client"), "shell", "host"],
+        child = subprocess.Popen([cli, "--ipc", ipc("client"), *(command or ("shell", "host"))],
                                  stdin=slave, stdout=slave, stderr=slave)
         try:
             yield child, master, slave
@@ -121,8 +121,44 @@ def check_native_terminal(root, keys, call, start, cli, ipc):
     with session() as (child, fd, _):
         assert child.wait(14) != 0
         read_until(fd, b"Terminal access denied")
+    marker = root / "exec-ran"
+    with session("exec", "host", "--", "touch", str(marker)) as (child, fd, _):
+        assert child.wait(14) != 0
+        read_until(fd, b"Terminal access denied")
+        assert not marker.exists()
     call("host", "terminal-access", "allow", "client")
     assert "client" in json.loads(call("host", "status", "--json"))["terminal_access"]
+    # Launch the foreground program directly, including an empty argument and a literal shell metacharacter.
+    screen = r"""
+import os, sys, time, tty
+assert all(os.isatty(n) for n in (0, 1, 2)) and os.environ['TERM'] == 'xterm-256color'
+assert sys.argv[1:] == ['two words', '', '-x', '$HOME']
+assert os.get_terminal_size() == (89, 31)
+tty.setraw(0)
+os.write(1, b'\x1b[?1049h\x1b[6n')
+assert sys.stdin.buffer.read(9) == b'\x1b[5;7R\x1b[A'
+end = time.monotonic() + 8
+while os.get_terminal_size() != (121, 42):
+    assert time.monotonic() < end
+    time.sleep(.02)
+os.write(2, b'resized\x1b[?1049l')
+sys.exit(37)
+"""
+    with session("exec", "host", "--", sys.executable, "-c", screen, "two words", "", "-x", "$HOME") as (child, fd, slave):
+        ready(slave)
+        read_until(fd, re.escape(b"\x1b[?1049h\x1b[6n"))
+        os.write(fd, b"\x1b[5;7R\x1b[A")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 42, 121, 0, 0))
+        child.send_signal(signal.SIGWINCH)
+        read_until(fd, re.escape(b"resized\x1b[?1049l"))
+        assert child.wait(12) == 37
+    captured = subprocess.run([cli, "--ipc", ipc("client"), "exec", "host", "-c",
+                               "test -t 0 && test -t 1 && test -t 2 || exit 2; stty -echo -icanon min 1; "
+                               "printf '\\033[6n'; reply=$(dd bs=1 count=6 2>/dev/null); "
+                               "test \"$reply\" = \"$(printf '\\033[1;1R')\" || exit 3; "
+                               "printf output; printf error >&2; exit 17"],
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=12)
+    assert (captured.returncode, captured.stdout, captured.stderr) == (17, b"\x1b[6noutputerror", b""), captured
     with session() as (child, fd, slave):
         ready(slave)
         query = b"""test -t 0 && printf 'PTY[%s]\\n' "$(stty size)"\r"""
@@ -146,14 +182,17 @@ def check_native_terminal(root, keys, call, start, cli, ipc):
         os.write(fd, b"""printf 'shell-pid=%s\\n' "$$"; sh -c 'printf "job-pid=%s\\n" "$$"; exec sleep 60'\r""")
         match = read_until(fd, rb"shell-pid=(\d+).*?job-pid=(\d+)")
         pids = [int(p) for p in match.groups()]
-        call("host", "terminal-access", "deny", "client")
+        with session("exec", "host", "-c", 'printf "exec-pid=%s\\n" "$$"; exec sleep 60') as (cmd, cmd_fd, _):
+            pids.append(int(read_until(cmd_fd, rb"exec-pid=(\d+)").group(1)))
+            call("host", "terminal-access", "deny", "client")
+            assert cmd.wait(10) != 0
         assert child.wait(10) != 0
         end = time.monotonic() + 5
         while any(Path(f"/proc/{pid}").exists() for pid in pids):
             assert time.monotonic() < end, "revocation left a shell or foreground job running"
             time.sleep(.05)
     assert host_process.poll() is None
-    print("Native PTY denial, grant, real shell, resize, final output, exit status and live revocation passed.")
+    print("Native shell and command PTYs: permissions, alternate screen, input, resize, output, exit and revocation passed.")
 
 
 def check_pairing(root, keys, call, start, target_port):

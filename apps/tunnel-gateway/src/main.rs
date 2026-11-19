@@ -408,7 +408,7 @@ async fn handle_client(
             };
             tunnel_control::respond(&mut socket, result).await
         }
-        open @ (Command::Connect { .. } | Command::OpenTerminal { .. }) => {
+        open @ (Command::Connect { .. } | Command::OpenTerminal { .. } | Command::Exec { .. }) => {
             let (transport, permit) = {
                 let gateway = gateway.lock().await;
                 (
@@ -424,37 +424,44 @@ async fn handle_client(
                 .await;
             };
             drop(management_slot);
-            if let Command::OpenTerminal { peer, size } = open {
-                use tokio::io::AsyncReadExt;
-                let opened = tokio::select! {
-                    result = transport.open_terminal(&peer, size) => result,
-                    _ = socket.read_u8() => return Ok(()),
-                };
-                let (_connection, mut send, mut recv) = match opened {
-                    Ok(connection) => connection,
-                    Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
-                };
-                tunnel_control::respond(&mut socket, Ok(())).await?;
-                let (mut input, mut output) = tokio::io::split(socket);
-                // Closing the tab or the peer's terminal closes the session in both directions.
-                tokio::select! {
-                    r = tokio::io::copy(&mut input, &mut send) => r?,
-                    r = tokio::io::copy(&mut recv, &mut output) => r?,
-                };
-                return Ok(());
-            }
-            let Command::Connect { peer, service } = open else {
-                unreachable!()
+            let (peer, size, invocation) = match open {
+                Command::OpenTerminal { peer, size } => (peer, size, None),
+                Command::Exec {
+                    peer,
+                    size,
+                    invocation,
+                } => (peer, size, Some(invocation)),
+                Command::Connect { peer, service } => {
+                    let stream = match tunnel_core::open_service(&*transport, &peer, &service).await
+                    {
+                        Ok(stream) => stream,
+                        Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
+                    };
+                    tunnel_control::respond(&mut socket, Ok(())).await?;
+                    let (reader, writer) = tokio::io::split(stream);
+                    return tunnel_control::bridge(socket, reader, writer)
+                        .await
+                        .with_context(|| format!("stream to {peer}/{service}"));
+                }
+                _ => unreachable!(),
             };
-            let stream = match tunnel_core::open_service(&*transport, &peer, &service).await {
-                Ok(stream) => stream,
+            use tokio::io::AsyncReadExt;
+            let opened = tokio::select! {
+                result = transport.open_pty(&peer, size, invocation) => result,
+                _ = socket.read_u8() => return Ok(()),
+            };
+            let (_connection, mut send, mut recv) = match opened {
+                Ok(connection) => connection,
                 Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
             };
             tunnel_control::respond(&mut socket, Ok(())).await?;
-            let (reader, writer) = tokio::io::split(stream);
-            tunnel_control::bridge(socket, reader, writer)
-                .await
-                .with_context(|| format!("stream to {peer}/{service}"))
+            let (mut input, mut output) = tokio::io::split(socket);
+            // Closing the client or the remote terminal ends the session in both directions.
+            tokio::select! {
+                r = tokio::io::copy(&mut input, &mut send) => r?,
+                r = tokio::io::copy(&mut recv, &mut output) => r?,
+            };
+            Ok(())
         }
     }
 }

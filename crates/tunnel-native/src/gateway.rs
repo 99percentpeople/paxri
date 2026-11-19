@@ -232,12 +232,11 @@ pub async fn start(
     };
     let (config, settings) = watch::channel(config);
     let streams = Arc::new(Semaphore::new(256));
+    let terminals = Arc::new(terminal::Terminals::new(settings.clone()));
     let router = Router::builder(endpoint.clone())
         .accept(pairing::PROTOCOL, pairing::PairingHandler::new(incoming))
-        .accept(
-            tunnel_terminal::PROTOCOL,
-            terminal::Terminals::new(settings.clone()),
-        )
+        .accept(tunnel_terminal::PROTOCOL, terminals.clone())
+        .accept(tunnel_terminal::exec::PROTOCOL, terminals)
         .accept(
             tunnel_core::reverse::PROTOCOL,
             reverse::Listeners::new(settings.clone(), streams.clone()),

@@ -2,6 +2,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+pub mod exec;
 pub mod pty;
 
 pub const PROTOCOL: &[u8] = b"p2p-terminal/1";

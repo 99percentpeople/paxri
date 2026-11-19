@@ -41,6 +41,24 @@ enum Command {
     Connect { peer: String, service: String },
     /// Open the paired device's native interactive shell
     Shell { peer: String },
+    /// Run a command in a paired device's native terminal and return its exit status
+    #[command(
+        after_help = "Examples\n  tunnel exec home top\n  tunnel exec home -- vim notes.txt\n  tunnel exec home -c 'uname -a'"
+    )]
+    Exec {
+        peer: String,
+        /// Run one script in the remote device's default shell
+        #[arg(
+            short = 'c',
+            long = "command",
+            value_name = "SCRIPT",
+            conflicts_with = "argv"
+        )]
+        script: Option<String>,
+        /// Remote executable followed by its literal arguments
+        #[arg(trailing_var_arg = true, num_args = 1.., required_unless_present = "script", value_names = ["PROGRAM", "ARG"])]
+        argv: Vec<String>,
+    },
     /// Manage a paired device's permission to open a shell on this device
     TerminalAccess {
         #[command(subcommand)]
@@ -120,31 +138,41 @@ fn load_config(path: &Path) -> Result<Config> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Command::Shell { peer } = cli.command {
-        let runtime = tokio::runtime::Runtime::new()?;
-        let ipc = cli.ipc.unwrap_or_else(tunnel_control::default_address);
-        let result = runtime.block_on(shell::run(&ipc, peer));
-        runtime.shutdown_background();
-        let code = result?;
-        if code != 0 {
-            std::process::exit(code as i32);
-        }
-        return Ok(());
-    }
-    let uses_stdio = matches!(cli.command, Command::Connect { .. });
+    let uses_stdio = matches!(
+        cli.command,
+        Command::Shell { .. } | Command::Exec { .. } | Command::Connect { .. }
+    );
     let runtime = tokio::runtime::Runtime::new()?;
     let result = runtime.block_on(run(cli));
     if uses_stdio {
         // A canceled Tokio stdin read may still be blocking on the terminal.
         runtime.shutdown_background();
     }
-    result
+    let code = result?;
+    if code != 0 {
+        std::process::exit(code as i32);
+    }
+    Ok(())
 }
 
-async fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli) -> Result<u32> {
     let ipc = cli.ipc.unwrap_or_else(tunnel_control::default_address);
     match cli.command {
-        Command::Shell { .. } => unreachable!(),
+        Command::Shell { peer } => return shell::run(&ipc, peer, None).await,
+        Command::Exec { peer, script, argv } => {
+            use tunnel_control::terminal::exec::Invocation;
+            let command = match script {
+                Some(script) => Invocation::Shell { script },
+                None => {
+                    let mut args = argv.into_iter();
+                    Invocation::Program {
+                        program: args.next().context("missing remote program")?,
+                        args: args.collect(),
+                    }
+                }
+            };
+            return shell::run(&ipc, peer, Some(command)).await;
+        }
         Command::TerminalAccess { action } => action.run(&ipc).await?,
         Command::Connect { peer, service } => {
             connect_stdio(&ipc, peer, service).await?;
@@ -199,7 +227,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Identity { key } => println!("{}", native::identity::init(&key)?.public()),
         Command::Probe { command } => run_probe(command).await?,
     }
-    Ok(())
+    Ok(0)
 }
 
 async fn connect_stdio(ipc: &Path, peer: String, service: String) -> Result<()> {

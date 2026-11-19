@@ -71,6 +71,11 @@ pub enum Command {
         peer: String,
         size: terminal::Size,
     },
+    Exec {
+        peer: String,
+        size: terminal::Size,
+        invocation: terminal::exec::Invocation,
+    },
     SetPortAccess {
         peer: String,
         ports: PortAccess,
@@ -404,15 +409,25 @@ pub async fn connect(path: &Path, peer: String, service: String) -> Result<Strea
 
 /// Open a native interactive terminal. After the reply, IPC carries terminal frames directly.
 pub async fn open_terminal(path: &Path, peer: String, size: terminal::Size) -> Result<Stream> {
-    let (socket, ()) = begin(
-        path,
-        Command::OpenTerminal {
+    open_pty(path, peer, size, None).await
+}
+
+pub async fn open_pty(
+    path: &Path,
+    peer: String,
+    size: terminal::Size,
+    invocation: Option<terminal::exec::Invocation>,
+) -> Result<Stream> {
+    let size = size.validate()?;
+    let command = match invocation {
+        Some(invocation) => Command::Exec {
             peer,
-            size: size.validate()?,
+            size,
+            invocation,
         },
-        Duration::from_secs(50),
-    )
-    .await?;
+        None => Command::OpenTerminal { peer, size },
+    };
+    let (socket, ()) = begin(path, command, Duration::from_secs(50)).await?;
     Ok(socket)
 }
 

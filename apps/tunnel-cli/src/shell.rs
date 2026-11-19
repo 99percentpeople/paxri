@@ -1,8 +1,9 @@
 //! Interactive local console for a gateway-hosted PTY.
 use anyhow::{Context, Result, bail, ensure};
 use std::{io::IsTerminal, path::Path};
-use tokio::io::AsyncWriteExt;
-use tunnel_control::terminal::Frame;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tunnel_control::terminal::{Frame, Size, exec::Invocation};
+mod capture;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -12,21 +13,49 @@ mod windows;
 #[cfg(windows)]
 use windows as platform;
 
-pub async fn run(ipc: &Path, peer: String) -> Result<u32> {
+pub async fn run(ipc: &Path, peer: String, invocation: Option<Invocation>) -> Result<u32> {
+    let console_output = std::io::stdout().is_terminal();
+    let attached = std::io::stdin().is_terminal() && console_output;
     ensure!(
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        attached || invocation.is_some(),
         "Open a terminal window to start an interactive shell"
     );
-    let mut changes = platform::Resize::new()?;
-    let size = platform::size()?;
-    let socket = tunnel_control::open_terminal(ipc, peer, size).await?;
+    let size = if console_output {
+        platform::size()?
+    } else {
+        Size { rows: 24, cols: 80 }
+    };
+    let socket = tunnel_control::open_pty(ipc, peer, size, invocation).await?;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    let _mode = platform::RawMode::enter()?;
+    let _mode = attached.then(platform::RawMode::enter).transpose()?;
     let (mut reader, mut writer) = tokio::io::split(socket);
+    let (replies, mut terminal_replies) = tokio::sync::mpsc::channel(4);
     let send = async {
+        if !attached {
+            let mut input = crate::stdio::input()?;
+            let mut bytes = [0; 8192];
+            let mut open = true;
+            loop {
+                let data = tokio::select! {
+                    biased;
+                    reply = terminal_replies.recv() => reply.context("terminal reply channel closed")?,
+                    read = input.read(&mut bytes), if open => {
+                        let n = read?;
+                        if n == 0 {
+                            // The PTY can still issue queries and send output after local EOF.
+                            open = false;
+                            continue;
+                        }
+                        bytes[..n].to_vec()
+                    }
+                };
+                Frame::Data(data).write(&mut writer).await?;
+            }
+        }
+        let mut changes = platform::Resize::new()?;
         let mut input = platform::Input::new();
         // The window may have changed while connecting.
         let mut current = platform::size()?;
@@ -51,7 +80,12 @@ pub async fn run(ipc: &Path, peer: String) -> Result<u32> {
         }
     };
     let receive = async {
-        let mut output = tokio::io::stdout();
+        let mut capture = (!attached).then(|| capture::RedirectedTerminal::new(size));
+        let mut output: Box<dyn AsyncWrite + Unpin> = if console_output {
+            Box::new(tokio::io::stdout())
+        } else {
+            Box::new(crate::stdio::output()?)
+        };
         #[cfg(windows)]
         let mut pending = Vec::new();
         loop {
@@ -60,10 +94,20 @@ pub async fn run(ipc: &Path, peer: String) -> Result<u32> {
                 .context("remote terminal disconnected")?
             {
                 Frame::Data(bytes) => {
+                    if let Some(term) = &mut capture {
+                        let reply = term.replies(&bytes);
+                        if !reply.is_empty() {
+                            replies.send(reply).await?;
+                        }
+                    }
                     #[cfg(unix)]
                     output.write_all(&bytes).await?;
                     #[cfg(windows)]
-                    windows::write_console(&mut output, &mut pending, &bytes).await?;
+                    if console_output {
+                        windows::write_console(&mut output, &mut pending, &bytes).await?;
+                    } else {
+                        output.write_all(&bytes).await?;
+                    }
                     output.flush().await?;
                 }
                 Frame::Exit(code) => return Ok(code),
@@ -72,7 +116,7 @@ pub async fn run(ipc: &Path, peer: String) -> Result<u32> {
         }
     };
     let session = async {
-        tokio::select! { result = receive => result, result = send => result }
+        tokio::select! { biased; result = receive => result, result = send => result }
     };
     #[cfg(unix)]
     return tokio::select! { result = session => result, _ = terminate.recv() => Ok(143), _ = hangup.recv() => Ok(129) };
