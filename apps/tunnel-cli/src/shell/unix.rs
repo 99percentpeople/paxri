@@ -1,8 +1,23 @@
 use anyhow::Result;
 use rustix::termios::{self, OptionalActions, Termios};
 use std::io;
+use tokio::io::{AsyncReadExt, Stdin};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tunnel_control::terminal::Size;
+
+pub(super) struct Input(Stdin);
+
+impl Input {
+    pub(super) fn new() -> Self {
+        Self(tokio::io::stdin())
+    }
+
+    pub(super) async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let mut buf = [0; 8192];
+        let n = self.0.read(&mut buf).await?;
+        Ok((n != 0).then(|| buf[..n].to_vec()))
+    }
+}
 
 pub(super) fn size() -> Result<Size> {
     let size = termios::tcgetwinsize(io::stdout())?;

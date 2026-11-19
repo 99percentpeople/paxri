@@ -270,6 +270,8 @@ impl Gateway {
         let ticket = self.transport.current_ticket().to_string();
         let config = &self.config;
         Status {
+            config_path: Some(self.file.path.clone()),
+            gui: tunnel_config::file::read_gui(&self.file.path).unwrap_or(config.gui),
             pairing: self.pairing.status(config.pairing_code.as_deref()),
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),
@@ -347,6 +349,13 @@ async fn handle_client(
         Command::Status => {
             let status = gateway.lock().await.status();
             tunnel_control::respond(&mut socket, Ok(status)).await
+        }
+        Command::SetGui { change } => {
+            let mut state = gateway.lock().await;
+            let result = tunnel_config::file::set_gui(&state.file.path, change, false)
+                .map(|_| state.status());
+            drop(state);
+            tunnel_control::respond(&mut socket, result).await
         }
         Command::RefreshPairingCode
         | Command::CancelPairing

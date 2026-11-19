@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! Desktop controller. The resident gateway owns configuration and listeners.
+use anyhow::Context as _;
 use clap::Parser;
 use gpui::{prelude::*, *};
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
@@ -19,6 +20,9 @@ struct Options {
     /// Same Unix socket path or Windows pipe name as tunnel-gateway
     #[arg(long)]
     ipc: Option<PathBuf>,
+    /// Node TOML to use while the gateway is offline
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 type OnComplete = Box<dyn FnOnce(Result<(), String>, &mut App)>;
@@ -28,16 +32,21 @@ struct GatewayRequest {
     on_complete: Option<OnComplete>,
 }
 
+enum RequestResult {
+    Gateway(Box<Status>),
+    OfflineGui(theme::GuiSettings),
+}
+
 struct Dashboard {
     home_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
-    terminal_settings: Entity<pages::TerminalSettings>,
     name_field: Option<Entity<Input>>,
     pairing_input: Entity<Input>,
     local_code: Entity<Input>,
     copied_feedback: Option<Task<()>>,
     saving: bool,
     address: Option<PathBuf>,
+    config_path: Option<PathBuf>,
     runtime: tokio::runtime::Handle,
     status: Option<Status>,
     error: Option<String>,
@@ -80,9 +89,33 @@ impl Dashboard {
             .address
             .clone()
             .unwrap_or_else(tunnel_control::default_address);
-        let job = self
-            .runtime
-            .spawn(async move { tunnel_control::request(&path, command).await });
+        let offline_path = self.config_path.clone();
+        let job = self.runtime.spawn(async move {
+            let change = match &command {
+                Command::SetGui { change } => Some(*change),
+                _ => None,
+            };
+            match (tunnel_control::request(&path, command).await, change) {
+                (Ok(status), _) => Ok(RequestResult::Gateway(Box::new(status))),
+                (Err(err), Some(change))
+                    if err.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                        matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        )
+                    }) =>
+                {
+                    let file = offline_path
+                        .context("Use --config to select this offline gateway's node TOML")?;
+                    let gui = tokio::task::spawn_blocking(move || {
+                        tunnel_config::file::set_gui(&file, change, true)
+                    })
+                    .await??;
+                    Ok(RequestResult::OfflineGui(gui))
+                }
+                (Err(err), _) => Err(err),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let result = job
                 .await
@@ -93,7 +126,15 @@ impl Dashboard {
                 view.saving = false;
                 let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 match result {
-                    Ok(status) => {
+                    Ok(RequestResult::OfflineGui(settings)) => {
+                        theme::apply(settings, cx);
+                        view.action_error = None;
+                    }
+                    Ok(RequestResult::Gateway(status)) => {
+                        if let Some(path) = &status.config_path {
+                            view.config_path = Some(path.clone());
+                        }
+                        theme::apply(status.gui, cx);
                         if name_saved {
                             view.name_field = None;
                         }
@@ -108,7 +149,7 @@ impl Dashboard {
                         {
                             view.copied_feedback = None;
                         }
-                        view.status = Some(status);
+                        view.status = Some(*status);
                         view.error = None;
                         if changing && on_complete.is_none() {
                             view.action_error = None;
@@ -138,19 +179,20 @@ impl Dashboard {
 
     fn new(
         address: Option<PathBuf>,
+        config_path: Option<PathBuf>,
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
             home_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
-            terminal_settings: cx.new(|_| pages::TerminalSettings::default()),
             name_field: None,
             local_code: Input::read_only("", cx),
             copied_feedback: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),
             saving: false,
             address,
+            config_path,
             runtime,
             status: None,
             error: None,
@@ -176,7 +218,11 @@ impl Dashboard {
 }
 
 fn main() {
-    let address = Options::parse().ipc;
+    let options = Options::parse();
+    let config = theme::offline_path(
+        options.config,
+        options.ipc.is_some() || std::env::var_os("TUNNEL_IPC").is_some(),
+    );
     let runtime = tokio::runtime::Runtime::new().expect("create IPC runtime");
     let handle = runtime.handle().clone();
     Application::new().run(move |cx: &mut App| {
@@ -188,9 +234,8 @@ fn main() {
             }
         })
         .detach();
-        theme::Appearance::init(cx);
-        theme::TerminalAppearance::init(cx);
-        let dashboard = cx.new(|cx| Dashboard::new(address, handle, cx));
+        theme::init(config.as_deref(), cx);
+        let dashboard = cx.new(|cx| Dashboard::new(options.ipc, config, handle, cx));
         Workspace::open_home(dashboard, cx).expect("open gateway window");
         cx.activate(true);
     });

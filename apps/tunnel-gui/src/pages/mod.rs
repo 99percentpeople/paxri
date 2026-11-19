@@ -4,7 +4,6 @@ mod peer_settings;
 mod rules;
 mod settings;
 mod terminal_settings;
-pub(crate) use terminal_settings::TerminalSettings;
 
 use crate::{
     Dashboard,

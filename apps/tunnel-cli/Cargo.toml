@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["fs", "io-std", "macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["fs", "io-std", "macros", "rt-multi-thread", "signal", "sync"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tunnel-config = { path = "../../crates/tunnel-config" }
 tunnel-native = { path = "../../crates/tunnel-native" }

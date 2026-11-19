@@ -202,8 +202,7 @@ impl Emulator {
     pub fn new(size: GridSize) -> Self {
         Self::with_palette(
             size,
-            &crate::theme::Appearance::Dark
-                .resolve(gpui::WindowAppearance::Dark)
+            &crate::theme::resolve(crate::theme::Appearance::Dark, gpui::WindowAppearance::Dark)
                 .terminal,
         )
     }

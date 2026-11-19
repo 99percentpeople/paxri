@@ -1,17 +1,12 @@
-//! Appearance is a desktop preference shared by every workspace window in this process.
+//! Appearance shared by every workspace connected to this node.
 mod palette;
-mod terminal;
 pub use palette::{Palette, TerminalPalette};
-pub use terminal::{CursorShape, TerminalAppearance, TerminalScheme};
-
-use anyhow::{Context as _, Result};
-use gpui::{App, Global, Pixels, Window, WindowAppearance, px};
-use std::{
-    fs,
-    io::{ErrorKind, Write},
-    path::{Path, PathBuf},
+pub use tunnel_config::gui::{
+    Appearance, CursorShape, GuiSettings, TerminalAppearance, TerminalScheme,
 };
-use tempfile::NamedTempFile;
+
+use gpui::{App, Global, Pixels, Window, WindowAppearance, px};
+use std::path::{Path, PathBuf};
 
 pub const SPACE_1: Pixels = px(4.);
 pub const SPACE_2: Pixels = px(8.);
@@ -21,97 +16,74 @@ pub const BUTTON_HEIGHT: Pixels = px(32.);
 pub const CONTROL_RADIUS: Pixels = px(6.);
 pub const PANEL_RADIUS: Pixels = px(8.);
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub enum Appearance {
-    #[default]
-    System,
-    Light,
-    Dark,
+#[derive(Default)]
+struct Preferences(GuiSettings);
+impl Global for Preferences {}
+
+pub fn current(cx: &App) -> GuiSettings {
+    cx.global::<Preferences>().0
 }
 
-impl Global for Appearance {}
+pub fn init(path: Option<&Path>, cx: &mut App) {
+    let settings = path
+        .and_then(|path| {
+            tunnel_config::file::read_gui(path)
+                .inspect_err(|err| eprintln!("Load settings from {}: {err:#}", path.display()))
+                .ok()
+        })
+        .unwrap_or_default();
+    cx.set_global(Preferences(settings));
+}
 
-impl Appearance {
-    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-        }
-    }
-
-    fn load(path: &Path) -> Result<Self> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Self::System),
-            Err(e) => return Err(e.into()),
-        };
-        Self::ALL
-            .into_iter()
-            .find(|mode| mode.label().eq_ignore_ascii_case(text.trim()))
-            .context("unrecognized appearance preference")
-    }
-
-    fn save(self, path: &Path) -> Result<()> {
-        save_preference(path, &format!("{}\n", self.label()))
-    }
-
-    pub fn init(cx: &mut App) {
-        let mode = preference_path("appearance")
-            .and_then(|path| Self::load(&path))
-            .unwrap_or_else(|err| {
-                eprintln!("Load appearance: {err}");
-                Self::System
-            });
-        cx.set_global(mode);
-    }
-
-    pub fn apply(self, cx: &mut App) -> Result<()> {
-        if *cx.global::<Self>() != self {
-            self.save(&preference_path("appearance")?)?;
-            cx.set_global(self);
-            cx.refresh_windows();
-        }
-        Ok(())
-    }
-
-    pub(crate) fn resolve(self, system: WindowAppearance) -> &'static Palette {
-        match (self, system) {
-            (Self::Dark, _)
-            | (Self::System, WindowAppearance::Dark | WindowAppearance::VibrantDark) => {
-                &palette::DARK
-            }
-            _ => &palette::LIGHT,
-        }
+pub fn apply(settings: GuiSettings, cx: &mut App) {
+    if current(cx) != settings {
+        cx.set_global(Preferences(settings));
+        cx.refresh_windows();
     }
 }
 
-fn preference_path(name: &str) -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .context("cannot find the user configuration directory")?
-        .join("p2p-tunnel")
-        .join(name))
+// Offline startup uses the ordinary per-user node unless a custom IPC address
+// selects a gateway whose configuration file has not been discovered yet.
+pub fn offline_path(config: Option<PathBuf>, custom_ipc: bool) -> Option<PathBuf> {
+    config.or_else(|| {
+        if custom_ipc {
+            return None;
+        }
+        #[cfg(windows)]
+        let dir = dirs::data_local_dir()?.join("P2PTunnel");
+        #[cfg(not(windows))]
+        let dir = dirs::config_dir()?.join("p2p-tunnel");
+        Some(dir.join("node.toml"))
+    })
 }
 
-fn save_preference(path: &Path, contents: &str) -> Result<()> {
-    let dir = path.parent().context("missing preference directory")?;
-    fs::create_dir_all(dir)?;
-    let mut file = NamedTempFile::new_in(dir)?;
-    file.write_all(contents.as_bytes())?;
-    file.persist(path)?;
-    Ok(())
+pub(crate) fn resolve(mode: Appearance, system: WindowAppearance) -> &'static Palette {
+    match (mode, system) {
+        (Appearance::Dark, _)
+        | (Appearance::System, WindowAppearance::Dark | WindowAppearance::VibrantDark) => {
+            &palette::DARK
+        }
+        _ => &palette::LIGHT,
+    }
+}
+
+pub(crate) fn terminal_palette(scheme: TerminalScheme, app: &Palette) -> &TerminalPalette {
+    match scheme {
+        TerminalScheme::FollowApp => &app.terminal,
+        TerminalScheme::Light => &palette::LIGHT.terminal,
+        TerminalScheme::Dark => &palette::DARK.terminal,
+        TerminalScheme::Midnight => &palette::MIDNIGHT,
+    }
 }
 
 pub fn palette(window: &Window, cx: &App) -> &'static Palette {
-    cx.global::<Appearance>().resolve(window.appearance())
+    resolve(current(cx).appearance, window.appearance())
 }
 
 pub fn observe(window: &Window) {
     window
         .observe_window_appearance(|window, cx| {
-            if *cx.global::<Appearance>() == Appearance::System {
+            if current(cx).appearance == Appearance::System {
                 window.refresh();
             }
         })
@@ -124,19 +96,6 @@ mod tests {
     use std::ptr;
 
     #[test]
-    fn appearance_defaults_to_system_and_round_trips_each_choice() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("p2p-tunnel/appearance");
-        assert_eq!(Appearance::load(&file).unwrap(), Appearance::System);
-        for mode in [Appearance::Dark, Appearance::Light, Appearance::System] {
-            mode.save(&file).unwrap();
-            assert_eq!(Appearance::load(&file).unwrap(), mode);
-        }
-        fs::write(&file, "unrecognized").unwrap();
-        assert!(Appearance::load(&file).is_err());
-    }
-
-    #[test]
     fn explicit_and_system_modes_resolve_both_native_appearances() {
         use WindowAppearance::*;
         for (system, palette) in [
@@ -145,9 +104,9 @@ mod tests {
             (Dark, &palette::DARK),
             (VibrantDark, &palette::DARK),
         ] {
-            assert!(ptr::eq(Appearance::System.resolve(system), palette));
-            assert!(ptr::eq(Appearance::Dark.resolve(system), &palette::DARK));
-            assert!(ptr::eq(Appearance::Light.resolve(system), &palette::LIGHT));
+            assert!(ptr::eq(resolve(Appearance::System, system), palette));
+            assert!(ptr::eq(resolve(Appearance::Dark, system), &palette::DARK));
+            assert!(ptr::eq(resolve(Appearance::Light, system), &palette::LIGHT));
         }
     }
 }

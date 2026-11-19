@@ -5,7 +5,7 @@ use crate::{
     theme::Appearance,
 };
 use gpui::{prelude::*, *};
-use tunnel_control::Command;
+use tunnel_control::{Command, GuiChange};
 
 fn copy_button(ui: Ui, id: &'static str, label: &'static str, text: String) -> Button {
     ui.button(Secondary, id, label)
@@ -14,7 +14,7 @@ fn copy_button(ui: Ui, id: &'static str, label: &'static str, text: String) -> B
 
 impl Dashboard {
     fn appearance_settings(&self, ui: Ui, cx: &Context<Self>) -> Div {
-        let chosen = *cx.global::<Appearance>();
+        let chosen = crate::theme::current(cx).appearance;
         let icon = |mode| match mode {
             Appearance::System => Icon::Monitor,
             Appearance::Light => Icon::Sun,
@@ -24,11 +24,12 @@ impl Dashboard {
             "theme",
             chosen,
             cx.listener(|view, mode: &Appearance, _, cx| {
-                view.action_error = mode
-                    .apply(cx)
-                    .err()
-                    .map(|err| format!("Save appearance: {err}"));
-                cx.notify();
+                view.send(
+                    Command::SetGui {
+                        change: GuiChange::Appearance(*mode),
+                    },
+                    cx,
+                );
             }),
         )
         .icon_trigger(icon(chosen), format!("Theme: {}", chosen.label()));
@@ -42,7 +43,7 @@ impl Dashboard {
     pub(crate) fn settings(&self, ui: Ui, cx: &mut Context<Self>) -> Div {
         let page = page("Settings")
             .child(self.appearance_settings(ui, cx))
-            .child(self.terminal_settings.clone());
+            .child(self.terminal_settings(ui, cx));
         let Some(s) = &self.status else {
             return page.child(self.gateway_notice(ui, cx));
         };
@@ -126,7 +127,10 @@ impl Dashboard {
                     .clone()
                     .unwrap_or_else(tunnel_control::default_address)
                     .display()
-            )));
+            )))
+            .when_some(s.config_path.as_ref(), |section, path| {
+                section.child(ui.muted(format!("Node configuration · {}", path.display())))
+            });
         let mut services = ui.section("Published services");
         if s.services.is_empty() {
             services = services.child(ui.muted("No services published."));

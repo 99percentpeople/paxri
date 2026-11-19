@@ -17,6 +17,7 @@ pub use tunnel_config::{
     Destination, DevicePlatform, Direction, Forward, PortAccess, listen_address, tcp_target,
 };
 
+pub use tunnel_config::gui::{GuiChange, GuiSettings};
 pub use tunnel_terminal as terminal;
 
 const VERSION: u16 = 1;
@@ -58,6 +59,9 @@ pub enum Command {
     },
     SetDeviceName {
         name: Option<String>,
+    },
+    SetGui {
+        change: GuiChange,
     },
     SetTerminalAccess {
         peer: String,
@@ -146,6 +150,10 @@ pub struct PairingPeer {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
+    #[serde(default)]
+    pub gui: GuiSettings,
     #[serde(default)]
     pub pairing: PairingStatus,
     pub device_id: String,

@@ -1,5 +1,13 @@
 version = 1
 
+[gui]
+appearance = "system"
+
+[gui.terminal]
+scheme = "follow-app"
+cursor_shape = "underline"
+blink_cursor = false
+
 # [native]
 # relay_url = "https://relay.example.org"
 

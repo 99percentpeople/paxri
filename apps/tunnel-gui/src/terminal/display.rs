@@ -285,7 +285,10 @@ mod tests {
             (TerminalScheme::Light, 0x6a6a6a),
             (TerminalScheme::Midnight, 0x8f99a7),
         ] {
-            let palette = scheme.palette(Appearance::Dark.resolve(WindowAppearance::Dark));
+            let palette = crate::theme::terminal_palette(
+                scheme,
+                crate::theme::resolve(Appearance::Dark, WindowAppearance::Dark),
+            );
             let at = |col| {
                 Style::from_cell(
                     &em.term.grid()[em.view_line(0)][Column(col)],
@@ -381,7 +384,7 @@ mod tests {
         let mut em = Emulator::new(super::super::emulator::GridSize { rows: 1, cols: 5 });
         em.process(b"A\x1b[31mB\x1b[38;5;67mC\x1b[38;2;31;99;227mD\x1b[0;7mE");
         for mode in [Appearance::Light, Appearance::Dark] {
-            let palette = &mode.resolve(WindowAppearance::Light).terminal;
+            let palette = &crate::theme::resolve(mode, WindowAppearance::Light).terminal;
             let at = |col| {
                 Style::from_cell(
                     &em.term.grid()[em.view_line(0)][Column(col)],

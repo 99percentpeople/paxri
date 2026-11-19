@@ -4,12 +4,17 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
+pub mod file;
+pub mod gui;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
     pub device_name: Option<String>,
     pub pairing_code: Option<String>,
+    #[serde(default)]
+    pub gui: gui::GuiSettings,
     #[serde(default)]
     pub native: Native,
     #[serde(default)]

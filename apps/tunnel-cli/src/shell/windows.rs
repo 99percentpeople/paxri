@@ -1,8 +1,68 @@
 use anyhow::Result;
 use std::{io, time::Duration};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tunnel_control::terminal::Size;
 use windows_sys::Win32::System::Console::*;
+
+// ReadConsoleW preserves Ctrl+Z as PTY input. Rust's standard console reader treats it as EOF.
+fn read_units(buffer: &mut [u16]) -> io::Result<usize> {
+    let mut count = 0;
+    let ok = unsafe {
+        ReadConsoleW(
+            GetStdHandle(STD_INPUT_HANDLE),
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut count,
+            std::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(count as usize)
+}
+
+pub(super) struct Input(mpsc::Receiver<io::Result<Vec<u8>>>);
+
+impl Input {
+    pub(super) fn new() -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        // Keep one console read pending across resize notifications.
+        tokio::task::spawn_blocking(move || {
+            let mut units = [0u16; 2048];
+            let mut carry = 0;
+            while !tx.is_closed() {
+                let count = match read_units(&mut units[carry..]) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let _ = tx.blocking_send(Err(error));
+                        break;
+                    }
+                };
+                let len = carry + count;
+                // A supplementary character may arrive in two separate console reads.
+                carry = usize::from(count != 0 && matches!(units[len - 1], 0xd800..=0xdbff));
+                let end = len - carry;
+                let text = String::from_utf16_lossy(&units[..end]);
+                if !text.is_empty() && tx.blocking_send(Ok(text.into_bytes())).is_err() {
+                    break;
+                }
+                if count == 0 {
+                    break;
+                }
+                if carry != 0 {
+                    units[0] = units[end];
+                }
+            }
+        });
+        Self(rx)
+    }
+
+    pub(super) async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
+        self.0.recv().await.transpose()
+    }
+}
 
 fn mode(id: STD_HANDLE) -> io::Result<u32> {
     let mut value = 0;

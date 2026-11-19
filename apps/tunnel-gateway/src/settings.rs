@@ -1,8 +1,8 @@
-use std::{fs, io::Write, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
-use tempfile::NamedTempFile;
 use toml_edit::{Array, DocumentMut, Table, TableLike, value};
+use tunnel_config::file::subtable;
 use tunnel_config::{Config, Destination, DevicePlatform, Direction};
 use tunnel_control::Command;
 
@@ -16,16 +16,6 @@ fn peer_table<'a>(doc: &'a mut DocumentMut, name: &str) -> Result<&'a mut dyn Ta
         .and_then(|p| p.get_mut(name))
         .and_then(|p| p.as_table_like_mut())
         .with_context(|| format!("Unknown peer {name}"))
-}
-
-fn subtable<'a>(table: &'a mut dyn TableLike, key: &str) -> Result<&'a mut dyn TableLike> {
-    if !table.contains_key(key) {
-        table.insert(key, Table::new().into());
-    }
-    table
-        .get_mut(key)
-        .and_then(|t| t.as_table_like_mut())
-        .context("Expected a settings table")
 }
 
 fn checked_document(doc: DocumentMut) -> Result<(String, Config)> {
@@ -181,20 +171,7 @@ impl SettingsFile {
     }
 
     pub fn persist(&mut self, text: String) -> Result<()> {
-        let path = &self.path;
-        ensure!(
-            fs::read_to_string(path)? == self.text,
-            "Configuration changed on disk. Restart the gateway before saving."
-        );
-        let mut temp =
-            NamedTempFile::new_in(path.parent().context("missing configuration directory")?)?;
-        temp.write_all(text.as_bytes())?;
-        temp.as_file()
-            .set_permissions(fs::metadata(path)?.permissions())?;
-        temp.as_file().sync_all()?;
-        temp.persist(path)
-            .with_context(|| format!("save {}", path.display()))?;
-        self.text = text;
+        self.text = tunnel_config::file::save_gateway(&self.path, &self.text, text)?;
         Ok(())
     }
 }
@@ -202,6 +179,7 @@ impl SettingsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn pairing_with_older_peers_preserves_saved_platform_and_grants() -> Result<()> {

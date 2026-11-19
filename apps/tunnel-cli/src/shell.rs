@@ -1,7 +1,7 @@
 //! Interactive local console for a gateway-hosted PTY.
 use anyhow::{Context, Result, bail, ensure};
 use std::{io::IsTerminal, path::Path};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tunnel_control::terminal::Frame;
 #[cfg(unix)]
 mod unix;
@@ -27,8 +27,7 @@ pub async fn run(ipc: &Path, peer: String) -> Result<u32> {
     let _mode = platform::RawMode::enter()?;
     let (mut reader, mut writer) = tokio::io::split(socket);
     let send = async {
-        let mut input = tokio::io::stdin();
-        let mut bytes = [0; 8192];
+        let mut input = platform::Input::new();
         // The window may have changed while connecting.
         let mut current = platform::size()?;
         if current != size {
@@ -36,10 +35,9 @@ pub async fn run(ipc: &Path, peer: String) -> Result<u32> {
         }
         loop {
             let frame = tokio::select! {
-                n = input.read(&mut bytes) => {
-                    let n = n?;
-                    if n == 0 { return Ok(0); }
-                    Frame::Data(bytes[..n].to_vec())
+                data = input.next() => {
+                    let Some(bytes) = data? else { return Ok(0); };
+                    Frame::Data(bytes)
                 }
                 result = changes.next() => {
                     result?;

@@ -9,7 +9,7 @@ mod selection;
 mod session;
 
 use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
-use crate::theme::{SPACE_2, TerminalAppearance};
+use crate::theme::SPACE_2;
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     term::{MIN_COLUMNS, TermMode},
@@ -88,8 +88,9 @@ impl Terminal {
         cx: &mut App,
     ) -> Entity<Self> {
         let grid = dimensions(window.viewport_size());
-        let appearance = *cx.global::<TerminalAppearance>();
-        let palette = appearance.scheme.palette(crate::theme::palette(window, cx));
+        let appearance = crate::theme::current(cx).terminal;
+        let palette =
+            crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
         let (session, events) = Session::start(peer, ipc, grid.pty(), runtime);
         cx.new(|cx| {
             let focus = cx.focus_handle();
@@ -310,8 +311,8 @@ impl Terminal {
 impl Render for Terminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::new(window, cx);
-        let appearance = *cx.global::<TerminalAppearance>();
-        let palette = appearance.scheme.palette(ui.colors);
+        let appearance = crate::theme::current(cx).terminal;
+        let palette = crate::theme::terminal_palette(appearance.scheme, ui.colors);
         self.emulator.palette = palette;
         let background = display::color(
             alacritty_terminal::vte::ansi::Color::Named(

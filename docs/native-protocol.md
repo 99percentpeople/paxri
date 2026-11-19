@@ -11,6 +11,11 @@
 | 字段 | 含义 |
 | --- | --- |
 | `version` | 当前为整数 `1`。 |
+| `device_name` | CLI 和 GUI 显示的本机名称。省略时使用计算机名。 |
+| `gui.appearance` | GUI 主题，取 `system`（默认）、`light` 或 `dark`。 |
+| `gui.terminal.scheme` | 终端配色，取 `follow-app`（默认）、`light`、`dark` 或 `midnight`。 |
+| `gui.terminal.cursor_shape` | 默认光标，取 `underline`（默认）、`bar` 或 `block`。 |
+| `gui.terminal.blink_cursor` | 默认光标是否闪烁，布尔值，默认 `false`。 |
 | `pairing_code` | 网关首次运行时保存的本机配对码。GUI 和 CLI 均可读取或刷新。 |
 | `native.relay_url` | 可选的 iroh 中继 HTTP(S) 地址。设计上省略时使用 iroh 的默认中继配置。自托管公网部署使用 HTTPS，两机可指定同一个中继。 |
 | `peers.<别名>.endpoint_id` | 对端设备公钥的 64 位十六进制文本。配对时用可信渠道核对。配置检查验证外形，网络握手验证对端持有对应私钥。 |

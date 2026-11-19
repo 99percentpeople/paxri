@@ -1,36 +1,26 @@
 use crate::{
+    Dashboard,
     components::{Select, Ui, form_row},
     terminal::TerminalPreview,
-    theme::{CursorShape, TerminalAppearance, TerminalScheme},
+    theme::{self, CursorShape, TerminalScheme},
 };
 use gpui::{prelude::*, *};
 
-#[derive(Default)]
-pub(crate) struct TerminalSettings {
-    error: Option<String>,
-}
+use tunnel_control::{Command, GuiChange};
 
-impl TerminalSettings {
-    fn change(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut TerminalAppearance)) {
-        let mut style = *cx.global::<TerminalAppearance>();
-        change(&mut style);
-        self.error = style
-            .apply(cx)
-            .err()
-            .map(|e| format!("Save terminal appearance: {e}"));
-        cx.notify();
-    }
-}
-
-impl Render for TerminalSettings {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ui = Ui::new(window, cx);
-        let style = *cx.global::<TerminalAppearance>();
+impl Dashboard {
+    pub(super) fn terminal_settings(&self, ui: Ui, cx: &Context<Self>) -> Div {
+        let style = theme::current(cx).terminal;
         let mut scheme = Select::new(
             "terminal-scheme",
             style.scheme,
             cx.listener(|view, value: &TerminalScheme, _, cx| {
-                view.change(cx, |style| style.scheme = *value);
+                view.send(
+                    Command::SetGui {
+                        change: GuiChange::Scheme(*value),
+                    },
+                    cx,
+                );
             }),
         );
         for value in TerminalScheme::ALL {
@@ -40,7 +30,12 @@ impl Render for TerminalSettings {
             "terminal-cursor-shape",
             style.cursor_shape,
             cx.listener(|view, value: &CursorShape, _, cx| {
-                view.change(cx, |style| style.cursor_shape = *value);
+                view.send(
+                    Command::SetGui {
+                        change: GuiChange::CursorShape(*value),
+                    },
+                    cx,
+                );
             }),
         );
         for shape in CursorShape::ALL {
@@ -50,7 +45,12 @@ impl Render for TerminalSettings {
             "terminal-cursor-blink",
             style.blink_cursor,
             cx.listener(|view, value: &bool, _, cx| {
-                view.change(cx, |style| style.blink_cursor = *value);
+                view.send(
+                    Command::SetGui {
+                        change: GuiChange::BlinkCursor(*value),
+                    },
+                    cx,
+                );
             }),
         )
         .option(false, "Steady")
@@ -64,8 +64,5 @@ impl Render for TerminalSettings {
                     .child(ui.labeled("Default cursor blink", blink)),
             )
             .child(TerminalPreview(style))
-            .when_some(self.error.as_ref(), |section, message| {
-                section.child(ui.alert(message.clone()))
-            })
     }
 }

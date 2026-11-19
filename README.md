@@ -65,7 +65,7 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 同一流程也可混用 CLI 和 GUI。发码端用 `tunnel pair code` 查看当前码，用 `tunnel pair refresh` 手动更换。另一端运行 `tunnel pair join <CODE>`。发码端用 `tunnel pair status` 查看请求，再运行 `tunnel pair accept <DEVICE_ID>` 或 `tunnel pair decline <DEVICE_ID>`。
 
-同一台电脑上，连接同一个网关的 CLI 和 GUI 共用 `tunnel-gateway --config` 指定的 TOML。配对身份、终端授权、端口授权和转发规则都由网关写入。另一端的网关使用它自己的文件。配对后需要访问哪些服务和地址，由各端的服务和端口授权决定。
+每台电脑使用一份由 `tunnel-gateway --config` 指定的节点 TOML。CLI 和 GUI 共用其中的设备名称、配对、授权和转发规则。GUI 的专属设置位于同一文件的 `[gui]` 和 `[gui.terminal]` 表。设备私钥位于 `--key` 指定的文件。完整示例见[笔记本配置](examples/laptop.toml)。
 
 ### 启动两个网关转发 TCP
 
@@ -85,9 +85,11 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 在 Windows 和 Linux 的 X11 桌面会话中，把独立窗口的标签拖进另一个工作区的顶栏或侧栏，标签会在鼠标仍然按住时并入。继续沿栏移动可以调整插入位置，再次越过阈值可以拆出，松手确定位置。经过页面正文时窗口保持分离。在 Windows 上，拆窗拖动途中按 **Esc** 可恢复原来的布局。
 
-在 **Menu → Settings → Appearance** 点击 **Theme** 右侧的图标按钮，可以选择 **System**、**Light** 或 **Dark**，默认跟随系统。切换会同时更新所有窗口和拖动中的标签。主题偏好保存在当前桌面用户配置目录的 `p2p-tunnel/appearance`，网关离线时也可以修改。
+在 **Menu → Settings → Appearance** 点击 **Theme** 右侧的图标按钮，可以选择 **System**、**Light** 或 **Dark**。设置写入 `gui.appearance`，默认跟随系统，切换会同时更新所有窗口和拖动中的标签。
 
-在 **Settings → Terminal** 中，**Color scheme** 默认跟随应用主题，也可以选择 **Neutral light**、**Neutral dark** 或 **Midnight**。**Default cursor shape** 与 **Default cursor blink** 设置本机默认光标。远端 shell 或编辑器可以移动、隐藏光标，指定方块、竖线、下划线、闪烁和颜色，复位后恢复本机设置。设置保存在当前桌面用户配置目录的 `p2p-tunnel/terminal.toml`。
+在 **Settings → Terminal** 中，**Color scheme** 默认跟随应用主题，也可以选择 **Neutral light**、**Neutral dark** 或 **Midnight**。**Default cursor shape** 与 **Default cursor blink** 设置本机默认光标。这些选项保存在 `[gui.terminal]` 下。远端 shell 或编辑器可以移动、隐藏光标，指定形状、闪烁和颜色，复位后恢复本机设置。CLI 使用启动它的终端的外观。
+
+运行 `tunnel status` 或打开 **Settings → Gateway** 可以查看当前节点配置的路径。GUI 在线时通过本机 IPC 将设置写入这份文件。网关离线时，可用 `tunnel-gui --config /path/to/node.toml` 指定要编辑的节点文件。校验配置可用 `tunnel config check /path/to/node.toml`。
 
 在 Wayland 桌面会话中可以拖出标签建立独立窗口。
 

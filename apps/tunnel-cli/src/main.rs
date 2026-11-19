@@ -161,6 +161,9 @@ async fn run(cli: Cli) -> Result<()> {
                     status.peers.len(),
                     status.services.len()
                 );
+                if let Some(path) = &status.config_path {
+                    println!("config {}", path.display());
+                }
                 for (name, id) in &status.peers {
                     println!("peer {name} {id} ({})", status.peer_platform(name).label());
                 }
