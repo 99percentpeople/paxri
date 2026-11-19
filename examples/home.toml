@@ -1,0 +1,13 @@
+version = 1
+
+# 两端使用同一台自托管中继时，填入实际地址。
+# [native]
+# relay_url = "https://relay.example.org"
+
+[peers.laptop]
+# 示例公钥，实际部署时换成笔记本生成的设备公钥。
+endpoint_id = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+
+[services.dev-web]
+target = "127.0.0.1:3000"
+allow_peers = ["laptop"]

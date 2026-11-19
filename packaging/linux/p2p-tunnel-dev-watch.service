@@ -1,0 +1,13 @@
+[Unit]
+Description=Build and update the Linux and Windows P2P Tunnel development apps
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/p2p-tunnel
+Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -u %h/p2p-tunnel/scripts/sync-windows.py --watch --dev
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

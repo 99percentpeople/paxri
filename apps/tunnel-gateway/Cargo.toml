@@ -1,0 +1,20 @@
+[package]
+name = "tunnel-gateway"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+gethostname = "1"
+toml_edit = "0.25"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync"] }
+tunnel-config = { path = "../../crates/tunnel-config" }
+tunnel-native = { path = "../../crates/tunnel-native" }
+tunnel-core = { path = "../../crates/tunnel-core" }
+tunnel-control = { path = "../../crates/tunnel-control" }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

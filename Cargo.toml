@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/*", "apps/*"]
+default-members = ["apps/tunnel-gateway", "apps/tunnel-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# GPUI 0.2.2 pulls zed-async-tar, whose xattr 0.2 uses a removed Linux libc alias.
+[patch.crates-io]
+xattr = { path = "compat/xattr" }

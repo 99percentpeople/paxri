@@ -1,0 +1,19 @@
+[package]
+name = "tunnel-control"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tunnel-config = { path = "../tunnel-config" }
+anyhow = "1"
+interprocess = { version = "2.4", features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1"

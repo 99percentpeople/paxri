@@ -1,0 +1,18 @@
+[Unit]
+Description=P2P Tunnel Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=p2p-tunnel
+Group=p2p-tunnel
+RuntimeDirectory=p2p-tunnel
+RuntimeDirectoryMode=0750
+UMask=0027
+ExecStart=/usr/local/bin/tunnel-gateway --config /etc/p2p-tunnel/node.toml --key /etc/p2p-tunnel/device.key --ipc /run/p2p-tunnel/gateway.sock
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

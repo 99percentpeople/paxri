@@ -1,0 +1,10 @@
+[package]
+name = "tunnel-config"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+url = { version = "2", features = ["serde"] }

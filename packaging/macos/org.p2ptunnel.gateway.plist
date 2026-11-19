@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>org.p2ptunnel.gateway</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/tunnel-gateway</string>
+        <string>--config</string><string>/Library/Application Support/P2P Tunnel/node.toml</string>
+        <string>--key</string><string>/Library/Application Support/P2P Tunnel/device.key</string>
+        <string>--ipc</string><string>/Library/Application Support/P2P Tunnel/run/gateway.sock</string>
+    </array>
+    <key>UserName</key><string>_p2ptunnel</string>
+    <key>GroupName</key><string>_p2ptunnel</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>ThrottleInterval</key><integer>5</integer>
+</dict>
+</plist>
