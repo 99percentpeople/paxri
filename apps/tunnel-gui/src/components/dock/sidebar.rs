@@ -107,10 +107,18 @@ pub(super) fn toggle<K: 'static>(state: Entity<DockState<K>>, ui: Ui, collapsed:
     ui.icon_button(ButtonVariant::Ghost, "toggle-sidebar", icon, label)
         .on_click(move |_, _, cx| {
             state.update(cx, |dock, cx| {
-                dock.settings.collapsed = !dock.settings.collapsed;
-                cx.notify();
+                dock.set_sidebar_collapsed(!dock.settings.collapsed, cx);
             });
         })
+}
+
+impl<K: 'static> DockState<K> {
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if self.settings.placement == DockPlacement::Left && self.settings.collapsed != collapsed {
+            self.settings.collapsed = collapsed;
+            cx.notify();
+        }
+    }
 }
 
 pub(super) fn sidebar<K: Clone + PartialEq + 'static>(

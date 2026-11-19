@@ -142,7 +142,7 @@ impl Ui {
         self,
         settings: DockSettings,
         icon: Icon,
-        label: SharedString,
+        label: impl IntoElement,
         selected: bool,
         close: Option<impl IntoElement>,
     ) -> Div {
@@ -172,17 +172,11 @@ impl Ui {
             DockPlacement::Top => tab.min_w(TAB_MIN_WIDTH).max_w(TAB_MAX_WIDTH),
             DockPlacement::Left => tab.w_full().min_w_0(),
         };
-        tab.px(SPACE_3)
+        tab.overflow_hidden()
+            .px(SPACE_3)
             .gap(SPACE_2)
             .child(icon.draw(16.))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_grow()
-                    .line_clamp(1)
-                    .text_ellipsis()
-                    .child(label),
-            )
+            .child(div().min_w_0().flex_grow().truncate().child(label))
             .children(close)
     }
 

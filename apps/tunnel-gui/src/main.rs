@@ -3,7 +3,11 @@
 use anyhow::Context as _;
 use clap::Parser;
 use gpui::{prelude::*, *};
-use std::{collections::VecDeque, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    path::PathBuf,
+    time::Duration,
+};
 use tunnel_control::{Command, Status};
 mod chrome;
 mod components;
@@ -38,6 +42,7 @@ enum RequestResult {
 }
 
 struct Dashboard {
+    terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
     name_field: Option<Entity<Input>>,
@@ -184,6 +189,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
+            terminal_sessions: BTreeMap::new(),
             home_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
             name_field: None,

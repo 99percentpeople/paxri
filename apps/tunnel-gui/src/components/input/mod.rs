@@ -25,6 +25,7 @@ pub struct TextInput<const MULTILINE: bool> {
     buffer: TextBuffer<MULTILINE>,
     pub focus: FocusHandle,
     placeholder: String,
+    inline: bool,
     layout: Option<InputLayout>,
     bounds: Option<Bounds<Pixels>>,
     scroll: Point<Pixels>,
@@ -34,18 +35,36 @@ pub struct TextInput<const MULTILINE: bool> {
     preferred_x: Option<Pixels>,
 }
 
+impl TextInput<false> {
+    pub fn inline(text: &str, cx: &mut App) -> Entity<Self> {
+        let mut buffer = TextBuffer::new(text);
+        buffer.anchor = 0;
+        Self::with_buffer(buffer, "", true, cx)
+    }
+
+    pub fn is_composing(&self) -> bool {
+        self.buffer.marked.is_some()
+    }
+}
+
 impl<const MULTILINE: bool> TextInput<MULTILINE> {
     pub fn new(text: &str, placeholder: &str, cx: &mut App) -> Entity<Self> {
-        Self::with_buffer(TextBuffer::new(text), placeholder, cx)
+        Self::with_buffer(TextBuffer::new(text), placeholder, false, cx)
     }
 
     pub fn read_only(text: &str, cx: &mut App) -> Entity<Self> {
-        Self::with_buffer(TextBuffer::read_only(text), "", cx)
+        Self::with_buffer(TextBuffer::read_only(text), "", false, cx)
     }
 
-    fn with_buffer(buffer: TextBuffer<MULTILINE>, placeholder: &str, cx: &mut App) -> Entity<Self> {
+    fn with_buffer(
+        buffer: TextBuffer<MULTILINE>,
+        placeholder: &str,
+        inline: bool,
+        cx: &mut App,
+    ) -> Entity<Self> {
         cx.new(|cx| Self {
             placeholder: placeholder.into(),
+            inline,
             focus: cx.focus_handle().tab_stop(true),
             buffer,
             layout: None,
@@ -386,6 +405,9 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
         let end_selection = cx.listener(Self::end_selection);
         Ui::new(window, cx)
             .input_frame("input", &focus)
+            .when(self.inline, |field| {
+                field.h(px(24.)).px(theme::SPACE_1).py_0()
+            })
             .when(MULTILINE, |field| {
                 field
                     .h(px(90.))

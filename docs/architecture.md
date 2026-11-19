@@ -119,7 +119,7 @@ TCP 监听器和本机 IPC 都可用「对端设备 + 服务名」打开已发�
 | 使用方式 | 发起端如何取得流 | 目标设备如何处理流 |
 | --- | --- | --- |
 | TCP 转发 | 客户端连接本机监听地址，例如 `127.0.0.1:8080` | 网关连接已发布的 TCP 服务 |
-| 原生终端 | `tunnel shell <peer>` 或设备页的 **Open terminal** 经本机 IPC 打开对端网关的 PTY。设备身份和逐对端授权用于鉴权，窗口尺寸直接传给主机 | Unix PTY 和 Windows ConPTY |
+| 原生终端 | `tunnel shell <peer>` 或设备页的 **New session** 经本机 IPC 打开独立的远端 PTY。GUI 按设备列出已打开的会话。设备身份和逐对端授权用于鉴权，窗口尺寸直接传给主机 | Unix PTY 和 Windows ConPTY |
 | 规划的 Web 应用 | 浏览器应用通过 WebRTC DataChannel 打开指定设备的服务 | 网关将流交给应用内的处理器，例如 HTTP/1.1 处理器，也可转给已有 TCP 服务 |
 
 `tunnel connect <peer> <service>` 通过本机 IPC 请求常驻网关开流。CLI 将错误写到标准错误，标准输出专用于业务字节。远端接受服务后，网关在 IPC 回复成功并切换到数据模式。每帧由 4 字节大端长度和至多 32 KiB 的数据组成，零长度表示当前发送方向的 EOF。另一方向可继续发送。

@@ -7,6 +7,8 @@ mod keys;
 mod mouse;
 mod selection;
 mod session;
+mod title;
+pub(crate) use title::TabTitle;
 
 use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
 use crate::theme::SPACE_2;
@@ -38,9 +40,10 @@ fn layout_grid(available: Bounds<Pixels>) -> (GridSize, Bounds<Pixels>) {
 
 pub struct Terminal {
     focus: FocusHandle,
+    pub(super) title: Entity<TabTitle>,
     emulator: Emulator,
     session: Option<Session>,
-    status: String,
+    error: Option<String>,
     marked: String,
     viewport: Bounds<Pixels>,
     selecting: bool,
@@ -49,6 +52,9 @@ pub struct Terminal {
     focused: bool,
     focus_observers: Option<(WindowId, [Subscription; 3])>,
 }
+
+pub(super) struct ShellExited;
+impl EventEmitter<ShellExited> for Terminal {}
 
 impl Focusable for Terminal {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -82,6 +88,7 @@ impl ScrollSource for Entity<Terminal> {
 impl Terminal {
     pub(super) fn open(
         peer: &str,
+        title: TabTitle,
         runtime: &tokio::runtime::Handle,
         ipc: Option<&Path>,
         window: &Window,
@@ -97,12 +104,19 @@ impl Terminal {
             cx.spawn(async move |this, cx| {
                 while let Ok(event) = events.recv().await {
                     let Ok(pending) = this.update(cx, |view: &mut Terminal, cx| {
-                        view.output(event);
+                        view.output(event, cx);
                         // Coalesce ready chunks into the same frame.
                         for event in std::iter::from_fn(|| events.try_recv().ok()).take(32) {
-                            view.output(event);
+                            view.output(event, cx);
                         }
                         let reply = view.emulator.finish_batch();
+                        if let Some(title) = view.emulator.take_title_update() {
+                            view.title.update(cx, |tab, cx| {
+                                if tab.set_pty(title) {
+                                    cx.notify();
+                                }
+                            });
+                        }
                         if !reply.is_empty() {
                             view.send(reply);
                         }
@@ -122,9 +136,10 @@ impl Terminal {
             emulator.set_default_cursor(cursor::default_style(appearance));
             Terminal {
                 focus,
+                title: cx.new(|_| title),
                 emulator,
                 session: Some(session),
-                status: String::new(),
+                error: None,
                 marked: String::new(),
                 viewport: Bounds::default(),
                 selecting: false,
@@ -140,6 +155,10 @@ impl Terminal {
         self.session.is_some()
     }
 
+    pub(super) fn has_exited(&self) -> bool {
+        self.session.is_none() && self.error.is_none()
+    }
+
     fn resize(&mut self, available: Bounds<Pixels>, cx: &mut Context<Self>) -> Bounds<Pixels> {
         let (grid, bounds) = layout_grid(available);
         self.viewport = bounds;
@@ -151,21 +170,23 @@ impl Terminal {
         }
         bounds
     }
-    fn output(&mut self, event: Output) {
+    fn output(&mut self, event: Output, cx: &mut Context<Self>) {
         match event {
             Output::Bytes(bytes) => self.emulator.process(&bytes),
             Output::Error(error) => {
                 if self.is_running() {
-                    self.status = format!("Terminal I/O: {error}");
+                    self.error = Some(format!("Terminal I/O: {error}"));
                 }
             }
             Output::Exited(result) => {
                 self.session = None;
-                self.status = match result {
-                    Ok(status) if status.success() => "Session ended".into(),
-                    Ok(status) => format!("Disconnected · {status}"),
-                    Err(e) => format!("Session error: {e}"),
-                };
+                match result {
+                    Ok(_) => {
+                        self.error = None;
+                        cx.emit(ShellExited);
+                    }
+                    Err(e) => self.error = Some(format!("Session error: {e}")),
+                }
             }
         }
     }
@@ -390,7 +411,7 @@ impl Render for Terminal {
             .text_color(rgb(palette.surface.foreground))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
-            .when(!self.status.is_empty(), |d| {
+            .when_some(self.error.clone(), |d, error| {
                 d.child(
                     div()
                         .flex_none()
@@ -401,7 +422,7 @@ impl Render for Terminal {
                         .items_center()
                         .bg(rgb(ui.colors.canvas.background))
                         .text_color(rgb(ui.colors.canvas.foreground))
-                        .child(div().flex_1().text_sm().child(self.status.clone()))
+                        .child(div().flex_1().text_sm().child(error))
                         .when(!self.is_running(), |bar| {
                             bar.child(ui.button(Primary, "reconnect", "Reconnect").on_click(
                                 |_, w, cx| {

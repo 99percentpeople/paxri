@@ -54,6 +54,9 @@ impl Origin {
     }
 
     fn restore_tabs(&self, v: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>) {
+        if self.page.shell_exited(cx) {
+            return;
+        }
         if !v.tabs.contains(&self.page) {
             v.tabs
                 .insert(self.index.min(v.tabs.len()), self.page.clone());
@@ -103,6 +106,9 @@ pub(super) fn tear_off(
             };
         }
         let _ = view.update_in(cx, |v, w, cx| {
+            if tab.page.shell_exited(cx) {
+                return;
+            }
             let held_indent = if grab.is_some() && button_down() {
                 indent
             } else {

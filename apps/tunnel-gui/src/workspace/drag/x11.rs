@@ -273,7 +273,8 @@ pub(super) fn tear_off(
     w.on_next_frame(move |w, cx| {
         w.spawn(cx, async move |cx| {
             let _ = source.update_in(cx, |v, w, cx| {
-                if v.tabs.contains(&tab.page)
+                if tab.page.shell_exited(cx)
+                    || v.tabs.contains(&tab.page)
                     || v.other_window_with(w, cx, |p| *p == tab.page).is_some()
                 {
                     return;

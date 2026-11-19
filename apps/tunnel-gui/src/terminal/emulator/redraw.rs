@@ -93,6 +93,7 @@ pub(super) enum Boundary {
     Up,
     Erase(usize),
     End,
+    Reset,
     ColorQuery,
 }
 
@@ -148,7 +149,7 @@ impl Perform for Prefix {
     }
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         if !ignore && intermediates.is_empty() && byte == b'c' {
-            self.event = Some(Boundary::End);
+            self.event = Some(Boundary::Reset);
         }
         self.margin = false;
         self.up = 0;

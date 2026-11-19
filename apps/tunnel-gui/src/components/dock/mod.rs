@@ -15,7 +15,7 @@ pub use tabs::DockTabs;
 
 const TAB_HEIGHT: Pixels = px(31.);
 const TAB_MIN_WIDTH: Pixels = px(96.);
-const TAB_MAX_WIDTH: Pixels = px(224.);
+const TAB_MAX_WIDTH: Pixels = px(180.);
 
 pub struct DockHeader {
     title: SharedString,

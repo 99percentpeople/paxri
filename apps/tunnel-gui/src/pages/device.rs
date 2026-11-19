@@ -2,7 +2,7 @@ use super::{peer_detail, peer_settings::PortsForm, rules::RuleForm};
 use crate::{
     Dashboard, GatewayRequest, Workspace,
     components::{
-        ButtonVariant::{Primary, Secondary},
+        ButtonVariant::{Ghost, Primary, Secondary},
         Icon, ListItem, Ui, page,
     },
 };
@@ -86,15 +86,41 @@ impl DeviceSettings {
 }
 
 impl DeviceSettings {
-    fn open_button(&self, ui: Ui) -> crate::components::Button {
+    fn session_list(&self, ui: Ui, cx: &Context<Self>) -> Div {
         let peer = self.peer.clone();
-        ui.button(Primary, "open-terminal", "Open terminal")
-            .icon(Icon::Terminal)
+        let new_session = ui
+            .button(Primary, "new-terminal-session", "New session")
+            .icon(Icon::Plus)
             .on_click(move |_, w, cx| {
                 if let Some(workspace) = w.root::<Workspace>().flatten() {
-                    workspace.update(cx, |v, cx| v.open_terminal(&peer, w, cx));
+                    workspace.update(cx, |v, cx| v.new_terminal(peer.clone(), w, cx));
                 }
+            });
+        let mut sessions = self
+            .dashboard
+            .read(cx)
+            .open_session_numbers(&self.peer)
+            .peekable();
+        ui.section("Native terminal")
+            .child(ListItem::new("Sessions").trailing(new_session))
+            .when(sessions.peek().is_none(), |list| {
+                list.child(ui.muted("No open sessions."))
             })
+            .children(sessions.map(|number| {
+                let peer = self.peer.clone();
+                ListItem::new(format!("Session {number}"))
+                    .leading(Icon::Terminal.draw(16.))
+                    .trailing(
+                        ui.button(Ghost, ("show-terminal", number), "Show")
+                            .on_click(move |_, w, cx| {
+                                if let Some(workspace) = w.root::<Workspace>().flatten() {
+                                    workspace.update(cx, |v, cx| {
+                                        v.show_terminal(peer.clone(), number, w, cx)
+                                    });
+                                }
+                            }),
+                    )
+            }))
     }
 
     fn native_terminal(&self, allowed: bool, ui: Ui, cx: &Context<Self>) -> Div {
@@ -108,14 +134,12 @@ impl DeviceSettings {
         } else {
             "Grant this peer a shell as the local gateway user."
         };
-        ui.section("Native terminal")
-            .child(ListItem::new("Remote shell").trailing(self.open_button(ui)))
-            .child(ui.separator())
-            .child(
-                ListItem::new("Access to this device")
-                    .detail(ui.muted(access))
-                    .trailing(ui.button(Secondary, "terminal-access", action).on_click(
-                        cx.listener(move |v, _, _, cx| {
+        self.session_list(ui, cx).child(ui.separator()).child(
+            ListItem::new("Access to this device")
+                .detail(ui.muted(access))
+                .trailing(
+                    ui.button(Secondary, "terminal-access", action)
+                        .on_click(cx.listener(move |v, _, _, cx| {
                             v.send(
                                 Command::SetTerminalAccess {
                                     peer: v.peer.to_string(),
@@ -123,9 +147,9 @@ impl DeviceSettings {
                                 },
                                 cx,
                             );
-                        }),
-                    )),
-            )
+                        })),
+                ),
+        )
     }
 }
 

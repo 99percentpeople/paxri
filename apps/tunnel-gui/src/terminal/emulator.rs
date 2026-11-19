@@ -126,7 +126,7 @@ impl RowAnchor {
 struct CursorAnchor(usize);
 
 impl CursorAnchor {
-    fn capture(term: &mut Term<Replies>) -> Self {
+    fn capture(term: &mut Term<TerminalEvents>) -> Self {
         let cursor = &term.grid().cursor;
         let point = cursor.point;
         let after = point.column.0 + usize::from(cursor.input_needs_wrap);
@@ -146,7 +146,7 @@ impl CursorAnchor {
         Self(offset)
     }
 
-    fn restore(self, term: &mut Term<Replies>) {
+    fn restore(self, term: &mut Term<TerminalEvents>) {
         let mut line = term.line_search_left(term.grid().cursor.point).line;
         let grid = term.grid_mut();
         let mut offset = self.0;
@@ -162,27 +162,36 @@ impl CursorAnchor {
     }
 }
 
-#[derive(Clone, Default)]
-pub(super) struct Replies(Rc<RefCell<Vec<Event>>>);
+#[derive(Default)]
+struct PendingEvents {
+    replies: Vec<Event>,
+    // Only the last title in an output batch is visible. An empty title restores the default.
+    title: Option<String>,
+}
 
-impl EventListener for Replies {
+#[derive(Clone, Default)]
+pub(super) struct TerminalEvents(Rc<RefCell<PendingEvents>>);
+
+impl EventListener for TerminalEvents {
     fn send_event(&self, event: Event) {
-        if matches!(
-            event,
-            Event::PtyWrite(_) | Event::TextAreaSizeRequest(_) | Event::ColorRequest(_, _)
-        ) {
-            self.0.borrow_mut().push(event);
+        match event {
+            Event::Title(title) => self.0.borrow_mut().title = Some(title),
+            Event::ResetTitle => self.0.borrow_mut().title = Some(String::new()),
+            Event::PtyWrite(_) | Event::TextAreaSizeRequest(_) | Event::ColorRequest(_, _) => {
+                self.0.borrow_mut().replies.push(event);
+            }
+            _ => {}
         }
     }
 }
 
 pub(super) struct Emulator {
-    pub term: Term<Replies>,
+    pub term: Term<TerminalEvents>,
     pub palette: &'static TerminalPalette,
     default_cursor: CursorStyle,
     pub selection_unit: Unit,
     parser: Processor,
-    replies: Replies,
+    events: TerminalEvents,
     last_primary_top: Option<RowAnchor>,
     resized_in_alt: bool,
     redraw: Redraw,
@@ -208,15 +217,15 @@ impl Emulator {
     }
 
     pub fn with_palette(size: GridSize, palette: &'static TerminalPalette) -> Self {
-        let replies = Replies::default();
+        let events = TerminalEvents::default();
         let default_cursor = super::cursor::default_style(Default::default());
         Self {
-            term: Term::new(Self::config(default_cursor), &size, replies.clone()),
+            term: Term::new(Self::config(default_cursor), &size, events.clone()),
             palette,
             default_cursor,
             selection_unit: Unit::Character,
             parser: Processor::new(),
-            replies,
+            events,
             last_primary_top: None,
             resized_in_alt: false,
             redraw: Redraw::default(),
@@ -241,10 +250,10 @@ impl Emulator {
             };
             if matches!(event, Boundary::ColorQuery) {
                 // Resolve at the query, even if a later OSC in this same read resets the slot.
-                let first = self.replies.0.borrow().len();
+                let first = self.events.0.borrow().replies.len();
                 self.parser.advance(&mut self.term, chunk);
                 self.flush_sync();
-                for event in &mut self.replies.0.borrow_mut()[first..] {
+                for event in &mut self.events.0.borrow_mut().replies[first..] {
                     if let Event::ColorRequest(index, format) = event {
                         let name = match *index {
                             i if i == NamedColor::Foreground as usize => NamedColor::Foreground,
@@ -271,6 +280,11 @@ impl Emulator {
             match event {
                 Boundary::Up if editing => self.redraw.start_up(self.term.grid()),
                 Boundary::Erase(up) if editing => self.redraw.erase(up, self.term.grid_mut()),
+                Boundary::Reset => {
+                    // Alacritty clears its title stack on RIS without emitting a title event.
+                    self.events.send_event(Event::ResetTitle);
+                    self.redraw.clear();
+                }
                 _ => self.redraw.clear(),
             }
             self.parser
@@ -308,7 +322,7 @@ impl Emulator {
             self.last_primary_top = Some(RowAnchor::at(self.term.grid(), Line(0)));
         }
         let mut bytes = Vec::new();
-        for event in self.replies.0.borrow_mut().drain(..) {
+        for event in self.events.0.borrow_mut().replies.drain(..) {
             let reply = match event {
                 Event::PtyWrite(text) => text,
                 Event::TextAreaSizeRequest(format) => format(WindowSize {
@@ -322,6 +336,12 @@ impl Emulator {
             bytes.extend_from_slice(reply.as_bytes());
         }
         bytes
+    }
+
+    pub fn take_title_update(&self) -> Option<String> {
+        let mut title = self.events.0.borrow_mut().title.take()?;
+        title.retain(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}'));
+        Some(title)
     }
 
     pub fn resize(&mut self, size: GridSize) -> bool {
@@ -436,6 +456,33 @@ mod tests {
         )
         .trim_end_matches('\n')
         .into()
+    }
+
+    #[test]
+    fn pty_titles_survive_split_sequences_and_restore_the_default() {
+        let mut em = Emulator::new(grid(4, 20));
+        em.process(b"\x1b[22;0t");
+        for byte in "\x1b]0;项目; build\x1b\\".as_bytes() {
+            em.process(std::slice::from_ref(byte));
+            em.finish_batch();
+        }
+        assert_eq!(em.take_title_update().as_deref(), Some("项目; build"));
+        em.process(b"\x1b[22;0t\x1b]2;editor\x07\x1b[5n");
+        assert_eq!(em.finish_batch(), b"\x1b[0n");
+        assert_eq!(em.take_title_update().as_deref(), Some("editor"));
+        em.process(b"\x1b[23;0t");
+        assert_eq!(em.take_title_update().as_deref(), Some("项目; build"));
+        em.process(b"\x1b[23;0t");
+        assert_eq!(em.take_title_update().as_deref(), Some(""));
+
+        em.process(b"\x1b]2;first\x07\x1b]2;last\x07");
+        assert_eq!(em.take_title_update().as_deref(), Some("last"));
+        em.process(b"\x1b]2;\x07");
+        assert_eq!(em.take_title_update().as_deref(), Some(""));
+        em.process(b"\x1b]2;another title\x07\x1bc");
+        assert_eq!(em.take_title_update().as_deref(), Some(""));
+        em.process(b"ordinary output");
+        assert_eq!(em.take_title_update(), None);
     }
 
     #[test]

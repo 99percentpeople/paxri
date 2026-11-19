@@ -124,7 +124,13 @@ tunnel forward list
 
 ### 打开原生远程终端
 
-两台设备配对后，在被访问的电脑上打开 **Device settings → Native terminal**，点击 **Allow access** 授权这台对端。连接方在对应设备页点击 **Open terminal**。网关会以运行它的普通用户身份创建 PTY。Windows 使用 ConPTY，优先启动 PowerShell 7（`pwsh.exe`），找不到可用的 7 时启动系统自带的 Windows PowerShell 5.1。Linux 和 macOS 使用账户的默认 shell。两端只需运行网关，桌面端直接通过本机 IPC 打开终端。
+两台设备配对后，在被访问的电脑上打开 **Device settings → Native terminal**，点击 **Allow access** 授权这台对端。连接方在对应设备页点击 **New session**，每次都会在新标签中打开独立的 shell。按钮下方按编号列出当前 GUI 到这台设备的会话。点击 **Show** 可以切回该标签或它所在的独立窗口。
+
+网关会以运行它的普通用户身份创建 PTY。Windows 使用 ConPTY，优先启动 PowerShell 7（`pwsh.exe`），找不到可用的 7 时启动系统自带的 Windows PowerShell 5.1。Linux 和 macOS 使用账户的默认 shell。两端只需运行网关，桌面端直接通过本机 IPC 打开终端。
+
+退出远端 shell 会自动关闭对应的终端标签。如果它是窗口中的最后一个标签，窗口也会关闭。连接失败时，可在终端中点击 **Reconnect** 重试。
+
+终端标签默认跟随 shell 设置的标题。需要默认名时，先用设备名。如果已有终端标签显示该名称，就从 `设备名-1` 开始选用最小的可用后缀。例如，已有 `pi` 和 `pi-1` 时，把 `pi` 改为 `build`，再开会话就能用回 `pi`。双击终端标签可以直接改名。按 **Enter** 保存，按 **Esc** 取消。保存后会话使用手动名称，清空名称再保存即可恢复自动标题。
 
 在 GUI 终端里，启用了鼠标报告的远端程序可以接收点击、拖动和滚轮。按住 **Shift** 可以在本机拖选文字或查看滚动历史。程序启用焦点报告后，切换标签页或激活窗口也会通知远端。详细的事件方向和兼容范围见[原生终端协议](docs/native-protocol.md#原生终端)。
 
