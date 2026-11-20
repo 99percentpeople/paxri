@@ -7990,6 +7990,7 @@ dependencies = [
  "objc2-app-kit",
  "portable-pty",
  "raw-window-handle",
+ "tempfile",
  "tokio",
  "tunnel-cli",
  "tunnel-config",

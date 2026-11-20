@@ -9,7 +9,8 @@ use tunnel_control::terminal::{
 pub use pty::Output;
 
 pub struct Session {
-    pub io: pty::Session,
+    io: pty::Session,
+    size: Option<PtySize>,
     pub input: Input,
     task: JoinHandle<()>,
 }
@@ -57,12 +58,7 @@ impl Input {
 }
 
 impl Session {
-    pub fn start(
-        peer: &str,
-        ipc: Option<&Path>,
-        size: PtySize,
-        runtime: &Handle,
-    ) -> (Self, Receiver<Output>) {
+    pub fn start(peer: &str, ipc: Option<&Path>, runtime: &Handle) -> (Self, Receiver<Output>) {
         let (io, keys, sizes) = pty::Session::channels();
         let (output, events) = async_channel::bounded(32);
         let address = ipc
@@ -71,6 +67,8 @@ impl Session {
         let peer = peer.to_owned();
         let task = runtime.spawn(async move {
             let result = async {
+                // The first layout supplies the content area after tabs and padding.
+                let size = sizes.recv().await?;
                 let stream = tunnel_control::open_terminal(&address, peer, size.into()).await?;
                 wire::client(stream, keys, sizes, &output).await
             }
@@ -85,7 +83,22 @@ impl Session {
             runtime: runtime.clone(),
             pending: None,
         };
-        (Self { io, input, task }, events)
+        (
+            Self {
+                io,
+                size: None,
+                input,
+                task,
+            },
+            events,
+        )
+    }
+
+    pub fn resize(&mut self, size: PtySize) {
+        if self.size != Some(size) {
+            self.size = Some(size);
+            self.io.resize(size);
+        }
     }
 }
 
@@ -98,6 +111,58 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn first_layout_sizes_the_shell_and_enter_is_forwarded_once() -> anyhow::Result<()> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        use tunnel_control::{Command, ControlListener, receive, respond};
+
+        let dir = tempfile::Builder::new()
+            .prefix("p2p-gui-terminal-")
+            .tempdir()?;
+        #[cfg(unix)]
+        let ipc = dir.path().join("ipc/gateway.sock");
+        #[cfg(windows)]
+        let ipc = std::path::PathBuf::from(dir.path().file_name().unwrap());
+        let gateway = ControlListener::bind(&ipc).await?;
+        let (mut session, _output) = Session::start("pi", Some(&ipc), &Handle::current());
+        let quiet = Duration::from_millis(50);
+        assert!(timeout(quiet, gateway.accept()).await.is_err());
+
+        timeout(Duration::from_secs(5), async {
+            let initial = PtySize {
+                rows: 33,
+                cols: 108,
+                ..PtySize::default()
+            };
+            session.resize(initial);
+            let mut stream = gateway.accept().await?;
+            let command = receive(&mut stream).await?;
+            assert!(matches!(command, Command::OpenTerminal { peer, size }
+                if peer == "pi" && size == initial.into()));
+            respond(&mut stream, Ok(())).await?;
+
+            session.resize(initial);
+            assert!(
+                timeout(quiet, wire::Frame::read(&mut stream))
+                    .await
+                    .is_err()
+            );
+            session.input.send(vec![b'\r']);
+            let input = wire::Frame::read(&mut stream).await?;
+            assert!(matches!(input, wire::Frame::Data(bytes) if bytes == b"\r"));
+            let resized = PtySize {
+                cols: 80,
+                ..initial
+            };
+            session.resize(resized);
+            let resize = wire::Frame::read(&mut stream).await?;
+            assert!(matches!(resize, wire::Frame::Resize(size) if size == resized.into()));
+            Ok(())
+        })
+        .await?
+    }
 
     #[tokio::test]
     async fn backpressure_preserves_input_and_query_reply_order() {

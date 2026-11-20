@@ -98,7 +98,7 @@ impl Terminal {
         let appearance = crate::theme::current(cx).terminal;
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
-        let (session, events) = Session::start(peer, ipc, grid.pty(), runtime);
+        let (session, events) = Session::start(peer, ipc, runtime);
         cx.new(|cx| {
             let focus = cx.focus_handle();
             cx.spawn(async move |this, cx| {
@@ -162,11 +162,13 @@ impl Terminal {
     fn resize(&mut self, available: Bounds<Pixels>, cx: &mut Context<Self>) -> Bounds<Pixels> {
         let (grid, bounds) = layout_grid(available);
         self.viewport = bounds;
-        if bounds.size.width > px(0.) && bounds.size.height > px(0.) && self.emulator.resize(grid) {
-            if let Some(session) = &self.session {
-                session.io.resize(grid.pty());
+        if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
+            if let Some(session) = &mut self.session {
+                session.resize(grid.pty());
             }
-            cx.notify();
+            if self.emulator.resize(grid) {
+                cx.notify();
+            }
         }
         bounds
     }
