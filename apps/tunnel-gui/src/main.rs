@@ -1,7 +1,6 @@
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! Desktop controller. The resident gateway owns configuration and listeners.
 use anyhow::Context as _;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use gpui::{prelude::*, *};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -19,14 +18,15 @@ use components::Input;
 use workspace::Workspace;
 
 #[derive(Parser)]
-#[command(about = "P2P Tunnel desktop controller")]
+#[command(about = "Open the P2P Tunnel desktop app, or run a command in this terminal")]
 struct Options {
-    /// Same Unix socket path or Windows pipe name as tunnel-gateway
-    #[arg(long)]
-    ipc: Option<PathBuf>,
-    /// Node TOML to use while the gateway is offline
+    #[command(flatten)]
+    gateway: tunnel_cli::GatewayOptions,
+    /// Node TOML for offline desktop settings
     #[arg(long)]
     config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<tunnel_cli::Command>,
 }
 
 type OnComplete = Box<dyn FnOnce(Result<(), String>, &mut App)>;
@@ -223,11 +223,26 @@ impl Dashboard {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let options = Options::parse();
+    if let Some(command) = options.command {
+        if options.config.is_some() {
+            Options::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--config selects offline desktop settings and cannot be used with a subcommand",
+                )
+                .exit();
+        }
+        return command.run(options.gateway);
+    }
+
+    #[cfg(windows)]
+    release_launch_console();
+    let ipc = options.gateway.ipc;
     let config = theme::offline_path(
         options.config,
-        options.ipc.is_some() || std::env::var_os("TUNNEL_IPC").is_some(),
+        ipc.is_some() || std::env::var_os("TUNNEL_IPC").is_some(),
     );
     let runtime = tokio::runtime::Runtime::new().expect("create IPC runtime");
     let handle = runtime.handle().clone();
@@ -241,8 +256,22 @@ fn main() {
         })
         .detach();
         theme::init(config.as_deref(), cx);
-        let dashboard = cx.new(|cx| Dashboard::new(options.ipc, config, handle, cx));
+        let dashboard = cx.new(|cx| Dashboard::new(ipc, config, handle, cx));
         Workspace::open_home(dashboard, cx).expect("open gateway window");
         cx.activate(true);
     });
+    Ok(())
+}
+
+#[cfg(windows)]
+fn release_launch_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+
+    // Explorer can allocate a console just for this process when launching the desktop app.
+    let mut pid = 0;
+    unsafe {
+        if GetConsoleProcessList(&mut pid, 1) == 1 && pid == std::process::id() {
+            FreeConsole();
+        }
+    }
 }

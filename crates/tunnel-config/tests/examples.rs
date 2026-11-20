@@ -47,7 +47,17 @@ fn port_rules_have_one_destination_and_remote_listeners_need_a_tcp_target() {
 fn retired_ssh_entries_are_inert_and_normal_tcp_services_still_work() {
     let config = parse(&format!("{HOME}\n[peers.laptop.ssh]\nuser='alice'\n[services.legacy]\ntarget={{sshd_config='/old/sshd_config'}}\nallow_peers=['laptop']\n[services.tcp22]\ntarget='127.0.0.1:22'\nallow_peers=['laptop']")).unwrap();
     assert!(!config.services.contains_key("legacy"));
-    assert!(!config.peers["laptop"].allow_terminal);
     assert_eq!(config.services["tcp22"].target, "127.0.0.1:22");
     assert!(parse(&HOME.replace("\"127.0.0.1:3000\"", "{ typo = true }")).is_err());
+}
+
+#[test]
+fn existing_peers_with_a_saved_terminal_flag_still_load() {
+    for flag in ["true", "false"] {
+        let config = HOME.replace(
+            "[peers.laptop]",
+            &format!("[peers.laptop]\nallow_terminal = {flag}"),
+        );
+        assert!(parse(&config).unwrap().peers.contains_key("laptop"));
+    }
 }

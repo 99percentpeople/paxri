@@ -50,7 +50,7 @@ impl NativeTransport {
             }
             match recv.read_u8().await? {
                 wire::READY => Ok((conn, send, recv)),
-                wire::DENIED => bail!("Terminal access denied. On the remote device, allow this peer under Device settings → Native terminal."),
+                wire::DENIED => bail!("The remote gateway denied the terminal request. Check that the devices are paired."),
                 wire::BUSY => bail!("All native terminal sessions are in use"),
                 wire::PRIVILEGED => bail!("The remote gateway must run as a non-elevated user to host a terminal"),
                 wire::UNAVAILABLE if invocation.is_some() => bail!("The remote gateway could not start the requested program"),
@@ -94,10 +94,10 @@ async fn command_for(invocation: Option<Invocation>) -> Result<CommandBuilder> {
     Ok(builder)
 }
 
-fn allowed(cfg: &Config, id: &str) -> bool {
+fn is_paired(cfg: &Config, id: &str) -> bool {
     cfg.peers
         .values()
-        .any(|p| p.allow_terminal && p.endpoint_id.eq_ignore_ascii_case(id))
+        .any(|peer| peer.endpoint_id.eq_ignore_ascii_case(id))
 }
 
 #[derive(Debug)]
@@ -116,20 +116,15 @@ impl Terminals {
 
     async fn serve(&self, conn: Connection) -> Result<()> {
         let id = conn.remote_id().to_string();
-        let permitted = |cfg: &Config| allowed(cfg, &id);
+        let paired = |cfg: &Config| is_paired(cfg, &id);
         let mut config = self.config.clone();
-        if !config
-            .borrow()
-            .peers
-            .values()
-            .any(|p| p.endpoint_id.eq_ignore_ascii_case(&id))
-        {
+        if !paired(&config.borrow()) {
             conn.close(1u32.into(), b"peer not paired");
             return Ok(());
         }
         let (mut send, mut recv) = timeout(CONNECT_TIMEOUT, conn.accept_bi()).await??;
         let size = timeout(CONNECT_TIMEOUT, Size::read(&mut recv)).await??;
-        let prepared = if !permitted(&config.borrow_and_update()) {
+        let prepared = if !paired(&config.borrow_and_update()) {
             Err(wire::DENIED)
         } else if !can_host_shell()? {
             Err(wire::PRIVILEGED)
@@ -143,8 +138,8 @@ impl Terminals {
             let latest = config.clone();
             let peer_id = id.clone();
             tokio::task::spawn_blocking(move || {
-                let grant = latest.borrow();
-                if !allowed(&grant, &peer_id) {
+                let config = latest.borrow();
+                if !is_paired(&config, &peer_id) {
                     return Err(wire::DENIED);
                 }
                 command
@@ -160,7 +155,7 @@ impl Terminals {
             Err(wire::BUSY)
         };
         match prepared {
-            Ok((session, output, _slot)) if permitted(&config.borrow_and_update()) => {
+            Ok((session, output, _slot)) if paired(&config.borrow_and_update()) => {
                 send.write_u8(wire::READY).await?;
                 let input = async {
                     loop {
@@ -193,7 +188,7 @@ impl Terminals {
                 };
                 let result = tokio::select! {
                     biased;
-                    _ = config.wait_for(|cfg| !permitted(cfg)) => Ok(()),
+                    _ = config.wait_for(|cfg| !paired(cfg)) => Ok(()),
                     result = stream_output => result,
                     result = input => result,
                 };

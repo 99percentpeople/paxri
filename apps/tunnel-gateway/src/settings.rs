@@ -79,14 +79,6 @@ impl SettingsFile {
                     doc.remove("device_name");
                 }
             },
-            Command::SetTerminalAccess { peer, allowed } => {
-                let table = peer_table(&mut doc, peer)?;
-                if *allowed {
-                    table.insert("allow_terminal", value(true));
-                } else {
-                    table.remove("allow_terminal");
-                }
-            }
             Command::SetPortAccess { peer, ports } => {
                 let peer = peer_table(&mut doc, peer)?;
                 if ports.connect.is_empty() && ports.listen.is_empty() {
@@ -187,7 +179,7 @@ mod tests {
         let file = SettingsFile {
             path: PathBuf::new(),
             text: format!(
-                "version=1\n[peers.lab]\nendpoint_id='{id}'\nplatform='macos'\nallow_terminal=true\n"
+                "version=1\n[peers.lab]\nendpoint_id='{id}'\nplatform='macos'\nports.connect=['127.0.0.1:8080']\n"
             ),
         };
         for reported in [
@@ -203,7 +195,7 @@ mod tests {
                 DevicePlatform::MacOs
             };
             assert_eq!(peer.platform, Some(expected));
-            assert!(peer.allow_terminal);
+            assert_eq!(peer.ports.connect, ["127.0.0.1:8080"]);
         }
         Ok(())
     }

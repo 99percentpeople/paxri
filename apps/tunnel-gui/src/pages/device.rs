@@ -2,7 +2,7 @@ use super::{peer_detail, peer_settings::PortsForm, rules::RuleForm};
 use crate::{
     Dashboard, GatewayRequest, Workspace,
     components::{
-        ButtonVariant::{Ghost, Primary, Secondary},
+        ButtonVariant::{Ghost, Primary},
         Icon, ListItem, Ui, page,
     },
 };
@@ -122,35 +122,6 @@ impl DeviceSettings {
                     )
             }))
     }
-
-    fn native_terminal(&self, allowed: bool, ui: Ui, cx: &Context<Self>) -> Div {
-        let action = if allowed {
-            "Revoke access"
-        } else {
-            "Allow access"
-        };
-        let access = if allowed {
-            "This peer can run commands as the local gateway user."
-        } else {
-            "Grant this peer a shell as the local gateway user."
-        };
-        self.session_list(ui, cx).child(ui.separator()).child(
-            ListItem::new("Access to this device")
-                .detail(ui.muted(access))
-                .trailing(
-                    ui.button(Secondary, "terminal-access", action)
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            v.send(
-                                Command::SetTerminalAccess {
-                                    peer: v.peer.to_string(),
-                                    allowed: !allowed,
-                                },
-                                cx,
-                            );
-                        })),
-                ),
-        )
-    }
 }
 
 impl Render for DeviceSettings {
@@ -165,12 +136,8 @@ impl Render for DeviceSettings {
             return page.child(ui.muted("This device is no longer paired."));
         };
         page = page.child(ui.muted(peer_detail(status.peer_platform(&self.peer), id)));
-        page = page.child(self.native_terminal(
-            status.terminal_access.contains(self.peer.as_ref()),
-            ui,
-            cx,
-        ));
-        page.child(self.forwarding(status, ui, cx))
+        page.child(self.session_list(ui, cx))
+            .child(self.forwarding(status, ui, cx))
             .child(self.port_access(status, ui, cx))
     }
 }

@@ -1,0 +1,16 @@
+services:
+  gateway:
+    image: p2p-tunnel:local
+    build: .
+    pull_policy: never
+    network_mode: host
+    uts: host
+    init: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - node-data:/var/lib/p2p-tunnel
+
+volumes:
+  node-data:

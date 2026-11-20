@@ -16,7 +16,7 @@ import time
 import zipfile
 
 
-ROOT_FILES = {".gitignore", "Cargo.toml", "Cargo.lock", "README.md"}
+ROOT_FILES = {".dockerignore", ".gitignore", "Cargo.toml", "Cargo.lock", "Dockerfile", "README.md", "compose.yaml"}
 SOURCE_DIRS = {"apps", "compat", "crates", "docs", "examples", "packaging", "scripts"}
 EXCLUDED_DIRS = {".git", "target", "__pycache__"}
 # The command is constant. Paths and source bytes travel inside the zipapp on stdin.

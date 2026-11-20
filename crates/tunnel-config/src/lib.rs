@@ -40,8 +40,9 @@ pub struct Peer {
     // Accept profiles written by versions with the OpenSSH client.
     #[serde(rename = "ssh", default)]
     _legacy_ssh: Option<serde::de::IgnoredAny>,
-    #[serde(default)]
-    pub allow_terminal: bool,
+    // Stored by earlier gateways. The paired identity now grants terminal access.
+    #[serde(rename = "allow_terminal", default)]
+    _legacy_terminal: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub ports: PortAccess,
 }

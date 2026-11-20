@@ -9,11 +9,28 @@ P2P Tunnel 面向处在不同网络的两台或多台电脑，提供类似 SSH �
 
 ## 当前可以使用
 
-工作区提供三个 Rust 程序。`tunnel-gateway` 常驻并持有设备密钥、iroh 会话和 TCP 监听器。`tunnel` 是命令行客户端，也保留独立的身份、配置检查和网络诊断命令。`tunnel-gui` 是 GPUI 桌面客户端，通过与 CLI 相同的本机接口操作网关。
+工作区提供三个 Rust 程序。`tunnel-gateway` 常驻并持有设备密钥、iroh 会话和 TCP 监听器。`tunnel` 和 `tunnel-gui` 共用全部命令行子命令。无参数运行 `tunnel` 会显示帮助，无参数运行 `tunnel-gui` 会打开桌面主页。桌面版可独立执行这些子命令，使用当前终端的标准输入和输出。`exec` 会返回远端程序的退出码。
+
+```sh
+tunnel-gui
+tunnel-gui status
+tunnel-gui exec yzzpc -c "Get-Date" > result.txt
+```
+
+### 安装网关
+
+在装有 Docker Engine 和 Compose 的 Linux 主机上，从项目根目录运行以下命令。Docker 负责启动网关，CLI 已包含在镜像中。
+
+```sh
+docker compose up -d --build --wait
+docker compose exec gateway tunnel pair code
+```
+
+也可以将网关直接安装为 Linux systemd 服务。容器数据卷、离线镜像安装、配对以及原生服务安装命令见[安装指南](docs/installation.md)。
 
 ### 构建与运行
 
-默认构建网关和 CLI。桌面端单独构建，无桌面的主机可以跳过 GPUI 依赖。Linux 构建桌面端需要 GPUI 的开发库，例如 Debian 的 `libfontconfig1-dev`、`libxkbcommon-dev`、`libxkbcommon-x11-dev`、`libwayland-dev` 和 `libvulkan-dev`，运行时需要图形会话和 Vulkan 驱动。
+默认构建网关和 CLI。桌面端单独构建，无桌面的主机可以跳过 GPUI 依赖。Linux 构建桌面端需要 GPUI 的开发库，例如 Debian 的 `libfontconfig1-dev`、`libxkbcommon-dev`、`libxkbcommon-x11-dev`、`libwayland-dev` 和 `libvulkan-dev`。打开桌面界面需要图形会话和 Vulkan 驱动。
 
 ```sh
 cargo build --locked
@@ -39,7 +56,7 @@ python3 scripts/sync-windows.py --watch  # 持续同步本地修改，Ctrl+C 退
 
 ### 自动更新两端的开发程序
 
-在 Linux 开发机运行 `python3 scripts/sync-windows.py --watch --dev`，会持续把源码同步到 `yzzpc`。Rust 源码或 Cargo 配置变化时，两台机器各自增量构建三个程序。两边都编译成功且构建期间源码稳定后，更新各自 `target/debug` 的产物。文档变更只同步源码。编译失败会保留当前程序，修正后自动重试。监听地址、配对、终端授权和设备密钥保存在原位置。
+在 Linux 开发机运行 `python3 scripts/sync-windows.py --watch --dev`，会持续把源码同步到 `yzzpc`。Rust 源码或 Cargo 配置变化时，两台机器各自增量构建三个程序。两边都编译成功且构建期间源码稳定后，更新各自 `target/debug` 的产物。文档变更只同步源码。编译失败会保留当前程序，修正后自动重试。监听地址、配对、端口授权和设备密钥保存在原位置。
 
 更新器只重启二进制发生变化的开发进程。Linux 复用当前用户的 `p2p-tunnel-gateway.service` 和 `p2p-tunnel-gui.service`。Windows 通过当前登录用户的桌面会话重新启动正在使用此开发目录的网关或 GUI，保留原启动参数。重启网关会中断该网关的活动连接，重启 GUI 会关闭其终端标签。仅更新 CLI 时，已运行的界面和网关可继续使用。两端需要可用的 Rust 工具链，Windows 更新正在运行的桌面程序时需要用户已登录。
 
@@ -58,10 +75,10 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 1. 第一台的 **Your pairing code** 用单行只读输入框显示本机配对码。点击复制图标（**Copy code**）可复制完整配对码，成功后图标短暂显示为勾号。也可以选中框内文字，用 Ctrl+C（macOS 用 Cmd+C）复制，再把配对码发给另一台的使用者。重启或配对成功后，这个码仍可用。
 2. 在第二台的 **Pair with another device** 粘贴配对码，点击 **Pair device**。
-3. 在第一台核对请求里的设备名和设备 ID，点击 **Accept**。双方的 **Paired devices** 都会出现对方。选择 **Decline** 可以拒绝该次请求。点击刷新图标（**Refresh code**）会更换本机配对码，并撤销旧码下的待确认请求。已配对设备继续使用原有连接和权限。
+3. 在第一台核对请求里的设备名和设备 ID，点击 **Accept**。双方的 **Paired devices** 都会出现对方，并可使用对方网关账户打开终端。选择 **Decline** 可以拒绝该次请求。点击刷新图标（**Refresh code**）会更换本机配对码，并撤销旧码下的待确认请求。已配对设备继续使用原有连接和权限。
 
 配对请求和设备列表显示对端报告的平台图标及名称。已有设备在两端升级并连通后自动补齐，离线时沿用已保存的信息。平台未知时显示通用电脑图标。CLI 可用 `tunnel status` 查看同一信息。
-4. 点击设备旁的 **Device settings** 打开它的标签页。这里可以授权和打开原生终端、管理这台设备的转发规则，以及设置对方可以访问的本机地址。
+4. 点击设备旁的 **Device settings** 打开它的标签页。这里可以打开原生终端、管理这台设备的转发规则，以及设置对方可以访问的本机地址。
 
 同一流程也可混用 CLI 和 GUI。发码端用 `tunnel pair code` 查看当前码，用 `tunnel pair refresh` 手动更换。另一端运行 `tunnel pair join <CODE>`。发码端用 `tunnel pair status` 查看请求，再运行 `tunnel pair accept <DEVICE_ID>` 或 `tunnel pair decline <DEVICE_ID>`。
 
@@ -124,7 +141,7 @@ tunnel forward list
 
 ### 打开原生远程终端
 
-两台设备配对后，在被访问的电脑上打开 **Device settings → Native terminal**，点击 **Allow access** 授权这台对端。连接方在对应设备页点击 **New session**，每次都会在新标签中打开独立的 shell。按钮下方按编号列出当前 GUI 到这台设备的会话。点击 **Show** 可以切回该标签或它所在的独立窗口。
+配对后，在本机打开对方的 **Device settings → Native terminal**，点击 **New session** 即可在新标签中打开对方的 shell。按钮下方按编号列出当前 GUI 到这台设备的会话。点击 **Show** 可以切回该标签或它所在的独立窗口。
 
 网关会以运行它的普通用户身份创建 PTY。Windows 使用 ConPTY，优先启动 PowerShell 7（`pwsh.exe`），找不到可用的 7 时启动系统自带的 Windows PowerShell 5.1。Linux 和 macOS 使用账户的默认 shell。两端只需运行网关，桌面端直接通过本机 IPC 打开终端。
 
@@ -134,12 +151,9 @@ tunnel forward list
 
 在 GUI 终端里，启用了鼠标报告的远端程序可以接收点击、拖动和滚轮。按住 **Shift** 可以在本机拖选文字或查看滚动历史。程序启用焦点报告后，切换标签页或激活窗口也会通知远端。详细的事件方向和兼容范围见[原生终端协议](docs/native-protocol.md#原生终端)。
 
-要从 `laptop` 连接 `home`，可以在两台设备的交互式命令行分别运行下面的命令。
+配对后，在 `laptop` 上运行下面的命令即可打开 `home` 的 shell。
 
 ```sh
-# 在 home 上授权 laptop
-tunnel terminal-access allow laptop
-# 在 laptop 上打开 home 的 shell
 tunnel shell home
 ```
 
@@ -154,7 +168,7 @@ tunnel exec yzzpc -c 'Get-Date'
 
 程序名之后的参数逐项传递。`-c` 让远端默认 shell 解释一段命令，Windows 优先使用 PowerShell 7，再回退到 5.1。重定向输出时，远端 PTY 使用 80 列、24 行，CLI 会应答光标位置查询。捕获的输出包含程序的标准输出、标准错误和终端控制序列。重定向输入结束后 CLI 会等程序退出。需要输入结束键的程序可以按其终端模式接收 Ctrl+D 等按键。
 
-`tunnel terminal-access show laptop` 查看本机给该设备的权限。点击 **Revoke access** 或运行 `tunnel terminal-access deny laptop` 会断开该设备的原生终端。每个方向分别授权。配置项是 `peers.<别名>.allow_terminal`，默认为 `false`。接收端网关以普通用户身份运行时可托管 shell。root 或提升权限的 Windows 网关会拒绝此请求。升级时旧的 SSH 登录配置和按连接启动 sshd 的服务会被忽略。原生终端仍须逐设备授权。
+接收端网关以普通用户身份运行时可托管 shell。root 或提升权限的 Windows 网关会拒绝此请求。升级时旧的 SSH 登录配置和按连接启动 sshd 的服务会被忽略。
 
 ### 用两台电脑测试打洞
 

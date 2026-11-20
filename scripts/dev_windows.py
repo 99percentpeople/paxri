@@ -50,6 +50,18 @@ def argv(command):
         ctypes.windll.kernel32.LocalFree(ctypes.cast(args, ctypes.c_void_p))
 
 
+def launches_desktop(arguments):
+    # Only restart windows. Replaying a GUI executable's CLI subcommand could run it twice.
+    args = iter(arguments)
+    for arg in args:
+        if arg == "--":
+            return next(args, None) is None
+        option, equals, _ = arg.partition("=")
+        if option not in ("--ipc", "--config") or (not equals and next(args, None) is None):
+            return False
+    return True
+
+
 def apps(live, all_sessions=False):
     processes = json.loads(powershell("""
         $s=(Get-Process -Id $PID).SessionId
@@ -58,9 +70,16 @@ def apps(live, all_sessions=False):
           Select-Object ProcessId,ExecutablePath,CommandLine,Name)
         ConvertTo-Json -Compress -InputObject $all
     """, P2P_DEV_ALL=int(all_sessions)))
-    return [dict(name=p["Name"], pid=p["ProcessId"], exe=p["ExecutablePath"], command=p["CommandLine"],
-                 args=argv(p["CommandLine"])) for p in processes
-            if p["ExecutablePath"] and Path(p["ExecutablePath"]) == live / p["Name"]]
+    running = []
+    for p in processes:
+        if not p["CommandLine"] or not p["ExecutablePath"] or Path(p["ExecutablePath"]) != live / p["Name"]:
+            continue
+        args = argv(p["CommandLine"])
+        if p["Name"].lower() == "tunnel-gui.exe" and not launches_desktop(args[1:]):
+            continue
+        running.append(dict(name=p["Name"], pid=p["ProcessId"], exe=p["ExecutablePath"],
+                            command=p["CommandLine"], args=args))
+    return running
 
 
 def stop(app):

@@ -57,7 +57,7 @@ async def check_remote_eof(command):
             await process.wait()
 
 
-def check_native_terminal(root, keys, call, start, cli, ipc):
+def check_native_terminal(root, keys, call, start, cli, ipc, wait):
     import errno
     import fcntl
     import re
@@ -66,14 +66,13 @@ def check_native_terminal(root, keys, call, start, cli, ipc):
     import struct
     import termios
 
-    # An existing TCP port grant does not confer native shell access.
-    (root / "host.toml").write_text(
-        f'version=1\n[peers.client]\nendpoint_id="{keys["client"]}"\nports.connect=["127.0.0.1:22"]\n')
+    # The client knows the host address, but the host has not approved the client yet.
+    (root / "host.toml").write_text('version=1\ndevice_name="host"\n')
     host_process, host = start("host")
     (root / "client.toml").write_text(
-        f'version=1\n[peers.host]\nendpoint_id="{keys["host"]}"\nticket="{host["ticket"]}"\n')
-    start("client")
-    assert not host["terminal_access"] and "denied" in call("host", "terminal-access", "show", "client")
+        f'version=1\ndevice_name="client"\n[peers.host]\nendpoint_id="{keys["host"]}"\n'
+        f'ticket="{host["ticket"]}"\nallow_terminal=false\n')
+    client_process, _ = start("client")
 
     @contextlib.contextmanager
     def session(*command):
@@ -118,16 +117,19 @@ def check_native_terminal(root, keys, call, start, cli, ipc):
             assert time.monotonic() < end, "CLI never entered raw mode"
             time.sleep(.02)
 
-    with session() as (child, fd, _):
+    call("client", "pair", "join", call("host", "pair", "code"))
+    pending = wait("host", lambda s: s["pairing"]["incoming"])
+    assert not pending["peers"] and pending["pairing"]["incoming"][0]["device_id"] == keys["client"]
+    with session() as (child, _, _):
         assert child.wait(14) != 0
-        read_until(fd, b"Terminal access denied")
     marker = root / "exec-ran"
-    with session("exec", "host", "--", "touch", str(marker)) as (child, fd, _):
+    with session("exec", "host", "--", "touch", str(marker)) as (child, _, _):
         assert child.wait(14) != 0
-        read_until(fd, b"Terminal access denied")
         assert not marker.exists()
-    call("host", "terminal-access", "allow", "client")
-    assert "client" in json.loads(call("host", "status", "--json"))["terminal_access"]
+    call("host", "pair", "accept", keys["client"])
+    wait("client", lambda s: s["pairing"]["message"] == "Paired with host.")
+    assert not json.loads(call("host", "status", "--json"))["port_access"]
+    assert call("host", "exec", "client", "--", "printf", "paired") == "paired"
     # Launch the foreground program directly, including an empty argument and a literal shell metacharacter.
     screen = r"""
 import os, sys, time, tty
@@ -184,30 +186,22 @@ sys.exit(37)
         pids = [int(p) for p in match.groups()]
         with session("exec", "host", "-c", 'printf "exec-pid=%s\\n" "$$"; exec sleep 60') as (cmd, cmd_fd, _):
             pids.append(int(read_until(cmd_fd, rb"exec-pid=(\d+)").group(1)))
-            call("host", "terminal-access", "deny", "client")
+            client_process.terminate()
+            client_process.wait(10)
             assert cmd.wait(10) != 0
         assert child.wait(10) != 0
         end = time.monotonic() + 5
         while any(Path(f"/proc/{pid}").exists() for pid in pids):
-            assert time.monotonic() < end, "revocation left a shell or foreground job running"
+            assert time.monotonic() < end, "disconnect left a shell or foreground job running"
             time.sleep(.05)
     assert host_process.poll() is None
-    print("Native shell and command PTYs: permissions, alternate screen, input, resize, output, exit and revocation passed.")
+    print("Native shell and command PTYs passed pairing, I/O, resize, exit and disconnect checks.")
 
 
-def check_pairing(root, keys, call, start, target_port):
+def check_pairing(root, keys, call, start, target_port, wait):
     platform = {"darwin": "macos", "win32": "windows", "linux": "linux"}.get(sys.platform, "unknown")
     def status(node):
         return json.loads(call(node, "status", "--json"))
-
-    def wait(node, condition):
-        deadline = time.monotonic() + 14
-        while time.monotonic() < deadline:
-            state = status(node)
-            if condition(state):
-                return state
-            time.sleep(.08)
-        raise AssertionError(f"Timed out waiting for pairing on {node}")
 
     def rejected(node, *args):
         try:
@@ -316,6 +310,8 @@ def check_pairing(root, keys, call, start, target_port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
+    parser.add_argument("--client", choices=("tunnel", "tunnel-gui"), default="tunnel",
+                        help="client executable to use for gateway commands")
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
     parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
     args = parser.parse_args()
@@ -323,7 +319,7 @@ def main():
         parser.error("--native-terminal requires a standard Linux user")
     bins = args.bin_dir.resolve()
     suffix = ".exe" if os.name == "nt" else ""
-    cli, gateway = (str(bins / (n + suffix)) for n in ("tunnel", "tunnel-gateway"))
+    cli, gateway = (str(bins / (n + suffix)) for n in (args.client, "tunnel-gateway"))
 
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         root = Path(tmp)
@@ -343,6 +339,15 @@ def main():
 
         def call(node, *args):
             return subprocess.check_output([cli, "--ipc", ipc(node), *args], encoding="utf-8", stderr=subprocess.PIPE).strip()
+
+        def wait(node, condition):
+            deadline = time.monotonic() + 14
+            while time.monotonic() < deadline:
+                state = json.loads(call(node, "status", "--json"))
+                if condition(state):
+                    return state
+                time.sleep(.08)
+            raise AssertionError(f"Timed out waiting for pairing on {node}")
 
         def rule_state(node, name, match):
             end = time.monotonic() + 25
@@ -383,10 +388,10 @@ def main():
             raise RuntimeError(f"{node} IPC did not become ready")
 
         if args.native_terminal:
-            check_native_terminal(root, keys, call, start, cli, ipc)
+            check_native_terminal(root, keys, call, start, cli, ipc, wait)
             return
         if args.pairing_only:
-            check_pairing(root, keys, call, start, target.server_address[1])
+            check_pairing(root, keys, call, start, target.server_address[1], wait)
             return
 
         (root / "host.toml").write_text(f'''version=1

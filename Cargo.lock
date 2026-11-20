@@ -7970,6 +7970,7 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "tokio",
+ "tunnel-cli",
  "tunnel-config",
  "tunnel-control",
  "unicode-segmentation",

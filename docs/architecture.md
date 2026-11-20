@@ -30,9 +30,9 @@
 
 ### 系统服务部署
 
-先生成设备密钥、配置配对设备，并确认前台运行正常。使用系统服务时提供配置和密钥的绝对路径。
+Linux 安装包会在首次启动时初始化节点。手动部署到其他平台时，先生成设备密钥、准备配置，再向系统服务提供两者的绝对路径。
 
-- **Linux**　示例 unit 使用 `p2p-tunnel` 账户和组。将二进制放在 `/usr/local/bin`，将 `node.toml` 和 `device.key` 放入 `/etc/p2p-tunnel`，私钥仅供服务账户读取。将 unit 安装到 `/etc/systemd/system` 后执行 `systemctl daemon-reload` 和 `systemctl enable --now p2p-tunnel-gateway`。本机操作员加入服务组后可通过 `/run/p2p-tunnel/gateway.sock` 管理网关。[systemd unit](../packaging/linux/p2p-tunnel-gateway.service)
+- **Linux**　Docker Compose 用命名卷保存节点，通过容器内的 CLI 管理。原生安装脚本创建专用的 `p2p-tunnel` 账户和组、安装程序并注册 systemd 服务。本机操作员可以通过 `/run/p2p-tunnel/gateway.sock` 管理原生网关。[安装指南](installation.md) · [systemd unit](../packaging/linux/p2p-tunnel-gateway.service)
 - **macOS**　LaunchDaemon 模板使用 `_p2ptunnel` 账户和组。按模板准备程序与数据目录，预建 `run` 为服务账户和操作员组所有、权限 `0750`。将 root 所有的 plist 放入 `/Library/LaunchDaemons`，使用 `launchctl bootstrap system /Library/LaunchDaemons/org.p2ptunnel.gateway.plist` 加载。桌面应用保持在用户会话。[LaunchDaemon 模板](../packaging/macos/org.p2ptunnel.gateway.plist)
 - **Windows**　在管理员 PowerShell 中按下例注册。先把文件放在示例路径并授权 LocalService 读取配置和密钥，限制其他账户读取私钥。`--windows-service` 启用 SCM 入口。使用系统服务时管理员通过本机管道管理，前台运行时管道所有者也可管理。
 
@@ -63,7 +63,7 @@ Start-Service P2PTunnelGateway
 
 ## CLI 与 GUI 的共同接口
 
-CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已实现状态查询、导出票据和逐条暂停或恢复监听。暂停释放监听端口并保留已有流，重启会按 TOML 恢复规则。主页负责配对和设备列表，每台设备的设置标签通过本机 IPC 创建、修改和删除该设备的转发规则，设置页可以保存或清除 TOML 顶层的 `device_name`。网关校验配置并预绑定本地端口，再原子替换配置文件。远端端口由对方网关授权并绑定，设备页显示实际地址或最近的绑定错误。同一监听地址修改目标只影响新连接。每个对端的 终端授权和 TCP 端口授权可通过 CLI 或 GUI 在线保存。新配对的设备由两端网关在线写入并加载，手工编辑的命名服务在重启时加载。下表记录后续管理协议的目标。当前已经实现的命令见[项目首页](../README.md)。
+CLI 与 GPUI 通过同一套带版本的本机请求和事件操作后台。已实现状态查询、导出票据和逐条暂停或恢复监听。暂停释放监听端口并保留已有流，重启会按 TOML 恢复规则。主页负责配对和设备列表，每台设备的设置标签通过本机 IPC 创建、修改和删除该设备的转发规则，设置页可以保存或清除 TOML 顶层的 `device_name`。网关校验配置并预绑定本地端口，再原子替换配置文件。远端端口由对方网关授权并绑定，设备页显示实际地址或最近的绑定错误。同一监听地址修改目标只影响新连接。已配对设备可以互开终端。每个对端的 TCP 端口授权可通过 CLI 或 GUI 在线保存。新配对的设备由两端网关在线写入并加载，手工编辑的命名服务在重启时加载。下表记录后续管理协议的目标。当前已经实现的命令见[项目首页](../README.md)。
 
 | 操作 | 后台行为 |
 | --- | --- |
@@ -131,7 +131,7 @@ TCP 监听器和本机 IPC 都可用「对端设备 + 服务名」打开已发�
 | 现状 | 子项目 | 职责 |
 | --- | --- | --- |
 | 已有 | `apps/tunnel-gateway` | 管理本机 IPC、身份、TCP 监听器和系统服务生命周期。 |
-| 已有 | `apps/tunnel-cli`、`apps/tunnel-gui` | CLI 与 GPUI 使用相同管理协议获取运行状态、导出票据、暂停或恢复转发。CLI 还提供独立探测。 |
+| 已有 | `apps/tunnel-cli`、`apps/tunnel-gui` | 两个程序共用 CLI 子命令及执行逻辑。桌面版无子命令时启动 GPUI，窗口通过同一管理协议操作网关。 |
 | 已有 | `crates/tunnel-control` | 版本化的请求和快照，基于 Unix socket 或 Windows 本机命名管道。 |
 | 已有 | `crates/tunnel-config`、`crates/tunnel-core` | TOML 校验以及独立于 iroh 的传输接口、服务授权、协议帧和 TCP 字节转发。 |
 | 已有 | `crates/tunnel-terminal` | 交互终端的二进制帧、窗口尺寸、退出状态和跨平台 PTY 生命周期。 |

@@ -225,33 +225,3 @@ impl PairAction {
         Ok(())
     }
 }
-
-#[derive(Subcommand)]
-pub enum TerminalAccess {
-    Show { peer: String },
-    Allow { peer: String },
-    Deny { peer: String },
-}
-
-impl TerminalAccess {
-    pub async fn run(self, ipc: &Path) -> Result<()> {
-        let (peer, allowed) = match self {
-            Self::Show { peer } => (peer, None),
-            Self::Allow { peer } => (peer, Some(true)),
-            Self::Deny { peer } => (peer, Some(false)),
-        };
-        let cmd = allowed.map_or(Command::Status, |allowed| Command::SetTerminalAccess {
-            peer: peer.clone(),
-            allowed,
-        });
-        let status = request(ipc, cmd).await?;
-        ensure!(status.peers.contains_key(&peer), "Unknown peer {peer}");
-        let access = if status.terminal_access.contains(&peer) {
-            "allowed"
-        } else {
-            "denied"
-        };
-        println!("Native terminal access for {peer} on this device: {access}");
-        Ok(())
-    }
-}

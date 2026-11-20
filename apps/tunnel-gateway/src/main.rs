@@ -276,12 +276,6 @@ impl Gateway {
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),
             device_name: config.device_name.clone(),
-            terminal_access: config
-                .peers
-                .iter()
-                .filter(|(_, p)| p.allow_terminal)
-                .map(|(name, _)| name.clone())
-                .collect(),
             port_access: config
                 .peers
                 .iter()
@@ -397,7 +391,6 @@ async fn handle_client(
         Command::SaveForward { .. }
         | Command::RemoveForward { .. }
         | Command::SetDeviceName { .. }
-        | Command::SetTerminalAccess { .. }
         | Command::SetPortAccess { .. } => {
             let result = {
                 let mut gateway = gateway.lock().await;

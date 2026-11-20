@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+umask 077
+
+state_dir=$1
+shift
+config=$state_dir/node.toml
+key=$state_dir/device.key
+
+if [ ! -e "$config" ]; then
+    # Publish the complete template only if this is still a new node.
+    template=$(mktemp "$state_dir/.node.toml.XXXXXX")
+    trap 'rm -f -- "$template"' EXIT
+    printf 'version = 1\n' > "$template"
+    ln -T -- "$template" "$config" || [ -f "$config" ]
+    rm -f -- "$template"
+    trap - EXIT
+fi
+
+tunnel identity "$key" >/dev/null
+exec tunnel-gateway --config "$config" --key "$key" "$@"

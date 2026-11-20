@@ -49,7 +49,9 @@ impl Dashboard {
             return page.child(self.gateway_notice(ui, cx));
         };
         let pairing = &status.pairing;
-        let mut card = ui.section("Pair devices");
+        let mut card = ui
+            .section("Pair devices")
+            .child(ui.muted("Paired devices can open terminal sessions on each other."));
         let mut code_actions = actions();
         if pairing.code.is_some() {
             let (icon, label) = if self.copied_feedback.is_some() {

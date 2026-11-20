@@ -63,10 +63,6 @@ pub enum Command {
     SetGui {
         change: GuiChange,
     },
-    SetTerminalAccess {
-        peer: String,
-        allowed: bool,
-    },
     OpenTerminal {
         peer: String,
         size: terminal::Size,
@@ -170,8 +166,6 @@ pub struct Status {
     pub peers: BTreeMap<String, String>,
     #[serde(default)]
     pub peer_platforms: BTreeMap<String, DevicePlatform>,
-    #[serde(default)]
-    pub terminal_access: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub port_access: BTreeMap<String, PortAccess>,
     pub services: BTreeMap<String, String>,

@@ -9,6 +9,7 @@ gpui = "0.2.2"
 dirs = "5"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tunnel-cli = { path = "../tunnel-cli" }
 tunnel-control = { path = "../../crates/tunnel-control" }
 tunnel-config = { path = "../../crates/tunnel-config" }
 portable-pty = "0.9"
@@ -19,7 +20,7 @@ unicode-segmentation = "1"
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 async-io = "2"
