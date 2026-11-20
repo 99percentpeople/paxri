@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: ghcr.io/99percentpeople/peerhatch:${PEERHATCH_VERSION:-latest}
+    image: ghcr.io/99percentpeople/peerhatch:${PEERHATCH_VERSION:-dev}
     network_mode: host
     uts: host
     init: true

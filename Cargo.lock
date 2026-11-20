@@ -7894,7 +7894,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-cli"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -7914,7 +7914,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-config"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -7927,7 +7927,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-control"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "interprocess",
@@ -7944,7 +7944,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-core"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "serde",
@@ -7955,7 +7955,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-files"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "filetime",
@@ -7967,7 +7967,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-gateway"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "clap",
@@ -7988,7 +7988,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-gui"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -8015,7 +8015,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-native"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "crab_nat",
@@ -8037,7 +8037,7 @@ dependencies = [
 
 [[package]]
 name = "peerhatch-terminal"
-version = "0.1.1"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",

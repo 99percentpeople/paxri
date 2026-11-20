@@ -1,21 +1,21 @@
 # PeerHatch
 
-Open a shell, copy files, and forward TCP ports between paired computers across networks. PeerHatch has a Rust CLI, a GPUI desktop app, and a background gateway. Both clients use the same gateway and TOML configuration.
+PeerHatch is a prototype for opening shells, copying files, and forwarding TCP ports between paired computers across networks. Its Rust CLI and GPUI desktop app use the same background gateway and TOML configuration.
 
 The gateway establishes an authenticated iroh connection to each peer. Terminal sessions, file transfers, and forwards each open their own stream on that connection. Peers try direct IPv4 and IPv6 paths and can use an encrypted relay when direct UDP is unavailable.
 
-## Install
+## Try the prototype
 
-Download the archive for your OS and CPU from [GitHub Releases](https://github.com/99percentpeople/peerhatch/releases/latest). Linux packages support AMD64 and ARM64, Windows has a portable x64 ZIP, and macOS has packages for Apple Silicon and Intel. Keep the three programs together. On Unix the CLI is in `bin/`. On Windows run `peerhatch.exe` from the extracted folder.
+Sign in to GitHub, open a successful **Prototype builds** run on `main`, and download the artifact for your OS from the **Artifacts** section. Builds are available for Windows x64, Linux AMD64 and ARM64, and macOS Intel and Apple Silicon. Extract the archive inside the artifact and keep the three programs together. The CLI is `bin/peerhatch` on Unix and `peerhatch.exe` on Windows. [Download a prototype build](https://github.com/99percentpeople/peerhatch/actions/workflows/prototype.yml)
 
-For a headless Linux node, download `compose.yaml` from the release, then run:
+For a headless Linux node, run these commands in the directory containing [compose.yaml](compose.yaml).
 
 ```sh
 docker compose up -d --wait
 docker compose exec gateway peerhatch pair code
 ```
 
-The gateway image is `ghcr.io/99percentpeople/peerhatch`. The install guide covers offline image archives, system services, and per-user installation. [Installation](docs/installation.md)
+Compose pulls `ghcr.io/99percentpeople/peerhatch:dev`. You can also pin an image by commit or load it offline. [Installation](docs/installation.md)
 
 ## Pair two computers
 
@@ -71,7 +71,7 @@ Open `http://127.0.0.1:8080` on the laptop. For a listener on the other computer
 
 ## Build and develop
 
-Use Rust 1.98.1 to reproduce the release builds. The default workspace build produces the headless CLI and gateway. The desktop app is a separate package.
+The prototype builds use Rust 1.98.1. The default workspace build produces the headless CLI and gateway. The desktop app is a separate package.
 
 ```sh
 cargo build --locked
@@ -86,8 +86,8 @@ Run the checks that cover the change, for example `cargo test --locked -p peerha
 
 ## Documentation
 
-- [Installation and release downloads](docs/installation.md)
+- [Installation and prototype downloads](docs/installation.md)
 - [Architecture and desktop development](docs/architecture.md)
 - [NAT traversal, IPv6, relays, and reproducible network tests](docs/connectivity.md)
 - [Configuration and native wire protocol](docs/native-protocol.md)
-- [Release workflow](docs/releasing.md)
+- [Build and distribute a prototype](docs/prototype-builds.md)

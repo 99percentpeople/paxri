@@ -1,6 +1,6 @@
-# Install PeerHatch
+# Install the PeerHatch prototype
 
-The [latest release](https://github.com/99percentpeople/peerhatch/releases/latest) provides the CLI, gateway, and desktop app. Download the archive for your system and compare its SHA-256 against `SHA256SUMS`. On Linux run `sha256sum -c --ignore-missing SHA256SUMS` from the downloads directory. On Windows use `Get-FileHash -Algorithm SHA256 FILE`.
+Sign in to GitHub, open a successful **Prototype builds** run on `main`, and download your system's artifact. Extract the artifact to get the archive listed below. For checksums, extract `peerhatch-build-info` from the same run into the same directory. On Linux run `sha256sum -c --ignore-missing SHA256SUMS`. On Windows compare `Get-FileHash -Algorithm SHA256 FILE` with the entry for that file in `SHA256SUMS`. [Prototype builds](https://github.com/99percentpeople/peerhatch/actions/workflows/prototype.yml)
 
 | System | Archive |
 | --- | --- |
@@ -16,7 +16,7 @@ Native Linux archives are built on Debian 12 with glibc 2.36. The desktop also n
 
 Extract the complete archive. On Windows double-click `peerhatch-gui.exe`. On macOS open `PeerHatch.app`. The macOS application is ad-hoc signed and distributed outside the App Store. On Linux run `bin/peerhatch-gui` in a graphical session. The GUI starts a per-user gateway if needed. Closing it leaves that gateway running. Keep the CLI, GUI, and gateway together so the clients can find the gateway executable.
 
-For a headless per-user installation, run `peerhatch gateway start`. Use `gateway status`, `stop`, or `restart` to manage it. Commands below assume the directory containing the binaries is on PATH. In PowerShell you can use `.\peerhatch.exe` in the extracted directory. In a Unix release archive you can use `./bin/peerhatch`.
+For a headless per-user installation, run `peerhatch gateway start`. Use `gateway status`, `stop`, or `restart` to manage it. Commands below assume the directory containing the binaries is on PATH. In PowerShell you can use `.\peerhatch.exe` in the extracted directory. In a Unix archive you can use `./bin/peerhatch`.
 
 The CLI and GUI share `node.toml` and a sibling `device.key`. The default directory is `$XDG_CONFIG_HOME/peerhatch` (usually `~/.config/peerhatch`) on Linux, `~/Library/Application Support/peerhatch` on macOS, and `%LOCALAPPDATA%\PeerHatch` on Windows. An existing development node can continue to use its previous configuration directory and identity. To inspect or change startup policy use **Settings → Gateway** or the CLI:
 
@@ -36,7 +36,7 @@ Windows supports the ordinary-user installation without an administrator account
 
 ## Docker on Linux
 
-The image includes the release CLI and gateway. Download `compose.yaml` from the release to its own directory.
+The image includes the CLI and gateway. Use the repository's `compose.yaml` or extract it from the `peerhatch-build-info` artifact. Run Compose in that directory.
 
 ```sh
 docker compose up -d --wait
@@ -45,17 +45,17 @@ docker compose exec gateway peerhatch pair code
 docker compose logs -f gateway
 ```
 
-The default tag is `latest`. To pin a version, put `PEERHATCH_VERSION=0.1.1` in the Compose project's `.env`. To upgrade, run `docker compose pull` and `docker compose up -d --wait`. The registry publishes a multi-platform index for AMD64 and ARM64.
+The default tag is `dev`. To use the same commit as a particular desktop build, run `docker compose --env-file build.env up -d --wait` with the file from that run. You can also set `PEERHATCH_VERSION=sha-<full Git commit>` in the Compose project's `.env`. To update a running `dev` installation, run `docker compose pull` and `docker compose up -d --wait`. The registry serves AMD64 and ARM64 from the same tag.
 
 Compose uses the host network and hostname on native Linux. A forward to `127.0.0.1` can reach the host’s loopback services. Remote terminals run the container’s shell as UID/GID `10001:10001`. The named volume at `/var/lib/peerhatch` holds the identity, peers, and configuration. Reuse the same Compose project name across upgrades. Removing the volume removes that device identity. To bring an existing node, stop its old gateway, mount the whole directory containing both `node.toml` and `device.key`, allow UID 10001 to write the directory, and keep the key private.
 
 ### Offline or local image
 
-Download the Docker archive for the target CPU and `compose.yaml` from the same release:
+Download the Docker artifact for the target CPU and the `peerhatch-build-info` artifact from the same Actions run. Extract both into the same directory. For example, on ARM64 run:
 
 ```sh
 docker load -i peerhatch-docker-linux-arm64.tar.gz
-PEERHATCH_VERSION=0.1.1 docker compose up -d --pull never --wait
+docker compose --env-file build.env up -d --pull never --wait
 ```
 
 To build from source and use the same Compose file:
