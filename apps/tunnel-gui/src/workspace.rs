@@ -127,11 +127,6 @@ struct DraggedTab {
     source: WindowHandle<Workspace>,
 }
 
-struct TabPress {
-    position: Point<Pixels>,
-    previous_active: Page,
-}
-
 enum WorkspaceWindow {
     Initial,
     Detached {
@@ -149,8 +144,10 @@ pub(super) struct Workspace {
     rename: Option<TabRename>,
     tab_focus: FocusHandle,
     dragged_tab: Option<TabDrag>,
-    tab_press: Option<TabPress>,
+    tab_press: Option<TabDrag>,
     tab_indent: Pixels,
+    #[cfg(windows)]
+    placing_window: bool,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     wayland_move_left_surface: bool,
     drag_watch: Option<DragWatch>,
@@ -230,6 +227,8 @@ impl Workspace {
                     dragged_tab: None,
                     tab_press: None,
                     tab_indent,
+                    #[cfg(windows)]
+                    placing_window: !matches!(kind, WorkspaceWindow::Initial),
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                     wayland_move_left_surface: false,
                     drag_watch: None,
@@ -454,8 +453,6 @@ impl Workspace {
         ) {
             Ok(handle) => {
                 let _ = handle.update(cx, |v, w, cx| {
-                    #[cfg(windows)]
-                    drag::prepare_detached_window(w);
                     v.focus_tab(page, w, cx);
                 });
                 Some(handle)
@@ -530,10 +527,12 @@ impl Workspace {
                         MouseButton::Left,
                         cx.listener(move |v, e: &MouseDownEvent, w, cx| {
                             v.drag_watch = None;
-                            v.tab_press = Some(TabPress {
-                                position: e.position,
-                                previous_active: v.active.clone(),
-                            });
+                            v.tab_press = TabDrag::pressed(
+                                pressed.clone(),
+                                v.active.clone(),
+                                e.position,
+                                v.dock.read(cx),
+                            );
                             v.focus_tab(pressed.clone(), w, cx);
                         }),
                     )
@@ -542,9 +541,8 @@ impl Workspace {
                             page: page.clone(),
                             source,
                         },
-                        move |drag, offset, w, cx| {
-                            let _ =
-                                workspace.update(cx, |v, cx| v.begin_tab_drag(drag, offset, w, cx));
+                        move |drag, _, w, cx| {
+                            let _ = workspace.update(cx, |v, cx| v.begin_tab_drag(drag, w, cx));
                             cx.new(|_| Empty)
                         },
                     )
@@ -575,6 +573,10 @@ impl Workspace {
                 view.read(cx).scroll.clone(),
                 view.clone(),
             ),
+            // A new Win32 window is still cloaked while its client size is
+            // being set. Laying out the PTY here would resize the live session.
+            #[cfg(windows)]
+            Page::Terminal { .. } if self.placing_window => DockPanel::fill(gpui::Empty),
             Page::Terminal { view, .. } => DockPanel::fill(view.clone()),
         }
     }

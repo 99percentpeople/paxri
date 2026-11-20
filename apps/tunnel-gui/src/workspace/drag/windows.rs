@@ -6,7 +6,7 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::{
         Dwm::{
-            DWMWA_CLOAKED, DWMWA_TRANSITIONS_FORCEDISABLED, DwmGetWindowAttribute,
+            DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_TRANSITIONS_FORCEDISABLED, DwmGetWindowAttribute,
             DwmSetWindowAttribute,
         },
         Gdi::{ClientToScreen, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, ScreenToClient},
@@ -19,12 +19,13 @@ use windows_sys::Win32::{
         },
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            GA_ROOT, GW_HWNDNEXT, GWL_EXSTYLE, GetAncestor, GetCursorPos, GetSystemMetrics,
-            GetWindow, GetWindowLongPtrW, GetWindowRect, HTCAPTION, IsIconic, IsWindowVisible,
-            IsZoomed, PostMessageW, SC_MOVE, SM_SWAPBUTTON, SW_MAXIMIZE, SW_RESTORE,
-            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, ShowWindow,
-            WM_CANCELMODE, WM_CAPTURECHANGED, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING,
-            WM_NCDESTROY, WM_SYSCOMMAND, WS_EX_TRANSPARENT, WindowFromPoint,
+            GA_ROOT, GW_HWNDNEXT, GWL_EXSTYLE, GetAncestor, GetClientRect, GetCursorPos,
+            GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect, HTCAPTION, IsIconic,
+            IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SC_MOVE, SM_SWAPBUTTON, SW_MAXIMIZE,
+            SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+            SetWindowPos, ShowWindow, WINDOWPOS, WM_CANCELMODE, WM_CAPTURECHANGED, WM_KEYDOWN,
+            WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCDESTROY, WM_SYSCOMMAND,
+            WM_WINDOWPOSCHANGING, WS_EX_TRANSPARENT, WindowFromPoint,
         },
     },
 };
@@ -62,7 +63,8 @@ impl Origin {
                 .insert(self.index.min(v.tabs.len()), self.page.clone());
         }
         v.refresh_title(w);
-        v.focus_tab(self.active.clone(), w, cx);
+        v.select(self.active.clone(), cx);
+        v.focus_content(w, cx);
     }
 
     fn restore(&self, cx: &mut App) -> bool {
@@ -75,8 +77,8 @@ impl Origin {
 pub(super) fn tear_off(
     tab: TabDrag,
     placement: Option<DropPlacement>,
-    grab: Option<Point<Pixels>>,
-    indent: Pixels,
+    grab: Point<Pixels>,
+    held_indent: Option<Pixels>,
     w: &Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -84,6 +86,15 @@ pub(super) fn tear_off(
         .window_handle()
         .downcast::<Workspace>()
         .expect("workspace root");
+    let size = w.viewport_size();
+    let screen_point = native_handle(w).and_then(|hwnd| {
+        let local = tab.cursor.scale(w.scale_factor());
+        let mut pt = POINT {
+            x: f64::from(local.x).round() as i32,
+            y: f64::from(local.y).round() as i32,
+        };
+        (unsafe { ClientToScreen(hwnd, &mut pt) } != 0).then_some(pt)
+    });
     cx.spawn_in(w, async move |view, cx| {
         let Ok(Some((origin, hwnd))) = view.update_in(cx, |v, w, cx| {
             let origin = Origin::new(v, source, &tab)?;
@@ -96,41 +107,95 @@ pub(super) fn tear_off(
         // delay the source's queued paint until mouse-up. Present it first,
         // outside the GPUI update so its WM_PAINT handler can enter the app.
         if let Some(hwnd) = hwnd {
-            unsafe {
-                RedrawWindow(
-                    hwnd,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    RDW_INVALIDATE | RDW_UPDATENOW,
-                )
-            };
+            redraw_now(hwnd);
         }
-        let _ = view.update_in(cx, |v, w, cx| {
+        let Ok(Some((dest, placed))) = view.update_in(cx, |v, w, cx| {
             if tab.page.shell_exited(cx) {
-                return;
+                return None;
             }
-            let held_indent = if grab.is_some() && button_down() {
-                indent
-            } else {
-                px(0.)
-            };
-            if let Some(dest) = v.open_tab_window(tab.page, placement, held_indent, cx) {
-                if let Some(grab) = grab {
-                    cx.defer(move |cx| {
-                        let _ = dest.update(cx, |v, w, cx| {
-                            follow(v, w, cx, grab, tab.offset, Some(origin));
-                        });
-                    });
-                }
-            } else {
+            let indent = held_indent.filter(|_| button_down()).unwrap_or_default();
+            let Some(dest) = v.open_tab_window(tab.page.clone(), placement, indent, cx) else {
                 origin.restore_tabs(v, w, cx);
+                return None;
+            };
+            let (shown, placed) = async_channel::bounded(1);
+            dest.update(cx, |_, w, _| {
+                let hwnd = native_handle(w);
+                if let Some(hwnd) = hwnd {
+                    hide_for_transfer(hwnd);
+                }
+                on_native_frame(
+                    w,
+                    move || hwnd.is_none_or(|h| unsafe { IsWindowVisible(h) } != 0),
+                    move |_, _| {
+                        let _ = shown.try_send(());
+                    },
+                );
+            })
+            .ok()?;
+            Some((dest, placed))
+        }) else {
+            return;
+        };
+        // GPUI applies the initial placement on activation. Let that frame finish
+        // before positioning and painting the cloaked HWND outside a GPUI borrow.
+        if placed.recv().await.is_err() {
+            return;
+        }
+        let Ok(Some((hwnd, grab))) = dest.update(cx, |v, w, cx| {
+            let anchor = if held_indent.is_some() && button_down() {
+                tab.window_grab(v.dock.read(cx)).unwrap_or(grab)
+            } else {
+                v.settle_tab(cx);
+                grab
+            };
+            native_handle(w).map(|hwnd| (hwnd, anchor))
+        }) else {
+            return;
+        };
+        let position = if held_indent.is_some() {
+            cursor_position().or(screen_point)
+        } else {
+            screen_point
+        };
+        if let Some(pt) = position {
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            align_window(hwnd, grab, pt, Some(size));
+            if unsafe { GetDpiForWindow(hwnd) } != dpi {
+                align_window(hwnd, grab, pt, Some(size));
             }
+        }
+        if dest
+            .update(cx, |v, w, cx| {
+                v.placing_window = false;
+                cx.notify();
+                w.refresh();
+            })
+            .is_err()
+        {
+            return;
+        }
+        redraw_now(hwnd);
+        let _ = dest.update(cx, |v, w, cx| {
+            let Some(hwnd) = native_handle(w) else { return };
+            if held_indent.is_some() {
+                // The pointer may already be back over a strip while DirectX
+                // prepares the surface. Hand it back without showing a window.
+                if let Some(target) = cursor_position().and_then(|pt| target_at(v, w, hwnd, pt, cx))
+                    && v.dock_at_pointer(target, button_down().then_some(tab.offset), w, cx)
+                {
+                    return;
+                }
+                follow(v, w, cx, grab, tab.offset, Some(origin));
+            }
+            set_dwm_flag(hwnd, DWMWA_CLOAK, false);
+            set_dwm_flag(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, false);
         });
     })
     .detach();
 }
 
-fn native_handle(w: &Window) -> Option<HWND> {
+pub(super) fn native_handle(w: &Window) -> Option<HWND> {
     match raw_window_handle::HasWindowHandle::window_handle(w)
         .ok()?
         .as_raw()
@@ -140,30 +205,63 @@ fn native_handle(w: &Window) -> Option<HWND> {
     }
 }
 
-pub(in crate::workspace) fn prepare_detached_window(w: &Window) {
-    let Some(hwnd) = native_handle(w) else { return };
-    let set_disabled = move |disabled: bool| {
-        let value = i32::from(disabled);
-        unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_TRANSITIONS_FORCEDISABLED as u32,
-                (&raw const value).cast(),
-                size_of::<i32>() as u32,
-            )
-        }
-    };
-    // A tear-off already follows the pointer. Suppress the system's additional
-    // fade and scale before GPUI shows the new HWND on activation.
-    if set_disabled(true) >= 0 {
-        // GPUI runs frame callbacks before painting. Restore normal transitions
-        // on the frame following the first presentation.
-        w.on_next_frame(move |w, _| {
-            w.on_next_frame(move |_, _| {
-                set_disabled(false);
-            });
-        });
+fn set_dwm_flag(hwnd: HWND, attribute: i32, enabled: bool) {
+    let value = i32::from(enabled);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute as u32,
+            (&raw const value).cast(),
+            size_of::<i32>() as u32,
+        );
     }
+}
+
+pub(super) fn hide_for_transfer(hwnd: HWND) {
+    set_dwm_flag(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, true);
+    set_dwm_flag(hwnd, DWMWA_CLOAK, true);
+}
+
+fn on_native_frame(
+    w: &Window,
+    ready: impl Fn() -> bool + 'static,
+    run: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
+    w.on_next_frame(move |w, cx| {
+        if ready() {
+            run(w, cx);
+        } else {
+            on_native_frame(w, ready, run);
+        }
+    });
+}
+
+pub(super) fn redraw_now(hwnd: HWND) {
+    unsafe {
+        RedrawWindow(
+            hwnd,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            RDW_INVALIDATE | RDW_UPDATENOW,
+        );
+    }
+}
+
+pub(super) fn resume_after_close(
+    outgoing: Option<HWND>,
+    page: Page,
+    w: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let receiver = cx.weak_entity();
+    // DestroyWindow releases capture. Install the receiver's listener afterwards.
+    on_native_frame(
+        w,
+        move || outgoing.is_none_or(|h| unsafe { IsWindow(h) } == 0),
+        move |w, cx| {
+            let _ = receiver.update(cx, |v, cx| v.resume_docked_tab(page, w, cx));
+        },
+    );
 }
 
 fn button_down() -> bool {
@@ -266,6 +364,11 @@ unsafe extern "system" fn window_event(
     // enqueue here: Win32 can call back while GPUI is already borrowing a window.
     let listener = unsafe { &*(data as *const Listener) };
     let moving = listener.window_grab.is_some();
+    if msg == WM_WINDOWPOSCHANGING && listener.system_move.get() == MoveLoop::Docking {
+        // WM_CANCELMODE can roll a system move back to its starting rectangle.
+        // Keep this surface at its last drag position while capture changes hands.
+        unsafe { (*(lp as *mut WINDOWPOS)).flags |= SWP_NOMOVE | SWP_NOSIZE };
+    }
     if let Some(grab) = listener.window_grab
         && msg == WM_SYSCOMMAND
         && wp == (SC_MOVE | HTCAPTION) as usize
@@ -283,7 +386,7 @@ unsafe extern "system" fn window_event(
             signal.send(DragEvent::Cancelled);
             return 0;
         };
-        align_window(hwnd, grab, cursor);
+        align_window(hwnd, grab, cursor, None);
         state.set(MoveLoop::Running);
         // DefSubclassProc enters the modal system move here. Wait for its return
         // before transferring capture: the loop releases capture as it unwinds.
@@ -305,7 +408,7 @@ unsafe extern "system" fn window_event(
             Some(DragEvent::Released)
         }
         WM_KEYDOWN if wp == VK_ESCAPE as usize => Some(DragEvent::Cancelled),
-        WM_CAPTURECHANGED if !moving => Some(if button_down() {
+        WM_CAPTURECHANGED if !moving && lp as HWND != hwnd => Some(if button_down() {
             DragEvent::Cancelled
         } else {
             DragEvent::Released
@@ -341,7 +444,9 @@ impl Events {
         if unsafe { SetWindowSubclass(hwnd, Some(window_event), id, id) } == 0 {
             return None;
         }
-        if window_grab.is_none() && button_down() {
+        // A quick tear-off and return can leave the original strip holding capture.
+        // Setting it again sends WM_CAPTURECHANGED to that same HWND.
+        if window_grab.is_none() && button_down() && unsafe { GetCapture() } != hwnd {
             unsafe {
                 SetCapture(hwnd);
             }
@@ -402,7 +507,7 @@ fn screen_lparam(cursor: POINT) -> LPARAM {
     (((cursor.y as u16 as u32) << 16) | cursor.x as u16 as u32) as LPARAM
 }
 
-fn align_window(hwnd: HWND, grab: Point<Pixels>, cursor: POINT) {
+fn align_window(hwnd: HWND, grab: Point<Pixels>, cursor: POINT, size: Option<Size<Pixels>>) {
     let mut client = POINT::default();
     let mut frame = RECT::default();
     // Win32 supplies physical desktop coordinates, including on mixed-DPI displays.
@@ -410,18 +515,28 @@ fn align_window(hwnd: HWND, grab: Point<Pixels>, cursor: POINT) {
         if ClientToScreen(hwnd, &mut client) == 0 || GetWindowRect(hwnd, &mut frame) == 0 {
             return;
         }
-        let grab = grab.scale(GetDpiForWindow(hwnd) as f32 / 96.);
+        let scale = GetDpiForWindow(hwnd) as f32 / 96.;
+        let grab = grab.scale(scale);
         let dx = cursor.x - client.x - f64::from(grab.x).round() as i32;
         let dy = cursor.y - client.y - f64::from(grab.y).round() as i32;
-        if dx != 0 || dy != 0 {
+        let mut client_rect = RECT::default();
+        let (dw, dh) = match size {
+            Some(size) if GetClientRect(hwnd, &mut client_rect) != 0 => (
+                (f32::from(size.width) * scale).round() as i32 - client_rect.right,
+                (f32::from(size.height) * scale).round() as i32 - client_rect.bottom,
+            ),
+            _ => (0, 0),
+        };
+        let flags = if dw == 0 && dh == 0 { SWP_NOSIZE } else { 0 };
+        if dx != 0 || dy != 0 || dw != 0 || dh != 0 {
             SetWindowPos(
                 hwnd,
                 std::ptr::null_mut(),
                 frame.left + dx,
                 frame.top + dy,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                frame.right - frame.left + dw,
+                frame.bottom - frame.top + dh,
+                flags | SWP_NOACTIVATE | SWP_NOZORDER,
             );
         }
     }
@@ -462,7 +577,7 @@ pub(super) fn follow(
             ReleaseCapture();
         }
     }
-    align_window(hwnd, window_grab, cursor);
+    align_window(hwnd, window_grab, cursor, None);
     let mut docking = None;
     v.watch_drag(
         w,
@@ -473,7 +588,7 @@ pub(super) fn follow(
                 events.end_move();
                 if let Some(origin) = &origin {
                     if origin.restore(cx) {
-                        w.remove_window();
+                        finish_transfer(v, &origin.page, origin.window, false, w, cx);
                     }
                 } else {
                     unsafe {

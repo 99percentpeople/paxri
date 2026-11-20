@@ -281,8 +281,7 @@ pub(super) fn tear_off(
                 }
                 if let Some(dest) = v.open_tab_window(tab.page.clone(), placement, indent, cx) {
                     if let Some(grab) = grab {
-                        let _ =
-                            dest.update(cx, |_, w, cx| start(cx.weak_entity(), w, tab, Some(grab)));
+                        let _ = dest.update(cx, |_, w, cx| start(cx.weak_entity(), w, tab, grab));
                     }
                 } else {
                     v.tabs.insert(index.min(v.tabs.len()), tab.page);
@@ -299,13 +298,14 @@ pub(super) fn start(
     view: WeakEntity<Workspace>,
     window: &Window,
     tab: TabDrag,
-    grab: Option<Point<Pixels>>,
+    grab: Point<Pixels>,
 ) {
     window.on_next_frame(move |window, cx| {
         let _ = view.update(cx, |v, cx| {
             let mut previous = None;
             let mut held = true;
             let title = v.window_title();
+            let grab = tab.window_grab(v.dock.read(cx)).unwrap_or(grab);
             v.watch_drag(
                 window,
                 cx,
@@ -314,9 +314,7 @@ pub(super) fn start(
                     let d = &events.desktop;
                     let pt = d.conn.query_pointer(d.root).ok()?.reply().ok()?;
                     held = pt.mask.contains(KeyButMask::BUTTON1);
-                    if let Some(grab) = grab
-                        && held
-                    {
+                    if held {
                         let offset = grab.scale(w.scale_factor());
                         let xy = ConfigureWindowAux::new()
                             .x(i32::from(pt.root_x) - f64::from(offset.x).round() as i32)

@@ -3,8 +3,6 @@ use super::*;
 
 #[cfg(windows)]
 mod windows;
-#[cfg(windows)]
-pub(super) use windows::prepare_detached_window;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod x11;
 
@@ -31,12 +29,14 @@ impl DropPlacement {
         let dimensions = w.viewport_size();
         let anchor = screen_point - offset;
         let origin = point(
-            anchor
-                .x
-                .clamp(screen.left(), screen.right() - dimensions.width),
-            anchor
-                .y
-                .clamp(screen.top(), screen.bottom() - dimensions.height),
+            anchor.x.clamp(
+                screen.left(),
+                (screen.right() - dimensions.width).max(screen.left()),
+            ),
+            anchor.y.clamp(
+                screen.top(),
+                (screen.bottom() - dimensions.height).max(screen.top()),
+            ),
         );
         Some(Self {
             display: display.id(),
@@ -74,28 +74,115 @@ pub(super) struct DragWatch {
     _task: Task<()>,
 }
 
+async fn present_docked_page(
+    page: &Page,
+    target: WindowHandle<Workspace>,
+    cx: &mut AsyncWindowContext,
+) -> Option<()> {
+    let (frame, drawn) = async_channel::bounded(1);
+    let _receiver = cx
+        .update_window(target.into(), |_, w, _cx| {
+            w.refresh();
+            w.on_next_frame(move |_, _| {
+                let _ = frame.try_send(());
+            });
+            #[cfg(windows)]
+            {
+                windows::native_handle(w)
+            }
+            #[cfg(not(windows))]
+            {
+                // AppKit and X11 suspend frames for fully covered windows. Build
+                // the new scene before raising the receiver to request presentation.
+                w.draw(_cx).clear();
+                if !w.is_window_active() {
+                    w.activate_window();
+                }
+            }
+        })
+        .ok()?;
+    #[cfg(windows)]
+    if let Some(hwnd) = _receiver {
+        windows::redraw_now(hwnd);
+    }
+    // GPUI invokes the callback before drawing. This UI task resumes after
+    // GPUI has submitted that frame and returned to the event loop.
+    drawn.recv().await.ok()?;
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmFlush()
+    };
+    target
+        .update(cx, |v, _w, _| {
+            if !v.tabs.contains(page) {
+                return None;
+            }
+            #[cfg(windows)]
+            if !_w.is_window_active() {
+                _w.activate_window();
+            }
+            Some(())
+        })
+        .ok()?
+}
+
+pub(super) fn finish_transfer(
+    view: &mut Workspace,
+    page: &Page,
+    target: WindowHandle<Workspace>,
+    resume_drag: bool,
+    w: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    view.drag_watch = None;
+    let page = page.clone();
+    #[cfg(windows)]
+    let outgoing = windows::native_handle(w);
+    cx.spawn_in(w, async move |source, cx| {
+        if present_docked_page(&page, target, cx).await.is_none() {
+            let _ = source.update_in(cx, |v, _, cx| v.settle_tab(cx));
+            return;
+        }
+        let _closing = source
+            .update_in(cx, |v, w, cx| {
+                if !v.tabs.contains(&page) {
+                    return false;
+                }
+                let last = v.tabs.len() == 1;
+                #[cfg(windows)]
+                if last && let Some(hwnd) = outgoing {
+                    windows::hide_for_transfer(hwnd);
+                }
+                v.take_tab(&page, w, cx);
+                last
+            })
+            .unwrap_or(true);
+        if resume_drag {
+            let _ = target.update(cx, |_v, w, cx| {
+                #[cfg(windows)]
+                windows::resume_after_close(outgoing.filter(|_| _closing), page, w, cx);
+                #[cfg(not(windows))]
+                _v.resume_docked_tab(page, w, cx);
+            });
+        }
+    })
+    .detach();
+}
+
 impl Workspace {
     pub(super) fn begin_tab_drag(
         &mut self,
         drag: &DraggedTab,
-        offset: Point<Pixels>,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(mut tab) = self.tab_press.take().filter(|tab| tab.page == drag.page) else {
+            return;
+        };
         let cursor = w.mouse_position();
-        if let Some(bounds) = self.dock.read(cx).bounds(&drag.page) {
-            let (grab, previous_active) = self.tab_press.take().map_or_else(
-                || (offset, self.active.clone()),
-                |press| (press.position - bounds.origin, press.previous_active),
-            );
-            self.dragged_tab = Some(TabDrag {
-                page: drag.page.clone(),
-                previous_active,
-                offset: grab,
-                cursor,
-            });
-            cx.notify();
-        }
+        tab.cursor = cursor;
+        self.dragged_tab = Some(tab);
+        cx.notify();
         // GPUI installs its drag after this callback. Process the first movement
         // even when the next input is already mouse-up.
         let source = cx.weak_entity();
@@ -255,16 +342,13 @@ impl Workspace {
             return false;
         };
         tab.cursor = cursor;
-        if !single && !self.dock.read(cx).leaves_strip(cursor, w.viewport_size()) {
+        if !single && !tab.should_detach(self.dock.read(cx)) {
             self.dragged_tab = Some(tab);
             cx.notify();
             return true;
         }
         self.dragged_tab = None;
         let page = tab.page.clone();
-        if let Some(bounds) = self.dock.read(cx).bounds(&page) {
-            tab.offset = tab.grab_in(bounds);
-        }
         cx.stop_active_drag(w);
 
         // AppKit and Wayland associate the initiating mouse event / seat
@@ -308,19 +392,17 @@ impl Workspace {
         #[cfg(not(target_os = "macos"))]
         {
             let source = drag.source;
-            let offset = if let Some(bounds) = self.dock.read(cx).bounds(&page) {
-                bounds.origin + tab.offset
-            } else {
+            let offset = tab.window_grab(self.dock.read(cx)).unwrap_or_else(|| {
                 self.dock
                     .read(cx)
                     .settings()
                     .window_grab_offset(tab.offset, w.viewport_size().width)
-            };
+            });
             let placement = DropPlacement::at(cursor, offset, w, cx);
             if !single {
                 let indent = self.dock.read(cx).indent(&page);
                 #[cfg(windows)]
-                windows::tear_off(tab, placement, Some(offset), indent, w, cx);
+                windows::tear_off(tab, placement, offset, Some(indent), w, cx);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 x11::tear_off(self, tab, placement, Some(offset), indent, w, cx);
                 return true;
@@ -332,7 +414,7 @@ impl Workspace {
                     #[cfg(windows)]
                     windows::follow(view, window, cx, offset, tab.offset, None);
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    x11::start(cx.weak_entity(), window, tab, None);
+                    x11::start(cx.weak_entity(), window, tab, offset);
                     #[cfg(not(windows))]
                     let _ = (view, cx);
                 });
@@ -427,25 +509,17 @@ impl Workspace {
         };
         tab.cursor = cursor;
         cx.stop_active_drag(w);
-        if self.tabs.len() > 1
-            && self
-                .dock
-                .read(cx)
-                .leaves_strip(tab.cursor, w.viewport_size())
-        {
+        if self.tabs.len() > 1 && tab.should_detach(self.dock.read(cx)) {
             // The window system can coalesce a final move into mouse-up.
-            let offset = self.dock.read(cx).bounds(&tab.page).map_or_else(
-                || {
-                    self.dock
-                        .read(cx)
-                        .settings()
-                        .window_grab_offset(tab.offset, w.viewport_size().width)
-                },
-                |bounds| bounds.origin + tab.grab_in(bounds),
-            );
+            let offset = tab.window_grab(self.dock.read(cx)).unwrap_or_else(|| {
+                self.dock
+                    .read(cx)
+                    .settings()
+                    .window_grab_offset(tab.offset, w.viewport_size().width)
+            });
             let placement = DropPlacement::at(tab.cursor, offset, w, cx);
             #[cfg(windows)]
-            windows::tear_off(tab, placement, None, px(0.), w, cx);
+            windows::tear_off(tab, placement, offset, None, w, cx);
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if cx.compositor_name() != "Wayland" {
                 x11::tear_off(self, tab, placement, None, px(0.), w, cx);

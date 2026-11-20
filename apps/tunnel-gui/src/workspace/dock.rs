@@ -61,22 +61,24 @@ impl Workspace {
                     cursor: target.cursor,
                 });
                 v.refresh_title(w);
-                v.focus_tab(page.clone(), w, cx);
+                v.select(page.clone(), cx);
+                v.focus_content(w, cx);
                 true
             })
             .unwrap_or(false);
         if accepted {
-            self.take_tab(&page, w, cx);
-            if held_grab.is_some() {
-                cx.defer(move |cx| {
-                    let _ = target.window.update(cx, |v, w, cx| {
-                        if v.dragged_tab.as_ref().is_some_and(|tab| tab.page == page) {
-                            v.continue_tab_drag(page, w, cx);
-                        }
-                    });
-                });
-            }
+            drag::finish_transfer(self, &page, target.window, held_grab.is_some(), w, cx);
         }
         accepted
+    }
+
+    pub(super) fn resume_docked_tab(&mut self, page: Page, w: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .dragged_tab
+            .as_ref()
+            .is_some_and(|tab| tab.page == page)
+        {
+            self.continue_tab_drag(page, w, cx);
+        }
     }
 }

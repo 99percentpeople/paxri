@@ -30,6 +30,8 @@ pub struct DockState<K> {
     pub(super) settings: DockSettings,
     pub(super) resizing: Option<SidebarResize>,
     pub(super) zone: Bounds<Pixels>,
+    pub(super) scroll: ScrollHandle,
+    // Resting slots in content coordinates, before the strip's own scroll offset.
     pub(super) tabs: Vec<(K, Bounds<Pixels>)>,
 }
 
@@ -50,6 +52,7 @@ impl<K: PartialEq + 'static> DockState<K> {
                 settings,
                 resizing: None,
                 zone: Bounds::default(),
+                scroll: ScrollHandle::new(),
                 tabs: Vec::new(),
             }
         });
@@ -70,6 +73,7 @@ impl<K: PartialEq + 'static> DockState<K> {
             self.settings = self.settings.with_placement(placement);
             self.resizing = None;
             self.zone = Bounds::default();
+            self.scroll = ScrollHandle::new();
             self.tabs.clear();
             cx.notify();
         }
@@ -91,7 +95,14 @@ impl<K: PartialEq + 'static> DockState<K> {
     }
 
     pub fn bounds(&self, page: &K) -> Option<Bounds<Pixels>> {
-        self.tabs.iter().find(|(p, _)| p == page).map(|(_, b)| *b)
+        self.slots().find(|(p, _)| *p == page).map(|(_, b)| b)
+    }
+
+    fn slots(&self) -> impl Iterator<Item = (&K, Bounds<Pixels>)> {
+        let offset = self.scroll.offset();
+        self.tabs
+            .iter()
+            .map(move |(page, slot)| (page, *slot + offset))
     }
 
     pub fn insertion(&self, cursor: Point<Pixels>) -> Option<usize> {
@@ -105,28 +116,10 @@ impl<K: PartialEq + 'static> DockState<K> {
             return None;
         }
         Some(
-            self.tabs
-                .iter()
+            self.slots()
                 .position(|(_, b)| cursor.along(axis) < b.center().along(axis))
                 .unwrap_or(self.tabs.len()),
         )
-    }
-
-    pub fn leaves_strip(&self, cursor: Point<Pixels>, viewport: Size<Pixels>) -> bool {
-        // Crossing the titlebar or the empty part of a sidebar along its length
-        // keeps the drag in the same window.
-        let area = if self.settings.placement == DockPlacement::Left {
-            Bounds::new(
-                point(self.zone.left(), px(0.)),
-                size(self.zone.size.width, viewport.height),
-            )
-        } else {
-            Bounds::new(
-                point(px(0.), self.zone.top()),
-                size(viewport.width, self.zone.size.height),
-            )
-        };
-        !area.dilate(DETACH_DISTANCE).contains(&cursor)
     }
 }
 
@@ -139,23 +132,66 @@ pub struct DockDrag<K> {
 }
 
 impl<K: Clone + PartialEq + 'static> DockDrag<K> {
+    pub fn pressed(
+        page: K,
+        previous_active: K,
+        cursor: Point<Pixels>,
+        layout: &DockState<K>,
+    ) -> Option<Self> {
+        let slot = layout.bounds(&page)?;
+        Some(Self {
+            page,
+            previous_active,
+            offset: cursor - slot.origin,
+            cursor,
+        })
+    }
+
     pub fn projected(&self, mut bounds: Bounds<Pixels>, layout: &DockState<K>) -> Bounds<Pixels> {
         let axis = layout.settings.placement.axis();
-        if let Some((_, first)) = layout.tabs.first() {
-            let desired = (self.cursor - self.grab_in(bounds)).along(axis);
-            let start = first.origin.along(axis).max(layout.zone.origin.along(axis));
-            let end = layout.zone.bottom_right().along(axis) - bounds.size.along(axis);
-            bounds.origin = bounds
-                .origin
-                .apply_along(axis, |_| desired.clamp(start, end.max(start)));
-        }
+        let desired = (self.cursor - self.grab_in(bounds)).along(axis);
+        let strip_start = layout.zone.origin.along(axis);
+        let end =
+            (layout.zone.bottom_right().along(axis) - bounds.size.along(axis)).max(strip_start);
+        let start = layout.slots().next().map_or(strip_start, |(_, first)| {
+            first.origin.along(axis).clamp(strip_start, end)
+        });
+        bounds.origin = bounds
+            .origin
+            .apply_along(axis, |_| desired.clamp(start, end));
         bounds
     }
 
-    pub fn grab_in(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
+    pub fn window_grab(&self, layout: &DockState<K>) -> Option<Point<Pixels>> {
+        let slot = layout.bounds(&self.page)?;
+        Some(slot.origin + self.grab_in(slot))
+    }
+
+    pub fn should_detach(&self, layout: &DockState<K>) -> bool {
+        let Some(slot) = layout.bounds(&self.page) else {
+            return false;
+        };
+        let visible = self.projected(slot, layout).intersect(&layout.zone);
+        if visible.is_empty() {
+            return false;
+        }
+        let nearest = self.cursor.clamp(&visible.origin, &visible.bottom_right());
+        (self.cursor - nearest).magnitude() > f64::from(DETACH_DISTANCE)
+    }
+
+    fn grab_in(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
+        // A different strip can be narrower than the original grab. Keep the
+        // pointer inside that face without losing the offset for the next strip.
+        let inside = |grab: Pixels, extent: Pixels| {
+            if grab < extent {
+                grab.max(px(0.))
+            } else {
+                (extent - px(1.)).max(px(0.))
+            }
+        };
         point(
-            self.offset.x.clamp(px(0.), bounds.size.width),
-            self.offset.y.clamp(px(0.), bounds.size.height),
+            inside(self.offset.x, bounds.size.width),
+            inside(self.offset.y, bounds.size.height),
         )
     }
 
@@ -183,10 +219,9 @@ impl<K: Clone + PartialEq + 'static> DockDrag<K> {
         // Cross a neighbour's midpoint with the leading edge of the moving tab,
         // including when the two tabs have different widths.
         let index = layout
-            .tabs
-            .iter()
+            .slots()
             .filter(|(page, bounds)| {
-                if *page == self.page {
+                if *page == &self.page {
                     return false;
                 }
                 let edge = if bounds.origin.along(axis) < slot.origin.along(axis) {
@@ -226,6 +261,7 @@ mod tests {
         let mut layout = DockState {
             settings: DockSettings::default(),
             resizing: None,
+            scroll: Default::default(),
             zone: rect(0., 0., 370., 40.),
             tabs: vec![("one", rect(4., 4., 96., 31.))],
         };
@@ -244,23 +280,43 @@ mod tests {
     }
 
     #[test]
-    fn tearing_off_requires_clearance() {
-        let viewport = size(px(900.), px(650.));
-        let top = Bounds::new(point(px(0.), px(0.)), size(px(280.), px(40.)));
-        let mut dock = DockState::<&str> {
+    fn tear_off_uses_the_distance_to_the_visible_moving_tab() {
+        let rect =
+            |x, y, width, height| Bounds::new(point(px(x), px(y)), size(px(width), px(height)));
+        let mut dock = DockState {
             settings: DockSettings::default(),
             resizing: None,
-            zone: top,
-            tabs: vec![],
+            scroll: Default::default(),
+            zone: rect(0., 0., 400., 40.),
+            tabs: vec![("one", rect(4., 4., 96., 32.))],
         };
-        assert!(!dock.leaves_strip(point(px(850.), px(60.)), viewport));
-        assert!(!dock.leaves_strip(point(px(-15.), px(17.)), viewport));
-        assert!(dock.leaves_strip(point(px(95.), px(65.)), viewport));
-        assert!(dock.leaves_strip(point(px(-25.), px(17.)), viewport));
+        let drag = DockDrag::pressed("one", "one", point(px(84.), px(12.)), &dock).unwrap();
+        let detaches = |dock: &DockState<_>, x, y| {
+            DockDrag {
+                cursor: point(px(x), px(y)),
+                ..drag.clone()
+            }
+            .should_detach(dock)
+        };
+        assert!(!detaches(&dock, 340., 12.)); // Far from the press, still on the moving tab.
+        assert!(!detaches(&dock, 340., 60.));
+        assert!(detaches(&dock, 340., 61.));
+        assert!(!detaches(&dock, 424., 12.));
+        assert!(detaches(&dock, 425., 12.));
+        assert!(!detaches(&dock, 414., 54.));
+        assert!(detaches(&dock, 416., 55.)); // Diagonally past the bottom-right corner.
+
+        dock.zone = rect(0., 0., 60., 40.); // Only part of this wide tab can be painted.
+        assert!(detaches(&dock, 85., 12.));
         dock.settings.placement = DockPlacement::Left;
-        dock.zone = Bounds::new(point(px(0.), px(40.)), size(px(142.), px(610.)));
-        assert!(!dock.leaves_strip(point(px(164.), px(570.)), viewport));
-        assert!(dock.leaves_strip(point(px(167.), px(210.)), viewport));
+        dock.zone = rect(0., 40., 142., 480.);
+        dock.tabs[0].1 = rect(4., 44., 134., 32.);
+        assert!(!detaches(&dock, 84., 500.));
+        assert!(!detaches(&dock, 162., 500.));
+        assert!(detaches(&dock, 163., 500.));
+        assert!(detaches(&dock, 84., 19.));
+        dock.tabs.clear(); // The receiving window has yet to measure the incoming tab.
+        assert!(!detaches(&dock, 163., 500.));
     }
 
     #[test]
@@ -268,6 +324,7 @@ mod tests {
         let mut layout = DockState {
             settings: DockSettings::default(),
             resizing: None,
+            scroll: Default::default(),
             zone: Bounds::new(point(px(0.), px(0.)), size(px(500.), px(40.))),
             tabs: vec![
                 (
@@ -292,11 +349,17 @@ mod tests {
         assert_eq!(preview.origin, point(px(315.), px(4.)));
         assert!(preview.left() > layout.bounds(&"two").unwrap().right());
         assert!(order(&drag, &pages, &layout) == ["two", "one"]);
-        drag.cursor.x = px(650.);
+        drag.cursor.x = layout.zone.right() - px(1.);
         assert_eq!(drag.projected(home, &layout).right(), layout.zone.right());
-        drag.cursor.x = px(-8.);
+        assert!(order(&drag, &pages, &layout) == ["two", "one"]);
+        drag.cursor.x = layout.zone.left() + px(1.);
         assert_eq!(drag.projected(home, &layout), home);
         assert!(order(&drag, &pages, &layout) == pages);
+        drag.cursor.x = px(117.);
+        assert_eq!(
+            drag.projected(home, &layout).left() + drag.offset.x,
+            drag.cursor.x
+        );
 
         // Home is the only other tab when Settings arrives at its right edge.
         drag.page = "two";
@@ -318,6 +381,7 @@ mod tests {
         let layout = DockState {
             settings: DockSettings::default().with_placement(DockPlacement::Left),
             resizing: None,
+            scroll: Default::default(),
             zone: Bounds::new(point(px(0.), px(40.)), size(px(142.), px(480.))),
             tabs: vec![("one", home), ("two", slot(79.))],
         };
@@ -332,9 +396,15 @@ mod tests {
         assert!(order(&drag, &pages, &layout) == ["two", "one"]);
         drag.cursor.y = layout.zone.bottom() - px(1.);
         assert_eq!(drag.projected(home, &layout).bottom(), layout.zone.bottom());
+        assert!(order(&drag, &pages, &layout) == ["two", "one"]);
         drag.cursor.y = layout.zone.top();
         assert_eq!(drag.projected(home, &layout), home);
         assert!(order(&drag, &pages, &layout) == pages);
+        drag.cursor.y = px(105.);
+        assert_eq!(
+            drag.projected(home, &layout).top() + drag.offset.y,
+            drag.cursor.y
+        );
 
         // An incoming tab grabbed near its bottom still docks after Home
         // when the pointer is just below Home's slot.
@@ -356,5 +426,39 @@ mod tests {
                 .window_grab_offset(grab, px(900.)),
             point(px(39.), px(59.))
         );
+    }
+
+    #[test]
+    fn press_on_a_scrolled_tab_survives_relayout_and_a_narrower_strip() {
+        let rect = |x, width| Bounds::new(point(px(x), px(4.)), size(px(width), px(31.)));
+        let mut layout = DockState {
+            settings: DockSettings::default(),
+            resizing: None,
+            scroll: Default::default(),
+            zone: rect(0., 152.),
+            tabs: vec![("one", rect(4., 96.)), ("two", rect(104., 140.))],
+        };
+        layout.scroll.set_offset(point(px(-80.), px(0.)));
+        let mut drag = DockDrag::pressed("two", "one", point(px(132.), px(11.)), &layout).unwrap();
+        assert_eq!(drag.offset, point(px(108.), px(7.)));
+        assert_eq!(layout.indent(&"two"), px(20.));
+        assert_eq!(layout.insertion(point(px(21.), px(18.))), Some(1));
+
+        layout.scroll.set_offset(point(px(-28.), px(0.)));
+        drag.cursor = point(px(110.), px(28.));
+        for (width, expected_grab) in [(140., 108.), (64., 63.), (140., 108.)] {
+            layout.tabs[1].1 = rect(104., width);
+            let slot = layout.bounds(&"two").unwrap();
+            let preview = drag.projected(slot, &layout);
+            assert_eq!(preview.left() + px(expected_grab), drag.cursor.x);
+            assert_eq!(preview.top(), slot.top());
+            assert_eq!(
+                drag.window_grab(&layout).unwrap().x,
+                slot.left() + px(expected_grab)
+            );
+        }
+        layout.zone = rect(0., 60.);
+        let slot = layout.bounds(&"two").unwrap();
+        assert_eq!(drag.projected(slot, &layout).left(), layout.zone.left());
     }
 }

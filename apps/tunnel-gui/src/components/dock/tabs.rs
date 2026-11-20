@@ -52,6 +52,7 @@ impl<K: Clone + PartialEq + 'static> RenderOnce for DockTabs<K> {
         let mut items = self.items;
         let layout = self.state.read(cx);
         let placement = layout.placement();
+        let scroll = layout.scroll.clone();
         if let Some(drag) = &self.drag {
             drag.reorder(&mut items, layout, |(key, _)| key);
         }
@@ -77,14 +78,21 @@ impl<K: Clone + PartialEq + 'static> RenderOnce for DockTabs<K> {
         }
         let strip = root
             .when(measure, |strip| {
-                strip.on_children_prepainted(move |bounds, _, cx| {
+                strip.on_children_prepainted(move |_, _, cx| {
                     self.state.update(cx, |layout, _| {
                         layout.tabs.clear();
-                        layout.tabs.extend(keys.iter().cloned().zip(bounds));
+                        layout
+                            .tabs
+                            .extend(keys.iter().enumerate().filter_map(|(index, key)| {
+                                scroll
+                                    .bounds_for_item(index)
+                                    .map(|bounds| (key.clone(), bounds))
+                            }));
                     });
                 })
             })
             .id(self.id)
+            .track_scroll(&layout.scroll)
             .flex()
             .min_w_0()
             .gap(SPACE_1)

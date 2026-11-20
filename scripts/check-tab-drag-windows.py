@@ -7,6 +7,7 @@ import argparse
 import ctypes
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -30,9 +31,13 @@ def check(binary, sidebar_only=False):
     if api.GetAsyncKeyState(primary) & 0x8000:
         raise RuntimeError("The primary mouse button is in use")
 
-    app = subprocess.Popen([str(binary), "--ipc", "tab-test-" + uuid.uuid4().hex],
-                           creationflags=subprocess.CREATE_NO_WINDOW)
+    profile = tempfile.TemporaryDirectory(prefix="p2p-tab-test-")
+    config = Path(profile.name) / "node.toml"
+    config.write_text('[gateway]\nstartup = "manual"\n', encoding="utf8")
+    foreground = gui.GetForegroundWindow()
     original = api.GetCursorPos()
+    app = subprocess.Popen([str(binary), "--ipc", "tab-test-" + uuid.uuid4().hex, "--config", str(config)],
+                           creationflags=subprocess.CREATE_NO_WINDOW)
     pressed = False
 
     def window(title):
@@ -95,6 +100,22 @@ def check(binary, sidebar_only=False):
         with screen_region(origin, (round(145 * scale), round(40 * scale))) as read:
             return read()
 
+    @contextmanager
+    def uncovered_patch(owner, origin):
+        # A solid patch behind the drag-start rectangle reveals even a partially
+        # transparent close animation, independent of the user's wallpaper.
+        x, y = origin
+        patch = gui.CreateWindowEx(win.WS_EX_NOACTIVATE | win.WS_EX_TOOLWINDOW, "STATIC", "",
+                                   win.WS_POPUP | win.SS_WHITERECT, x, y, 32, 24, 0, 0, 0, None)
+        try:
+            gui.SetWindowPos(patch, owner, x, y, 32, 24, win.SWP_NOACTIVATE | win.SWP_SHOWWINDOW)
+            gui.UpdateWindow(patch)
+            ctypes.windll.dwmapi.DwmFlush()
+            with screen_region((x + 8, y + 8), (16, 8)) as read:
+                yield read
+        finally:
+            gui.DestroyWindow(patch)
+
     class GuiThreadInfo(ctypes.Structure):
         _fields_ = [
             ("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
@@ -135,8 +156,16 @@ def check(binary, sidebar_only=False):
         time.sleep(0.3)
         home_heading = page_heading(home)
         source_size = gui.GetClientRect(home)[2:]
-        key(home, win.VK_DOWN)   # Menu has initial keyboard focus.
-        key(home, win.VK_RETURN)  # Settings
+        # A launch from a background terminal can leave the new window inactive.
+        menu = gui.ClientToScreen(home, (source_size[0] - round(168 * dpi), round(20 * dpi)))
+        api.SetCursorPos(menu)
+        api.mouse_event(down, 0, 0)
+        api.mouse_event(up, 0, 0)
+        time.sleep(0.15)
+        api.SetCursorPos((menu[0] - round(70 * dpi), menu[1] + round(42 * dpi)))
+        api.mouse_event(down, 0, 0)
+        api.mouse_event(up, 0, 0)
+        time.sleep(0.15)
         dpi = user32.GetDpiForWindow(home) / 96
 
         def home_point(x, y):
@@ -235,7 +264,7 @@ def check(binary, sidebar_only=False):
                         raise AssertionError("The held tab did not reach the blank titlebar space")
                     time.sleep(0.025)
 
-        def dock_in_trailing_space(detached, drop):
+        def dock_in_trailing_space(detached, drop, drag_start):
             if trailing_x <= 250:
                 api.SetCursorPos(drop)
                 return
@@ -246,7 +275,11 @@ def check(binary, sidebar_only=False):
             def color(row, x):
                 return row[4 * x:4 * x + 3]
 
-            with screen_region(home_point(0, 10), (held_x + 1, 1)) as read:
+            old_tab = (drag_start[0] + round(20 * dpi), drag_start[1] + round(10 * dpi))
+            with (screen_region(home_point(0, 10), (held_x + 1, 1)) as read,
+                  screen_region(home_point(14, 52), (round(145 * dpi), round(40 * dpi))) as heading,
+                  uncovered_patch(detached, old_tab) as old_frame):
+                clear = old_frame()
                 row = read()
                 empty = color(row, slot_x)
                 # GetPixel's COLORREF in BGR byte order matches the scanline.
@@ -256,18 +289,58 @@ def check(binary, sidebar_only=False):
                     raise AssertionError("Expected a single Home tab before docking")
                 api.SetCursorPos(drop)
                 start = time.monotonic()
+                closed_at = None
                 while time.monotonic() - start < 2:
+                    exposed = gui.GetForegroundWindow() == home or not gui.IsWindow(detached)
+                    if exposed and heading() == home_heading:
+                        raise AssertionError("The receiver exposed its previous page while docking")
                     row = read()
                     if color(row, slot_x) != empty:
                         raise AssertionError("The held tab flashed in its resting slot while docking")
-                    if (time.monotonic() - start >= 0.2 and not gui.IsWindow(detached)
-                            and color(row, held_x) == selected and color(row, home_x) != selected):
+                    if old_frame() != clear:
+                        raise AssertionError("The outgoing window reappeared at its drag-start position")
+                    if closed_at is None and not gui.IsWindow(detached):
+                        closed_at = time.monotonic()
+                    if (closed_at is not None and time.monotonic() - closed_at >= 0.2
+                            and color(row, held_x) == selected and color(row, home_x) != selected
+                            and heading() == settings_heading):
                         return
                 raise AssertionError("The receiving strip did not paint the held tab at the pointer")
 
         if trailing_x > 250 and screen_color(home_point(trailing_x, 10)) == tab_fill:
             raise AssertionError("Expected visible blank space beyond the resting tabs")
         settings_heading = page_heading(home)
+
+        def dock_over_previous_page(detached):
+            # Both windows cover this same heading throughout the handoff. A
+            # single frame of Home here is visible even before focus changes.
+            api.SetCursorPos(home_point(250, 180))
+            check_held_window(detached, settings_heading)
+            grab_x, grab_y = gui.ScreenToClient(detached, api.GetCursorPos())
+            left, top = home_point(0, 0)
+            cover_y = top + round(43 * dpi)
+            api.SetCursorPos((left + grab_x, cover_y + grab_y))
+            end = time.monotonic() + 2
+            while True:
+                x, y = gui.ClientToScreen(detached, (0, 0))
+                if abs(x - left) <= 2 and abs(y - cover_y) <= 2:
+                    break
+                if time.monotonic() >= end:
+                    raise AssertionError("The floating window did not cover the receiver")
+                time.sleep(0.01)
+            ctypes.windll.dwmapi.DwmFlush()
+            with screen_region(home_point(14, 52), (round(145 * dpi), round(40 * dpi))) as heading:
+                if heading() == home_heading:
+                    raise AssertionError("The floating window did not cover the Home heading")
+                api.SetCursorPos((left + grab_x, top + grab_y))
+                end = time.monotonic() + 2
+                while time.monotonic() < end:
+                    pixels = heading()
+                    if pixels == home_heading:
+                        raise AssertionError("Home flashed between the floating and docked pages")
+                    if not gui.IsWindow(detached) and pixels == settings_heading:
+                        return
+                raise AssertionError("The receiver did not present the docked Settings page")
 
         def check_detached_frames(hwnd):
             # Window geometry can lead the compositor by a refresh during a move.
@@ -355,17 +428,34 @@ def check(binary, sidebar_only=False):
         api.mouse_event(down, 0, 0)
         pressed = True
         check_held_window(home, settings_heading)
-        # The strip is 40 logical pixels tall. Stay within its 24 pixel
-        # clearance while passing the last tab, then cross it by two pixels.
-        for x, y in [(26, 58), (trailing_x, 58), (149, 62)]:
+        # The tab's bottom edge is at y=36. Stay within its clearance as it
+        # follows the pointer through the strip's trailing space.
+        for x, y in [(26, 55), (trailing_x, 57), (149, 59)]:
             api.SetCursorPos(home_point(x, y))
             time.sleep(0.18)
             if window("Settings — P2P Tunnel"):
                 raise AssertionError("Split before the tab left the reorder threshold")
             if x == trailing_x:
                 check_trailing_preview()
-        api.SetCursorPos(home_point(149, 66))
-        detached = wait_window("Settings — P2P Tunnel", 4)
+        # Cross the threshold in one movement low enough that clamping the whole
+        # window onto the monitor would put its first frame above the pointer.
+        split = home_point(149, round(source_size[1] * 0.8 / dpi))
+        api.SetCursorPos(split)
+        end = time.monotonic() + 4
+        while time.monotonic() < end:
+            detached = window("Settings — P2P Tunnel")
+            if detached:
+                cloaked = wintypes.DWORD()
+                hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                    wintypes.HWND(detached), 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+                if hr == 0 and not cloaked.value:
+                    x, y = gui.ScreenToClient(detached, split)
+                    if abs(x - 149 * dpi) > 3 or abs(y - 20 * dpi) > 3:
+                        raise AssertionError(f"The first visible tear-off missed the grab point: {(x, y)}")
+                    break
+            time.sleep(0.001)
+        else:
+            raise AssertionError("The detached window never became visible")
         check_held_window(detached)
         check_detached_frames(detached)
         if gui.GetClientRect(detached)[2:] != source_size:
@@ -404,6 +494,11 @@ def check(binary, sidebar_only=False):
         # Release, then start an independent drag on the floating tab. A drop
         # into the page body should leave both windows available.
         for y, should_dock in [(120, False), (20, True)]:
+            if should_dock:
+                # The drag-start tab stays on screen, clear of the receiver.
+                gui.SetWindowPos(detached, 0, right - round(250 * dpi), bottom - round(145 * dpi),
+                                 0, 0, win.SWP_NOSIZE | win.SWP_NOZORDER | win.SWP_NOACTIVATE)
+                ctypes.windll.dwmapi.DwmFlush()
             grab = gui.ClientToScreen(detached, (round(45 * dpi), round(20 * dpi)))
             api.SetCursorPos(grab)
             time.sleep(0.12)
@@ -422,7 +517,7 @@ def check(binary, sidebar_only=False):
             time.sleep(0.2)
             drop = home_point(trailing_x if should_dock else 180, y)
             if should_dock:
-                dock_in_trailing_space(detached, drop)
+                dock_in_trailing_space(detached, drop, before)
                 end = time.monotonic() + 2
                 while gui.IsWindow(detached) and time.monotonic() < end:
                     time.sleep(0.025)
@@ -436,10 +531,7 @@ def check(binary, sidebar_only=False):
                 time.sleep(0.22)
                 api.SetCursorPos(home_point(16, 92))
                 detached = wait_window("Settings — P2P Tunnel", 2)
-                api.SetCursorPos(home_point(160, 20))
-                end = time.monotonic() + 2
-                while gui.IsWindow(detached) and time.monotonic() < end:
-                    time.sleep(0.025)
+                dock_over_previous_page(detached)
                 if gui.IsWindow(detached) or not api.GetAsyncKeyState(primary) & 0x8000:
                     raise AssertionError("Second entry did not merge during the same press")
             else:
@@ -518,9 +610,22 @@ def check(binary, sidebar_only=False):
         if pressed:
             api.mouse_event(up, 0, 0)
         api.SetCursorPos(original)
+        if foreground and gui.IsWindow(foreground) and gui.GetForegroundWindow() != foreground:
+            # Restore activation while the test window still owns the foreground.
+            # Windows may otherwise choose another window as the test process exits.
+            if not user32.SetForegroundWindow(wintypes.HWND(foreground)):
+                api.keybd_event(win.VK_MENU, 0, 0, 0)
+                api.keybd_event(win.VK_MENU, 0, win.KEYEVENTF_KEYUP, 0)
+                user32.SetForegroundWindow(wintypes.HWND(foreground))
         if app.poll() is None:
             app.terminate()
         app.wait(timeout=5)
+        profile.cleanup()
+        if foreground and gui.IsWindow(foreground):
+            user32.SetForegroundWindow(wintypes.HWND(foreground))
+            end = time.monotonic() + 0.5
+            while gui.GetForegroundWindow() != foreground and time.monotonic() < end:
+                time.sleep(0.015)
 
 
 if __name__ == "__main__":
