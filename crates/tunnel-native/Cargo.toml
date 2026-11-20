@@ -5,7 +5,10 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-tunnel-terminal = { path = "../tunnel-terminal" }
+futures-util = { version = "0.3", features = ["sink"] }
+iroh-relay = "1.4.1"
+getrandom = "0.4"
+crab_nat = "0.8.1"
 anyhow = "1"
 iroh = { version = "1.4.1", features = ["platform-verifier"] }
 iroh-tickets = "1"
@@ -23,8 +26,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 path = "../tunnel-core"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+netdev = "0.46"
 
 [target.'cfg(windows)'.dependencies]
-tokio = { version = "1", features = ["fs", "process"] }
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Threading"] }
+netdev = "0.45"

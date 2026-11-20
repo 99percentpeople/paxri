@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+tunnel-core = { path = "../tunnel-core" }
 tunnel-terminal = { path = "../tunnel-terminal" }
 tunnel-config = { path = "../tunnel-config" }
 anyhow = "1"

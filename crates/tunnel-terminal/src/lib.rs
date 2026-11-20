@@ -5,7 +5,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod exec;
 pub mod pty;
 
-pub const PROTOCOL: &[u8] = b"p2p-terminal/1";
 pub const MAX_DATA: usize = 32 * 1024;
 pub const READY: u8 = 0;
 pub const DENIED: u8 = 1;

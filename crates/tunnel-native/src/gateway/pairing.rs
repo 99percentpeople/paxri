@@ -168,7 +168,7 @@ impl NativeTransport {
         })?;
         ensure!(bytes.len() <= MAX_FRAME, "Pairing request too large");
         let (_conn, mut rx) = timeout(CONNECT_TIMEOUT, async {
-            let conn = self.endpoint.connect(dest.clone(), PROTOCOL).await?;
+            let conn = super::addresses::dial(&self.endpoint, dest.clone(), PROTOCOL).await?;
             let (mut tx, rx) = conn.open_bi().await?;
             tx.write_all(&bytes).await?;
             tx.finish()?;

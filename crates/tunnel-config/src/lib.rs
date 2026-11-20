@@ -6,6 +6,7 @@ use url::{Host, Url};
 
 pub mod file;
 pub mod gui;
+pub mod startup;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +16,8 @@ pub struct Config {
     pub pairing_code: Option<String>,
     #[serde(default)]
     pub gui: gui::GuiSettings,
+    #[serde(default)]
+    pub gateway: startup::GatewaySettings,
     #[serde(default)]
     pub native: Native,
     #[serde(default)]
@@ -29,6 +32,9 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct Native {
     pub relay_url: Option<Url>,
+    /// Find a LAN router for native IPv4 UDP when the system default route uses a VPN.
+    #[serde(default)]
+    pub lan_port_mapping: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,9 +1,10 @@
 use std::{fs, sync::Barrier, thread};
 
 use tunnel_config::{
-    file::{read_gui, save_gateway, set_gui},
+    file::{read_gui, save_gateway, set_gui, set_startup},
     gui::{Appearance, CursorShape, GuiChange, GuiSettings, TerminalScheme},
     parse,
+    startup::Startup,
 };
 
 #[test]
@@ -43,7 +44,7 @@ fn concurrent_gateway_and_desktop_writes_keep_all_edits() {
     let file = dir.path().join("node.toml");
     let original = "version=1\n";
     fs::write(&file, original).unwrap();
-    let ready = Barrier::new(3);
+    let ready = Barrier::new(4);
     thread::scope(|s| {
         for change in [
             GuiChange::BlinkCursor(true),
@@ -55,26 +56,33 @@ fn concurrent_gateway_and_desktop_writes_keep_all_edits() {
                 set_gui(file, change, false).unwrap();
             });
         }
+        s.spawn(|| {
+            ready.wait();
+            set_startup(&file, Startup::Login).unwrap();
+        });
         ready.wait();
         save_gateway(&file, original, format!("{original}device_name='Lab'\n")).unwrap();
     });
     let config = parse(&fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(config.device_name.as_deref(), Some("Lab"));
+    assert_eq!(config.gateway.startup, Startup::Login);
     assert!(config.gui.terminal.blink_cursor);
     assert_eq!(config.gui.terminal.scheme, TerminalScheme::Light);
 }
 
 #[test]
-fn gateway_merges_a_saved_gui_change_but_detects_external_node_edits() {
+fn gateway_merges_local_preferences_but_detects_external_node_edits() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("node.toml");
     let initial = "# head\nversion = 1";
     fs::write(&file, initial).unwrap();
     set_gui(&file, GuiChange::Scheme(TerminalScheme::Midnight), false).unwrap();
+    set_startup(&file, Startup::Login).unwrap();
     let merged = save_gateway(&file, initial, format!("{initial}\ndevice_name='Lab'\n")).unwrap();
     let config = parse(&merged).unwrap();
     assert_eq!(config.gui.terminal.scheme, TerminalScheme::Midnight);
     assert_eq!(config.device_name.as_deref(), Some("Lab"));
+    assert_eq!(config.gateway.startup, Startup::Login);
     let disk_edit = merged.replace("'Lab'", "'Office'");
     fs::write(&file, &disk_edit).unwrap();
     set_gui(&file, GuiChange::BlinkCursor(true), false).unwrap();

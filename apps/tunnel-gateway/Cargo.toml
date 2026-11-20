@@ -16,7 +16,14 @@ tunnel-native = { path = "../../crates/tunnel-native" }
 tunnel-core = { path = "../../crates/tunnel-core" }
 tunnel-control = { path = "../../crates/tunnel-control" }
 
+tunnel-terminal = { path = "../../crates/tunnel-terminal" }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [target.'cfg(windows)'.dependencies]
+tokio = { version = "1", features = ["fs", "process"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Threading"] }
 windows-service = "0.8"
 
 [dev-dependencies]

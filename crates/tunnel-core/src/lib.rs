@@ -1,5 +1,5 @@
 //! TCP forwarding over authenticated reliable streams. Transport types stay in the adapter.
-use std::{future::Future, io::ErrorKind, time::Duration};
+use std::{io::ErrorKind, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -9,18 +9,14 @@ use tokio::{
     time::timeout,
 };
 use tunnel_config::{Config, Destination, DevicePlatform};
+pub mod connection;
 pub mod reverse;
 
-pub const PROTOCOL: &[u8] = b"tcp-forward/1";
+pub mod session;
+pub use session::{PeerSession, StreamKind, Transport};
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const TARGET_CONNECT: Duration = Duration::from_secs(6);
 const MAX_FRAME: usize = 4096;
-
-pub trait Transport: Send + Sync {
-    type Stream: AsyncRead + AsyncWrite + Unpin + Send;
-    /// Open a stream to the configured, authenticated peer. The adapter owns session reuse.
-    fn open(&self, peer: &str) -> impl Future<Output = Result<Self::Stream>> + Send;
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
@@ -68,12 +64,12 @@ pub async fn open_service<T: Transport>(
     transport: &T,
     peer: &str,
     service: &str,
-) -> Result<T::Stream> {
+) -> Result<<T::Session as PeerSession>::Stream> {
     open_destination(transport, peer, &Destination::Service(service.to_owned())).await
 }
 
 pub async fn peer_platform(transport: &impl Transport, peer: &str) -> Result<DevicePlatform> {
-    let mut stream = transport.open(peer).await?;
+    let mut stream = transport.open(peer, StreamKind::Services).await?;
     write_frame(&mut stream, &Request::DeviceInfo).await?;
     match read_frame(&mut stream).await? {
         Answer::DeviceInfo { platform } => Ok(platform),
@@ -86,8 +82,8 @@ async fn open_destination<T: Transport>(
     transport: &T,
     peer: &str,
     destination: &Destination,
-) -> Result<T::Stream> {
-    let mut stream = transport.open(peer).await?;
+) -> Result<<T::Session as PeerSession>::Stream> {
+    let mut stream = transport.open(peer, StreamKind::Services).await?;
     let request = match destination {
         Destination::Service(service) => Request::Open {
             service: service.clone(),

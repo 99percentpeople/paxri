@@ -13,7 +13,12 @@ mod platforms;
 mod settings;
 use settings::SettingsFile;
 use tunnel_control::{Command, ControlListener, ControlStream, ForwardStatus, Status};
-use tunnel_native::gateway::{BindingState, NativeTransport, RemoteForward};
+use tunnel_native::gateway::NativeTransport;
+mod reverse;
+mod streams;
+mod terminal;
+use reverse::{BindingState, RemoteForward, Routes};
+const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Parser, Clone)]
 #[command(about = "Run the resident P2P tunnel gateway")]
@@ -27,6 +32,9 @@ struct Options {
     /// Unix socket path or Windows local pipe name
     #[arg(long)]
     ipc: Option<PathBuf>,
+    /// Allow this background gateway to be managed by the desktop and CLI
+    #[arg(long)]
+    user_managed: bool,
     /// Disable relay and public address discovery
     #[arg(long)]
     no_relay: bool,
@@ -84,12 +92,14 @@ impl Listener {
 }
 
 struct Gateway {
+    user_managed: bool,
     pairing: pairing::Pairings,
     config: Arc<Config>,
     file: SettingsFile,
     direct_only: bool,
     transport: Arc<NativeTransport>,
     listeners: BTreeMap<String, Listener>,
+    reverse_routes: Routes,
     streams: Arc<Semaphore>,
 }
 
@@ -148,7 +158,7 @@ impl Gateway {
             rule.peer.clone(),
             rule.listen,
             rule.destination.address().into(),
-            self.streams.clone(),
+            self.reverse_routes.clone(),
         ))
     }
 
@@ -269,9 +279,14 @@ impl Gateway {
     fn status(&mut self) -> Status {
         let ticket = self.transport.current_ticket().to_string();
         let config = &self.config;
+        let local = tunnel_config::file::read_local(&self.file.path).ok();
         Status {
+            startup: local
+                .as_ref()
+                .map_or(config.gateway.startup, |p| p.gateway.startup),
+            user_managed: self.user_managed,
             config_path: Some(self.file.path.clone()),
-            gui: tunnel_config::file::read_gui(&self.file.path).unwrap_or(config.gui),
+            gui: local.map_or(config.gui, |p| p.gui),
             pairing: self.pairing.status(config.pairing_code.as_deref()),
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),
@@ -283,6 +298,7 @@ impl Gateway {
                 .map(|(name, p)| (name.clone(), p.ports.clone()))
                 .collect(),
             ticket,
+            peer_connections: Some(self.transport.connections()),
             peer_platforms: config
                 .peers
                 .iter()
@@ -334,15 +350,46 @@ async fn handle_client(
     mut socket: ControlStream,
     gateway: Arc<Mutex<Gateway>>,
     management_slot: OwnedSemaphorePermit,
+    shutdown: Option<tokio::sync::mpsc::Sender<ControlStream>>,
 ) -> Result<()> {
     let command = match tunnel_control::receive(&mut socket).await {
         Ok(command) => command,
         Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
     };
     match command {
+        Command::Shutdown => {
+            if let Some(sender) = shutdown {
+                sender
+                    .send(socket)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Gateway is already stopping"))
+            } else {
+                tunnel_control::respond::<()>(
+                    &mut socket,
+                    Err(anyhow::anyhow!(
+                        "This gateway is managed by its external launcher"
+                    )),
+                )
+                .await
+            }
+        }
         Command::Status => {
             let status = gateway.lock().await.status();
             tunnel_control::respond(&mut socket, Ok(status)).await
+        }
+        Command::CheckPeer { peer } => {
+            let transport = gateway.lock().await.transport.clone();
+            let result = match tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                tunnel_core::peer_platform(&*transport, &peer),
+            )
+            .await
+            {
+                Ok(Ok(_)) => Ok(gateway.lock().await.status()),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(anyhow::anyhow!("Checking connection to {peer} timed out")),
+            };
+            tunnel_control::respond(&mut socket, result).await
         }
         Command::SetGui { change } => {
             let mut state = gateway.lock().await;
@@ -440,14 +487,15 @@ async fn handle_client(
             };
             use tokio::io::AsyncReadExt;
             let opened = tokio::select! {
-                result = transport.open_pty(&peer, size, invocation) => result,
+                result = terminal::open_pty(&*transport,&peer, size, invocation) => result,
                 _ = socket.read_u8() => return Ok(()),
             };
-            let (_connection, mut send, mut recv) = match opened {
+            let stream = match opened {
                 Ok(connection) => connection,
                 Err(e) => return tunnel_control::respond::<()>(&mut socket, Err(e)).await,
             };
             tunnel_control::respond(&mut socket, Ok(())).await?;
+            let (mut recv, mut send) = tokio::io::split(stream);
             let (mut input, mut output) = tokio::io::split(socket);
             // Closing the client or the remote terminal ends the session in both directions.
             tokio::select! {
@@ -464,18 +512,59 @@ async fn run(
     stop: impl Future<Output = Result<()>>,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    let text = std::fs::read_to_string(&options.config)
-        .with_context(|| format!("read {}", options.config.display()))?;
-    let config = Arc::new(tunnel_config::parse(&text).map_err(anyhow::Error::msg)?);
-    let key = tunnel_native::identity::load(&options.key)?;
     let path = options.ipc.unwrap_or_else(tunnel_control::default_address);
     let control = ControlListener::bind(&path)
         .await
         .with_context(|| format!("bind IPC {}", path.display()))?;
+    let _profile_lock = if options.user_managed {
+        let parent = options
+            .config
+            .parent()
+            .context("Missing profile directory")?;
+        std::fs::create_dir_all(parent)?;
+        let mut name = options.key.as_os_str().to_owned();
+        name.push(".gateway.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(name)?;
+        lock.try_lock()
+            .context("Another background gateway is using this device key")?;
+        tunnel_config::file::init(&options.config)?;
+        Some(lock)
+    } else {
+        None
+    };
+    let text = std::fs::read_to_string(&options.config)
+        .with_context(|| format!("read {}", options.config.display()))?;
+    let config = Arc::new(tunnel_config::parse(&text).map_err(anyhow::Error::msg)?);
+    let key = if options.user_managed {
+        tunnel_native::identity::init(&options.key)?
+    } else {
+        tunnel_native::identity::load(&options.key)?
+    };
     let (pair_tx, mut pair_requests) = tokio::sync::mpsc::channel(16);
-    let (transport, router) =
-        tunnel_native::gateway::start(key, config.clone(), options.no_relay, pair_tx).await?;
+    let (stream_tx, stream_rx) = tokio::sync::mpsc::channel(64);
+    let (address_tx, mut peer_addresses) = tokio::sync::mpsc::channel(32);
+    let (transport, router, mapping) = tunnel_native::gateway::start(
+        key,
+        config.clone(),
+        options.no_relay,
+        pair_tx,
+        stream_tx,
+        address_tx,
+    )
+    .await?;
+    let routes = Routes::default();
+    let mut clients = JoinSet::new();
+    clients.spawn(streams::serve(
+        stream_rx,
+        transport.subscribe_config(),
+        routes.clone(),
+    ));
     let mut gateway = Gateway {
+        user_managed: options.user_managed,
         pairing: Default::default(),
         config: config.clone(),
         file: SettingsFile {
@@ -485,6 +574,7 @@ async fn run(
         direct_only: options.no_relay,
         transport: Arc::new(transport),
         listeners: BTreeMap::new(),
+        reverse_routes: routes,
         streams: Arc::new(Semaphore::new(256)),
     };
     if let Err(e) = gateway.init_pairing().await {
@@ -501,12 +591,19 @@ async fn run(
     );
     let gateway = Arc::new(Mutex::new(gateway));
     let management = Arc::new(Semaphore::new(32));
-    let mut clients = JoinSet::new();
     clients.spawn(platforms::fill_missing(gateway.clone()));
     tokio::pin!(stop);
-    let result = loop {
+    let (shutdown, mut requests) = tokio::sync::mpsc::channel(1);
+    let shutdown = options.user_managed.then_some(shutdown);
+    let (result, reply) = loop {
         tokio::select! {
-            result = &mut stop => break result,
+            result = &mut stop => break (result, None),
+            Some(client) = requests.recv(), if shutdown.is_some() => break (Ok(()), Some(client)),
+            Some(ticket) = peer_addresses.recv() => {
+                if let Err(err) = gateway.lock().await.update_peer_ticket(ticket) {
+                    eprintln!("Saving peer addresses: {err:#}");
+                }
+            }
             Some(request) = pair_requests.recv() => gateway.lock().await.pairing.receive(request),
             accepted = async {
                 let slot = management.clone().acquire_owned().await?;
@@ -514,8 +611,9 @@ async fn run(
             } => {
                 let (socket, management_slot) = accepted?;
                 let gateway = gateway.clone();
+                let shutdown = shutdown.clone();
                 clients.spawn(async move {
-                    if let Err(e) = handle_client(socket, gateway, management_slot).await {
+                    if let Err(e) = handle_client(socket, gateway, management_slot, shutdown).await {
                         eprintln!("IPC client: {e:#}");
                     }
                 });
@@ -525,7 +623,22 @@ async fn run(
     };
     clients.shutdown().await;
     drop(gateway);
-    router.shutdown().await?;
+    if let Some(mapping) = mapping {
+        mapping.stop().await;
+    }
+    let result = result.and(router.shutdown().await.map_err(anyhow::Error::from));
+    drop(_profile_lock);
+    drop(control);
+    if let Some(mut client) = reply {
+        tunnel_control::respond(
+            &mut client,
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("{e:#}")),
+        )
+        .await?;
+    }
     result
 }
 
@@ -548,6 +661,15 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     if options.windows_service {
         return windows::dispatch();
+    }
+    #[cfg(windows)]
+    if options.user_managed {
+        // Detached processes have no console control handler. Local IPC owns shutdown.
+        return tokio::runtime::Runtime::new()?.block_on(run(
+            options,
+            std::future::pending(),
+            || Ok(()),
+        ));
     }
     tokio::runtime::Runtime::new()?.block_on(run(options, signal(), || Ok(())))
 }

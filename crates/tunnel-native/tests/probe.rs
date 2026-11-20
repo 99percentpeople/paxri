@@ -69,6 +69,7 @@ async fn probe_uses_local_relay_when_client_has_no_ip_transport() -> Result<()> 
     let relay_url = format!("http://{}", relay.http_addr().unwrap());
     let native = Native {
         relay_url: Some(relay_url.parse()?),
+        ..Native::default()
     };
     let client = Endpoint::builder(presets::Minimal)
         .clear_ip_transports()

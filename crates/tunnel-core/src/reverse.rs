@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub const PROTOCOL: &[u8] = b"tcp-listen/1";
-pub const INCOMING: u8 = 1;
+pub type ListenerId = [u8; 16];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Listen {
     listen: SocketAddr,
+    id: ListenerId,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,8 +25,9 @@ pub async fn request(
     send: &mut (impl AsyncWrite + Unpin),
     recv: &mut (impl AsyncRead + Unpin),
     listen: SocketAddr,
+    id: ListenerId,
 ) -> Result<SocketAddr> {
-    write_frame(send, &Listen { listen }).await?;
+    write_frame(send, &Listen { listen, id }).await?;
     match read_frame(recv).await? {
         Reply::Bound(addr) => {
             ensure!(
@@ -41,8 +42,9 @@ pub async fn request(
     }
 }
 
-pub async fn receive(recv: &mut (impl AsyncRead + Unpin)) -> Result<SocketAddr> {
-    Ok(read_frame::<Listen>(recv).await?.listen)
+pub async fn receive(recv: &mut (impl AsyncRead + Unpin)) -> Result<(SocketAddr, ListenerId)> {
+    let request = read_frame::<Listen>(recv).await?;
+    Ok((request.listen, request.id))
 }
 
 pub async fn respond(

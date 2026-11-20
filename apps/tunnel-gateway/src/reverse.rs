@@ -1,29 +1,73 @@
-use super::NativeTransport;
-use crate::CONNECT_TIMEOUT;
-use anyhow::{Context, Result, bail, ensure};
-use iroh::{
-    endpoint::{Connection, RecvStream, SendStream},
-    protocol::{AcceptError, ProtocolHandler},
+use crate::STREAM_TIMEOUT;
+use anyhow::{Context, Result, ensure};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, copy_bidirectional, join},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::{Semaphore, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{sleep, timeout},
 };
 use tunnel_config::Config;
-use tunnel_core::reverse::{self as wire, INCOMING};
+use tunnel_core::{
+    PeerSession, StreamKind, Transport,
+    reverse::{self as wire, ListenerId},
+};
 
-async fn relay(tcp: &mut TcpStream, rx: RecvStream, tx: SendStream) -> Result<()> {
-    let mut stream = join(rx, tx);
-    copy_bidirectional(tcp, &mut stream).await?;
-    // The listener may already be paused. Keep the last connection handle alive
-    // until QUIC has delivered this flow's final bytes and FIN.
-    let (_, tx) = stream.into_inner();
-    tx.stopped().await?;
-    Ok(())
+type Target = (String, watch::Receiver<String>);
+#[derive(Clone, Default)]
+pub(crate) struct Routes(Arc<Mutex<BTreeMap<ListenerId, Target>>>);
+
+struct Registration {
+    id: ListenerId,
+    routes: Routes,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.routes
+            .0
+            .lock()
+            .expect("reverse routes")
+            .remove(&self.id);
+    }
+}
+impl Routes {
+    fn register(&self, peer: String, targets: watch::Receiver<String>) -> Result<Registration> {
+        let mut id = [0; 16];
+        getrandom::fill(&mut id)
+            .map_err(|e| anyhow::anyhow!("generate remote listener ID: {e}"))?;
+        let mut routes = self.0.lock().expect("reverse routes");
+        ensure!(!routes.contains_key(&id), "duplicate remote listener ID");
+        routes.insert(id, (peer, targets));
+        Ok(Registration {
+            id,
+            routes: self.clone(),
+        })
+    }
+    pub async fn forward(
+        &self,
+        peer: &str,
+        mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    ) -> Result<()> {
+        let mut id = [0; 16];
+        timeout(STREAM_TIMEOUT, stream.read_exact(&mut id)).await??;
+        let target = self
+            .0
+            .lock()
+            .expect("reverse routes")
+            .get(&id)
+            .filter(|(id, _)| id == peer)
+            .map(|(_, target)| target.borrow().clone())
+            .context("peer has no active reverse listener with this ID")?;
+        let mut tcp = timeout(Duration::from_secs(6), TcpStream::connect(&target)).await??;
+        copy_bidirectional(&mut tcp, &mut stream).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -42,20 +86,11 @@ impl Listeners {
         }
     }
 
-    async fn serve(&self, conn: Connection) -> Result<()> {
-        let peer = conn.remote_id().to_string();
+    pub async fn serve<S: PeerSession>(&self, session: S, stream: S::Stream) -> Result<()> {
+        let peer = session.peer_id();
         let mut config = self.config.clone();
-        if !config
-            .borrow()
-            .peers
-            .values()
-            .any(|p| p.endpoint_id.eq_ignore_ascii_case(&peer))
-        {
-            conn.close(1u32.into(), b"peer not allowed");
-            return Ok(());
-        }
-        let (mut send, mut recv) = timeout(CONNECT_TIMEOUT, conn.accept_bi()).await??;
-        let listen = wire::receive(&mut recv).await?;
+        let (mut recv, mut send) = tokio::io::split(stream);
+        let (listen, id) = wire::receive(&mut recv).await?;
         let permitted = |cfg: &Config| {
             cfg.peers.values().any(|p| {
                 p.endpoint_id.eq_ignore_ascii_case(&peer) && p.ports.listen.contains(&listen)
@@ -80,8 +115,7 @@ impl Listeners {
             Ok(pair) => pair,
             Err(e) => {
                 wire::respond(&mut send, Err(format!("{e:#}"))).await?;
-                send.finish()?;
-                let _ = timeout(CONNECT_TIMEOUT, send.stopped()).await;
+                send.shutdown().await?;
                 return Ok(());
             }
         };
@@ -101,31 +135,24 @@ impl Listeners {
                         Err(e) => { eprintln!("accept on {listen}: {e}"); sleep(Duration::from_millis(250)).await; continue; }
                     };
                     let Ok(permit) = self.streams.clone().try_acquire_owned() else { continue };
-                    let conn = conn.clone();
+                    let session = session.clone();
                     flows.spawn(async move {
                         let _permit = permit;
-                        let (mut tx, rx) = timeout(CONNECT_TIMEOUT, conn.open_bi()).await??;
-                        // Announce even silent TCP clients so server-first protocols work.
-                        tx.write_all(&[INCOMING]).await?;
-                        relay(&mut tcp, rx, tx).await
+                        let mut stream=session.open(StreamKind::ForwardedTcp).await?;
+                        // Identify the locally authorized target before forwarding server-first TCP.
+                        stream.write_all(&id).await?;
+                        stream.flush().await?;
+                        copy_bidirectional(&mut tcp,&mut stream).await?;
+                        Ok::<(),anyhow::Error>(())
                     });
                 }
             }
         }
         drop(listener);
         drop(slot);
-        send.finish()?;
-        let _ = timeout(CONNECT_TIMEOUT, send.stopped()).await;
+        send.shutdown().await?;
         while flows.join_next().await.is_some() {}
         Ok(())
-    }
-}
-
-impl ProtocolHandler for Listeners {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        self.serve(conn)
-            .await
-            .map_err(|e| AcceptError::from_boxed(e.into()))
     }
 }
 
@@ -143,12 +170,12 @@ pub struct RemoteForward {
 }
 
 impl RemoteForward {
-    pub fn start(
-        transport: Arc<NativeTransport>,
+    pub fn start<T: Transport>(
+        transport: Arc<T>,
         peer: String,
         listen: SocketAddr,
         target: String,
-        streams: Arc<Semaphore>,
+        routes: Routes,
     ) -> Self {
         let (state_tx, state) = watch::channel(BindingState::default());
         let (target_tx, targets) = watch::channel(target);
@@ -159,26 +186,24 @@ impl RemoteForward {
                 let session = tokio::select! {
                     biased;
                     _ = &mut stop => break,
-                    result = RemoteSession::bind(&transport, &peer, listen) => result,
+                    result = bind(&*transport, &peer, listen, &routes, &targets) => result,
                 };
                 let error = match session {
-                    Ok(mut session) => {
+                    Ok((mut control, bound, _registration)) => {
                         delay = 1;
                         state_tx.send_replace(BindingState {
-                            address: Some(session.bound),
+                            address: Some(bound),
                             error: None,
                         });
                         tokio::select! {
                             biased;
                             _ = &mut stop => {
                                 // The peer acknowledges the FIN after releasing the listening socket.
-                                let _ = session.control_tx.finish();
-                                if timeout(Duration::from_secs(2), session.control_rx.read_u8()).await.is_err() {
-                                    session.conn.close(0u32.into(), b"listener stopped");
-                                }
+                                let _ = control.shutdown().await;
+                                let _ = timeout(Duration::from_secs(2),control.read_u8()).await;
                                 break;
                             }
-                            result = session.forward(&targets, &streams) => match result { Err(e) => e, Ok(()) => break },
+                            _ = control.read_u8() => anyhow::anyhow!("Peer closed the listener"),
                         }
                     }
                     Err(error) => error,
@@ -211,65 +236,25 @@ impl RemoteForward {
     }
 }
 
-struct RemoteSession {
-    conn: Connection,
-    control_tx: SendStream,
-    control_rx: RecvStream,
-    bound: SocketAddr,
-}
-
-impl RemoteSession {
-    async fn bind(transport: &NativeTransport, peer: &str, listen: SocketAddr) -> Result<Self> {
-        let dest = transport.peer(peer)?;
-        timeout(CONNECT_TIMEOUT, async {
-            let conn = transport
-                .endpoint
-                .connect(dest.address.clone(), wire::PROTOCOL)
-                .await?;
-            let (mut tx, mut rx) = conn.open_bi().await?;
-            let bound = wire::request(&mut tx, &mut rx, listen).await?;
-            Ok(Self {
-                conn,
-                control_tx: tx,
-                control_rx: rx,
-                bound,
-            })
-        })
-        .await
-        .context("Remote listener request timed out")?
-    }
-
-    async fn forward(
-        &mut self,
-        targets: &watch::Receiver<String>,
-        streams: &Arc<Semaphore>,
-    ) -> Result<()> {
-        loop {
-            let (tx, mut rx) = tokio::select! {
-                biased;
-                _ = self.control_rx.read_u8() => bail!("Peer closed the listener"),
-                streams = self.conn.accept_bi() => streams?,
-            };
-            let Ok(permit) = streams.clone().try_acquire_owned() else {
-                continue;
-            };
-            let target = targets.borrow().clone();
-            let conn = self.conn.clone();
-            tokio::spawn(async move {
-                let (_permit, _connection) = (permit, conn);
-                let run = async {
-                    ensure!(
-                        timeout(CONNECT_TIMEOUT, rx.read_u8()).await?? == INCOMING,
-                        "Invalid incoming stream"
-                    );
-                    let mut tcp =
-                        timeout(Duration::from_secs(6), TcpStream::connect(&target)).await??;
-                    relay(&mut tcp, rx, tx).await
-                };
-                if let Err(e) = run.await {
-                    eprintln!("remote forward to {target}: {e:#}");
-                }
-            });
-        }
-    }
+async fn bind<T: Transport>(
+    transport: &T,
+    peer: &str,
+    listen: SocketAddr,
+    routes: &Routes,
+    targets: &watch::Receiver<String>,
+) -> Result<(
+    <T::Session as PeerSession>::Stream,
+    SocketAddr,
+    Registration,
+)> {
+    timeout(STREAM_TIMEOUT, async {
+        let session = transport.session(peer).await?;
+        let guard = routes.register(session.peer_id(), targets.clone())?;
+        let mut stream = session.open(StreamKind::Listen).await?;
+        let (mut rx, mut tx) = tokio::io::split(&mut stream);
+        let bound = wire::request(&mut tx, &mut rx, listen, guard.id).await?;
+        Ok((stream, bound, guard))
+    })
+    .await
+    .context("Remote listener request timed out")?
 }

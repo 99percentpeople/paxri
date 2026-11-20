@@ -8,6 +8,7 @@ use clap::{Args, Subcommand};
 use tunnel_config::Config;
 use tunnel_native::{self as native, EndpointTicket};
 
+pub mod gateway;
 mod management;
 mod shell;
 mod stdio;
@@ -22,8 +23,34 @@ pub struct GatewayOptions {
 
 #[derive(Subcommand)]
 pub enum Command {
+    #[cfg(windows)]
+    #[command(hide = true)]
+    BootGateway {
+        #[arg(long)]
+        client: PathBuf,
+        #[arg(long)]
+        node_file: PathBuf,
+    },
+    /// Manage the local background gateway and its startup policy
+    Gateway {
+        /// Node TOML (defaults to the current user's node)
+        #[arg(
+            id = "gateway_config",
+            long = "config",
+            global = true,
+            value_name = "FILE"
+        )]
+        config: Option<PathBuf>,
+        #[command(subcommand)]
+        action: gateway::Action,
+    },
     /// Show the running gateway, peers, published services and bound ports
     Status {
+        /// Show the currently selected paths for this paired device
+        peer: Option<String>,
+        /// Contact the named device before reporting its connection
+        #[arg(long, requires = "peer")]
+        check: bool,
         #[arg(long)]
         json: bool,
     },
@@ -103,6 +130,9 @@ pub struct Node {
     /// Use direct IP connectivity only
     #[arg(long)]
     no_relay: bool,
+    /// Disable direct paths to measure the actual relay fallback
+    #[arg(long, conflicts_with = "no_relay")]
+    relay_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -119,6 +149,18 @@ pub enum ProbeCommand {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=300))]
         count: u16,
     },
+}
+
+fn print_connections(paths: Option<&[tunnel_control::PeerConnection]>) {
+    match paths {
+        None => println!("  Connection status unavailable"),
+        Some([]) => println!("  No active connection"),
+        Some(paths) => {
+            for path in paths {
+                println!("  {} · {}", path.protocol, path.description());
+            }
+        }
+    }
 }
 
 fn load_config(path: &Path) -> Result<Config> {
@@ -152,6 +194,11 @@ impl Command {
 
 async fn dispatch(command: Command, ipc: PathBuf) -> Result<u32> {
     match command {
+        #[cfg(windows)]
+        Command::BootGateway { client, node_file } => {
+            return gateway::boot::start(&client, &node_file, &ipc);
+        }
+        Command::Gateway { action, config } => gateway::cli(action, &ipc, config).await?,
         Command::Shell { peer } => return shell::run(&ipc, peer, None).await,
         Command::Exec { peer, script, argv } => {
             use tunnel_control::terminal::exec::Invocation;
@@ -170,9 +217,30 @@ async fn dispatch(command: Command, ipc: PathBuf) -> Result<u32> {
         Command::Connect { peer, service } => {
             connect_stdio(&ipc, peer, service).await?;
         }
-        Command::Status { json } => {
-            let status = tunnel_control::request(&ipc, tunnel_control::Command::Status).await?;
-            if json {
+        Command::Status { peer, check, json } => {
+            let request = match peer.as_ref().filter(|_| check) {
+                Some(peer) => tunnel_control::Command::CheckPeer { peer: peer.clone() },
+                None => tunnel_control::Command::Status,
+            };
+            let status = tunnel_control::request(&ipc, request).await?;
+            if let Some(peer) = peer {
+                let id = status
+                    .peers
+                    .get(&peer)
+                    .with_context(|| format!("Unknown paired device {peer}"))?;
+                let paths = status.connections_for(&peer);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "peer": peer, "device_id": id, "platform": status.peer_platform(&peer), "connections": paths,
+                        }))?
+                    );
+                } else {
+                    println!("{peer} ({}) · {id}", status.peer_platform(&peer).label());
+                    print_connections(paths);
+                }
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
                 println!(
@@ -187,6 +255,7 @@ async fn dispatch(command: Command, ipc: PathBuf) -> Result<u32> {
                 }
                 for (name, id) in &status.peers {
                     println!("peer {name} {id} ({})", status.peer_platform(name).label());
+                    print_connections(status.connections_for(name));
                 }
                 for (name, target) in status.services {
                     println!("service {name} -> {target}");
@@ -248,7 +317,7 @@ async fn run_probe(command: ProbeCommand) -> Result<()> {
         .parse()
         .context("invalid peer public key")?;
     let key = native::identity::load(&node.key)?;
-    let bind = native::bind(key, &config.native, node.no_relay);
+    let bind = native::bind_probe(key, &config.native, node.no_relay, node.relay_only);
     match command {
         ProbeCommand::Listen(node) => {
             let router = native::listen(bind.await?, peer);

@@ -66,7 +66,7 @@ impl DeviceSettings {
         self.dashboard.update(cx, |dashboard, cx| {
             dashboard.request(
                 GatewayRequest {
-                    command,
+                    command: crate::Operation::Api(command),
                     on_complete: Some(Box::new(move |result, cx| {
                         let _ = view.update(cx, |page, cx| {
                             page.saving = false;
@@ -86,6 +86,35 @@ impl DeviceSettings {
 }
 
 impl DeviceSettings {
+    fn connection(&self, status: &tunnel_control::Status, ui: Ui, cx: &Context<Self>) -> Div {
+        let Some(paths) = status.connections_for(&self.peer) else {
+            return ui
+                .section("Connection")
+                .child(ui.muted("Connection status unavailable."));
+        };
+        let mut section = ui.section("Connection");
+        if paths.is_empty() {
+            section = section.child(ui.muted("No active connection."));
+        }
+        for path in paths {
+            section =
+                section.child(ListItem::new(path.protocol.clone()).detail(path.description()));
+        }
+        if !self.saving {
+            section = section.child(ui.button(Ghost, "check-peer", "Check connection").on_click(
+                cx.listener(|v, _, _, cx| {
+                    v.send(
+                        Command::CheckPeer {
+                            peer: v.peer.to_string(),
+                        },
+                        cx,
+                    )
+                }),
+            ));
+        }
+        section
+    }
+
     fn session_list(&self, ui: Ui, cx: &Context<Self>) -> Div {
         let peer = self.peer.clone();
         let new_session = ui
@@ -136,7 +165,8 @@ impl Render for DeviceSettings {
             return page.child(ui.muted("This device is no longer paired."));
         };
         page = page.child(ui.muted(peer_detail(status.peer_platform(&self.peer), id)));
-        page.child(self.session_list(ui, cx))
+        page.child(self.connection(status, ui, cx))
+            .child(self.session_list(ui, cx))
             .child(self.forwarding(status, ui, cx))
             .child(self.port_access(status, ui, cx))
     }

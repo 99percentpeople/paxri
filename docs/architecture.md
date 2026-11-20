@@ -7,7 +7,7 @@
 ```text
 管理     CLI / GPUI ── 本机 IPC ── tunnel-gateway
 原生     本机应用 ── TCP ── tunnel-gateway A ══ iroh ══ tunnel-gateway B ── TCP ── 目标服务
-终端     CLI / GPUI ── IPC ── 网关 A ══ p2p-terminal/1 ══ 网关 B ── PTY ── 本机 shell
+终端     CLI / GPUI ── IPC ── 网关 A ══ 共享设备会话 / 终端流 ══ 网关 B ── PTY ── 本机 shell
 终端     CLI / GPUI ── IPC ── 网关 A ══ iroh ══ 网关 B ── PTY / ConPTY
 未来 Web 浏览器内的应用 ══ WebRTC DataChannel ══ tunnel-gateway B ── TCP ── 目标服务
 ```
@@ -47,15 +47,15 @@ Start-Service P2PTunnelGateway
 
 ## 可替换的 P2P 传输接口
 
-当前 Rust 接口为 `Transport::open(peer)`，返回实现 Tokio `AsyncRead + AsyncWrite` 的双向流。入站适配器将经过认证的设备 ID 与流交给 `serve`。原生适配器封装会话复用，下面的表描述传输、会话和流的职责。`tcp-forward/1` 定义流上的应用协议，iroh 和 WebRTC 各自负责把它送到经过配对验证的对端。
+网关业务通过 `Transport::session(peer)` 获取共享会话，通过 `PeerSession::open(kind)` 打开独立的可靠双向流。入站适配器交付 `IncomingStream`，包含已认证的会话、用途和实现 Tokio `AsyncRead + AsyncWrite` 的字节流。终端、命令、设备服务和反向监听共用这套分派逻辑。接入其他后端时，需要实现身份验证、会话复用、并发双向流和半关闭语义。[Rust 接口](../crates/tunnel-core/src/session.rs)
 
 | 接口 | 核心依赖的行为 |
 | --- | --- |
 | `Transport` | 主动连接指定设备，或接收入站会话。适配器向核心交付会话前，验证对端身份与应用协议版本。候选地址、打洞和中继都由适配器处理。 |
-| `Session` | 提供已认证的 `PeerId`，支持主动打开和接收多条并发双向流。诊断探测可以观测路径，将网关会话的实际路径呈现到管理界面是后续工作。 |
+| `Session` | 提供已认证的 `PeerId`，支持主动打开和接收多条并发双向流。设备页与 CLI 显示共享连接的实际路径以及活动流的用途和数量。 |
 | `BiStream` | 可靠、有序地读写字节，写入支持背压。`finish_send` 在已写数据之后发出本方向 EOF，对向仍能发送。`reset` 异常终止当前流。 |
 
-**iroh 适配器（首版）** 持有 iroh Endpoint，用对端公钥验证身份，通过 QUIC ALPN 选择应用协议。每个本地 TCP 连接使用一条 QUIC 双向流。原生 IPv4/IPv6 探测、打洞和中继均在适配器内部完成。[iroh](https://github.com/n0-computer/iroh)
+**iroh 适配器（首版）** 持有 iroh Endpoint，用对端公钥验证身份，通过 `p2p-tunnel/session/1` ALPN 建立设备会话。每个本地 TCP 连接使用一条 QUIC 双向流。原生 IPv4/IPv6 探测、打洞和中继均在适配器内部完成。[iroh](https://github.com/n0-computer/iroh)
 
 **WebRTC 适配器（浏览器阶段）** 由浏览器和支持 WebRTC 的原生后台共同实现。通过信令交换 SDP 和 ICE 候选，使用 ICE 选路，按需使用 TURN 中继。每条逻辑流映射到一条可靠、有序的 DataChannel。适配器把字节切分为有界的 `DATA` 消息，按协商的消息大小限制发送，并在发送缓冲积压时暂停写入。`FIN` 消息传递单向 EOF，使目标服务在收到 EOF 后仍可回包。双方完成收发后再关闭通道，提前关闭按流中断处理。浏览器消费通道数据，本机其他应用需要 TCP 监听入口时由原生后台提供。[WebRTC Data Channels](https://www.rfc-editor.org/rfc/rfc8831.html) · [RTCDataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
 

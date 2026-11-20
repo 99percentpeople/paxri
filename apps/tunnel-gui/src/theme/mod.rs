@@ -49,11 +49,7 @@ pub fn offline_path(config: Option<PathBuf>, custom_ipc: bool) -> Option<PathBuf
         if custom_ipc {
             return None;
         }
-        #[cfg(windows)]
-        let dir = dirs::data_local_dir()?.join("P2PTunnel");
-        #[cfg(not(windows))]
-        let dir = dirs::config_dir()?.join("p2p-tunnel");
-        Some(dir.join("node.toml"))
+        tunnel_config::file::user_config()
     })
 }
 

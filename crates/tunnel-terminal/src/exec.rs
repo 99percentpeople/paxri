@@ -3,7 +3,6 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL: &[u8] = b"p2p-terminal-exec/1";
 const MAX_REQUEST: usize = 32 * 1024;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

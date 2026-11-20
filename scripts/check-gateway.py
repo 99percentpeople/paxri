@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -163,6 +164,14 @@ sys.exit(37)
     assert (captured.returncode, captured.stdout, captured.stderr) == (17, b"\x1b[6noutputerror", b""), captured
     with session() as (child, fd, slave):
         ready(slave)
+        with session() as (second, second_fd, second_slave):
+            ready(second_slave)
+            assert call("host", "exec", "client", "--", "printf", "reverse") == "reverse"
+            for node, peer in (("client", "host"), ("host", "client")):
+                links = json.loads(call(node, "status", peer, "--check", "--json"))["connections"]
+                assert len(links) == 1 and links[0]["streams"]["terminal"] == 2, links
+            os.write(second_fd, b"exit 13\r")
+            assert second.wait(10) == 13
         query = b"""test -t 0 && printf 'PTY[%s]\\n' "$(stty size)"\r"""
         os.write(fd, query)
         read_until(fd, rb"PTY\[31 89\]")
@@ -262,6 +271,30 @@ def check_pairing(root, keys, call, start, target_port, wait):
     wait("client", lambda s: s["peers"].get("Studio-2") == keys["host"])
     assert status("host")["peers"] == {"Laptop": keys["client"]}
     assert status("host")["peer_platforms"] == {"Laptop": platform}
+    # First use can race in both directions; subsequent checks must use the same session.
+    assert json.loads(call("host", "status", "Laptop", "--json"))["connections"] == []
+    directions = [("client", "Studio-2"), ("host", "Laptop")]
+    barrier = threading.Barrier(2)
+
+    def check_from(direction):
+        node, peer = direction
+        barrier.wait(timeout=5)
+        return json.loads(call(node, "status", peer, "--check", "--json"))
+
+    with ThreadPoolExecutor(2) as workers:
+        checked = list(workers.map(check_from, directions))
+    assert [r["device_id"] for r in checked] == [keys["host"], keys["client"]]
+    for node, peer in directions:
+        # QUIC can finish the application exchange before publishing its selected path.
+        deadline = time.monotonic() + 5
+        while True:
+            links = json.loads(call(node, "status", peer, "--json"))["connections"]
+            assert len(links) == 1 and links[0]["protocol"] == "Shared connection", links
+            if links[0]["path"] != "selecting" or time.monotonic() >= deadline:
+                break
+            time.sleep(.05)
+        assert links[0]["path"] == "direct" and links[0]["address"] and links[0]["rtt_ms"] is not None, links
+    rejected("host", "status", "missing", "--json")
     assert status("client")["peer_platforms"] == {"Studio-2": platform}
     assert not status("host")["port_access"] and not status("client")["port_access"]
     call("spare", "pair", "join", old_code)
@@ -307,6 +340,38 @@ def check_pairing(root, keys, call, start, target_port, wait):
     print("Pairing, peer platform exchange and backfill, live forwarding and shared settings passed.")
 
 
+def check_lifecycle(client):
+    with tempfile.TemporaryDirectory(prefix="p2p-lifecycle-") as tmp:
+        root = Path(tmp)
+        ipc = root.name if os.name == "nt" else str(root / "run" / "gateway.sock")
+        config = str(root / "node profile" / "node.toml")
+
+        def call(*args):
+            return subprocess.check_output([client, "--ipc", ipc, *args], stdin=subprocess.DEVNULL,
+                                           stderr=subprocess.PIPE, timeout=45, encoding="utf-8")
+
+        def manage(*args):
+            return call("gateway", *args, "--config", config)
+
+        try:
+            # Captured pipes must reach EOF even while the background child is still running.
+            with ThreadPoolExecutor(2) as pool:
+                starts = [pool.submit(manage, "start") for _ in range(2)]
+                assert all("Gateway running" in start.result() for start in starts)
+            initial = json.loads(call("status", "--json"))
+            assert initial["user_managed"] and initial["startup"] == "gui"
+            manage("startup", "manual")
+            manage("restart")
+            again = json.loads(call("status", "--json"))
+            assert again["startup"] == "manual" and again["device_id"] == initial["device_id"]
+            assert again["pairing"]["code"] == initial["pairing"]["code"]
+            assert "Gateway stopped" in manage("stop")
+            assert "Gateway stopped" in manage("status")
+        finally:
+            manage("stop")
+    print("Background gateway lifecycle passed.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
@@ -314,12 +379,16 @@ def main():
                         help="client executable to use for gateway commands")
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
     parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
+    parser.add_argument("--lifecycle", action="store_true", help="exercise background launch, restart and stop")
     args = parser.parse_args()
     if args.native_terminal and (not sys.platform.startswith("linux") or os.geteuid() == 0):
         parser.error("--native-terminal requires a standard Linux user")
     bins = args.bin_dir.resolve()
     suffix = ".exe" if os.name == "nt" else ""
     cli, gateway = (str(bins / (n + suffix)) for n in (args.client, "tunnel-gateway"))
+
+    if args.lifecycle:
+        return check_lifecycle(cli)
 
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         root = Path(tmp)
@@ -466,7 +535,10 @@ service="private"
             assert replies.read() == payload[::-1]  # half-close, data survives pause
         with connect(status, "denied") as conn:
             assert conn.recv(64) == b""  # denied without contacting the target
-        assert "DENIED" in (root / "client.log").read_text(encoding="utf-8")
+        deadline = time.monotonic() + 3
+        while "DENIED" not in (root / "client.log").read_text(encoding="utf-8"):
+            assert time.monotonic() < deadline, "missing access denial for local forward"
+            time.sleep(.02)
         with socket.socket() as blocker:
             blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             blocker.bind(("127.0.0.1", listen_port))
@@ -517,6 +589,17 @@ service="private"
                     second.sendall(payload)
                     second.shutdown(socket.SHUT_WR)
                     assert other.read() == payload[::-1]
+                # Scope incoming sockets to the right listener even while another rule is active.
+                call("client", "forward", "add", "sibling", "--remote", "--peer", "host", "--listen", "0",
+                     "--target", str(streaming.server_address[1]))
+                sibling = rule_state("client", "sibling", lambda f: f["bound"])
+                with connect({"forwards": {"sibling": sibling}}, "sibling") as other, other.makefile("rb") as echo:
+                    other.sendall(b"sibling")
+                    other.shutdown(socket.SHUT_WR)
+                    assert echo.read() == b"sibling"
+                links = json.loads(call("client", "status", "host", "--json"))["connections"]
+                assert len(links) == 1 and links[0]["streams"]["listen"] == 2, links
+                call("client", "forward", "remove", "sibling")
                 call("client", "forward", "pause", "push")
                 try:
                     with connect(remote_state, "push"):

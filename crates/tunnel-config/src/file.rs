@@ -5,23 +5,32 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{ErrorKind, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table, TableLike, ser::ValueSerializer};
 
 #[derive(Deserialize)]
-struct GuiSection {
+pub struct LocalSettings {
     #[serde(default)]
-    gui: GuiSettings,
+    pub gateway: crate::startup::GatewaySettings,
+    #[serde(default)]
+    pub gui: GuiSettings,
+}
+
+pub fn read_local(path: &Path) -> Result<LocalSettings> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(toml::from_str(&text)?),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings {
+            gui: Default::default(),
+            gateway: Default::default(),
+        }),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn read_gui(path: &Path) -> Result<GuiSettings> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(toml::from_str::<GuiSection>(&text)?.gui),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(GuiSettings::default()),
-        Err(e) => Err(e.into()),
-    }
+    Ok(read_local(path)?.gui)
 }
 
 fn edit(path: &Path, create: bool, update: impl FnOnce(&str) -> Result<String>) -> Result<String> {
@@ -43,17 +52,29 @@ fn edit(path: &Path, create: bool, update: impl FnOnce(&str) -> Result<String>) 
         .write(true)
         .open(lock_name)?;
     lock.lock()?;
-    let current = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if create && e.kind() == ErrorKind::NotFound => String::from("version = 1\n"),
+    let (current, missing) = match fs::read_to_string(&path) {
+        Ok(text) => (text, false),
+        Err(e) if create && e.kind() == ErrorKind::NotFound => {
+            (String::from("version = 1\n"), true)
+        }
         Err(e) => return Err(e.into()),
     };
     let next = update(&current)?;
-    if next != current {
+    if missing || next != current {
         let mut temp = NamedTempFile::new_in(parent)?;
         temp.write_all(next.as_bytes())?;
         match fs::metadata(&path) {
-            Ok(meta) => temp.as_file().set_permissions(meta.permissions())?,
+            Ok(meta) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{MetadataExt, fchown};
+                    // A privileged startup-policy edit must leave the user's TOML writable.
+                    if temp.as_file().metadata()?.uid() == 0 && meta.uid() != 0 {
+                        fchown(temp.as_file(), Some(meta.uid()), Some(meta.gid()))?;
+                    }
+                }
+                temp.as_file().set_permissions(meta.permissions())?;
+            }
             Err(err) if create && err.kind() == ErrorKind::NotFound => {}
             Err(err) => return Err(err.into()),
         }
@@ -62,6 +83,34 @@ fn edit(path: &Path, create: bool, update: impl FnOnce(&str) -> Result<String>) 
             .with_context(|| format!("save {}", path.display()))?;
     }
     Ok(next)
+}
+
+pub fn user_config() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let dir = dirs::data_local_dir()?.join("P2PTunnel");
+    #[cfg(not(windows))]
+    let dir = dirs::config_dir()?.join("p2p-tunnel");
+    Some(dir.join("node.toml"))
+}
+
+pub fn init(path: &Path) -> Result<()> {
+    edit(path, true, |current| Ok(current.to_owned()))?;
+    Ok(())
+}
+
+pub fn startup(path: &Path) -> Result<crate::startup::Startup> {
+    Ok(read_local(path)?.gateway.startup)
+}
+
+pub fn set_startup(path: &Path, mode: crate::startup::Startup) -> Result<()> {
+    edit(path, true, |current| {
+        let mut doc: DocumentMut = current.parse()?;
+        subtable(doc.as_table_mut(), "gateway")?.insert("startup", toml_edit::value(mode.as_str()));
+        let text = doc.to_string();
+        crate::parse(&text).map_err(anyhow::Error::msg)?;
+        Ok(text)
+    })?;
+    Ok(())
 }
 
 pub fn subtable<'a>(table: &'a mut dyn TableLike, key: &str) -> Result<&'a mut dyn TableLike> {
@@ -102,10 +151,10 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
         crate::parse(&text).map_err(anyhow::Error::msg)?;
         Ok(text)
     })?;
-    Ok(toml::from_str::<GuiSection>(&text)?.gui)
+    Ok(toml::from_str::<LocalSettings>(&text)?.gui)
 }
 
-/// Preserve a concurrent desktop edit while retaining the gateway's existing
+/// Preserve concurrent desktop and startup-policy edits while retaining the gateway's existing
 /// conflict check for manually edited peers, rules, comments, and other settings.
 pub fn save_gateway(path: &Path, expected: &str, proposed: String) -> Result<String> {
     edit(path, false, |current| {
@@ -116,6 +165,8 @@ pub fn save_gateway(path: &Path, expected: &str, proposed: String) -> Result<Str
         let mut disk: DocumentMut = current.parse()?;
         old.remove("gui");
         let gui = disk.remove("gui");
+        old.remove("gateway");
+        let settings = disk.remove("gateway");
         ensure!(
             old.to_string() == disk.to_string(),
             "Configuration changed on disk. Restart the gateway before saving."
@@ -124,6 +175,10 @@ pub fn save_gateway(path: &Path, expected: &str, proposed: String) -> Result<Str
         next.remove("gui");
         if let Some(gui) = gui {
             next.insert("gui", gui);
+        }
+        next.remove("gateway");
+        if let Some(settings) = settings {
+            next.insert("gateway", settings);
         }
         let text = next.to_string();
         crate::parse(&text).map_err(anyhow::Error::msg)?;

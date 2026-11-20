@@ -154,6 +154,28 @@ impl Gateway {
         Ok(())
     }
 
+    pub(super) fn update_peer_ticket(&mut self, ticket: EndpointTicket) -> Result<()> {
+        let id = ticket.endpoint_addr().id.to_string();
+        let Some((name, peer)) = self
+            .config
+            .peers
+            .iter()
+            .find(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(&id))
+        else {
+            return Ok(());
+        };
+        let name = name.clone();
+        let text = ticket.to_string();
+        if peer.ticket.as_ref() == Some(&text) {
+            return Ok(());
+        }
+        let (updated, config) = self.file.prepare_peer(&name, &id, &text, None)?;
+        self.file.persist(updated)?;
+        self.transport.set_peer(name, ticket);
+        self.apply_config(config);
+        Ok(())
+    }
+
     fn contact(&self) -> Contact {
         let name = self
             .config

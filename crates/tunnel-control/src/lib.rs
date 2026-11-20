@@ -28,6 +28,10 @@ const DEADLINE: Duration = Duration::from_secs(5);
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    CheckPeer {
+        peer: String,
+    },
+    Shutdown,
     RefreshPairingCode,
     CancelPairing,
     JoinPairing {
@@ -152,6 +156,10 @@ pub struct PairingPeer {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Status {
     #[serde(default)]
+    pub user_managed: bool,
+    #[serde(default)]
+    pub startup: tunnel_config::startup::Startup,
+    #[serde(default)]
     pub config_path: Option<PathBuf>,
     #[serde(default)]
     pub gui: GuiSettings,
@@ -166,13 +174,22 @@ pub struct Status {
     pub peers: BTreeMap<String, String>,
     #[serde(default)]
     pub peer_platforms: BTreeMap<String, DevicePlatform>,
+    /// Absent when connected to an older gateway. An empty list is a known idle peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_connections: Option<BTreeMap<String, Vec<PeerConnection>>>,
     #[serde(default)]
     pub port_access: BTreeMap<String, PortAccess>,
     pub services: BTreeMap<String, String>,
     pub forwards: BTreeMap<String, ForwardStatus>,
 }
 
+pub use tunnel_core::connection::PeerConnection;
+
 impl Status {
+    pub fn connections_for(&self, peer: &str) -> Option<&[PeerConnection]> {
+        self.peer_connections.as_ref()?.get(peer).map(Vec::as_slice)
+    }
+
     pub fn peer_platform(&self, peer: &str) -> DevicePlatform {
         self.peer_platforms.get(peer).copied().unwrap_or_default()
     }
@@ -387,7 +404,27 @@ async fn begin<T: DeserializeOwned>(
 }
 
 pub async fn request(path: &Path, command: Command) -> Result<Status> {
-    Ok(begin(path, command, DEADLINE).await?.1)
+    let deadline = if matches!(command, Command::CheckPeer { .. }) {
+        Duration::from_secs(30)
+    } else {
+        DEADLINE
+    };
+    Ok(begin(path, command, deadline).await?.1)
+}
+
+/// The gateway acknowledges after closing its listeners and transport.
+pub async fn shutdown(path: &Path) -> Result<()> {
+    begin::<()>(path, Command::Shutdown, Duration::from_secs(30)).await?;
+    Ok(())
+}
+
+pub fn is_offline(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        )
+    })
 }
 
 pub async fn connect(path: &Path, peer: String, service: String) -> Result<Stream> {

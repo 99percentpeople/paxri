@@ -1,6 +1,7 @@
 //! Native iroh transport and standalone authenticated connectivity probes.
 pub mod gateway;
 pub mod identity;
+mod relay;
 
 use std::time::{Duration, Instant};
 
@@ -23,17 +24,55 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const IO_TIMEOUT: Duration = Duration::from_secs(35);
 
 pub async fn bind(key: SecretKey, config: &Native, no_relay: bool) -> Result<Endpoint> {
-    let mode = match (no_relay, &config.relay_url) {
-        (true, _) => RelayMode::Disabled,
-        (false, Some(url)) => RelayMode::custom([url.clone().into()]),
-        (false, None) => RelayMode::Default,
+    bind_probe(key, config, no_relay, false).await
+}
+
+pub async fn bind_probe(
+    key: SecretKey,
+    config: &Native,
+    no_relay: bool,
+    relay_only: bool,
+) -> Result<Endpoint> {
+    ensure!(!(no_relay && relay_only), "Incompatible probe transports");
+    let public = public_relays(config, no_relay).await;
+    let mut builder = builder(key, config, no_relay, false, public.as_ref());
+    if relay_only {
+        builder = builder.clear_ip_transports();
+    }
+    let endpoint = builder.bind().await?;
+    if let Some(public) = public {
+        public.monitor(endpoint.clone());
+    }
+    Ok(endpoint)
+}
+
+async fn public_relays(config: &Native, no_relay: bool) -> Option<relay::PublicRelays> {
+    if no_relay || config.relay_url.is_some() {
+        return None;
+    }
+    Some(relay::PublicRelays::rank().await)
+}
+
+fn builder(
+    key: SecretKey,
+    config: &Native,
+    no_relay: bool,
+    discovery: bool,
+    public: Option<&relay::PublicRelays>,
+) -> iroh::endpoint::Builder {
+    let builder = if discovery && !no_relay && config.relay_url.is_none() {
+        Endpoint::builder(presets::N0).relay_mode(public.map_or(RelayMode::Default, |p| p.mode()))
+    } else {
+        let mode = match (no_relay, &config.relay_url) {
+            (true, _) => RelayMode::Disabled,
+            (false, Some(url)) => RelayMode::custom([url.clone().into()]),
+            (false, None) => public.map_or(RelayMode::Default, |p| p.mode()),
+        };
+        Endpoint::builder(presets::Minimal).relay_mode(mode)
     };
-    Ok(Endpoint::builder(presets::Minimal)
+    builder
         .ca_tls_config(iroh::tls::CaTlsConfig::system())
         .secret_key(key)
-        .relay_mode(mode)
-        .bind()
-        .await?)
 }
 
 #[derive(Debug)]

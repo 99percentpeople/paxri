@@ -10,6 +10,7 @@ use crate::{
     components::{ButtonVariant::Secondary, Ui, heading, row},
 };
 use gpui::{prelude::*, *};
+use tunnel_cli::gateway::Action;
 use tunnel_control::Command;
 
 fn short_id(id: &str) -> String {
@@ -34,6 +35,12 @@ impl Dashboard {
                     } else {
                         "Connecting to gateway…"
                     }))
+                    .when(self.error.is_some() && !self.saving, |r| {
+                        r.child(
+                            ui.button(Secondary, "start-gateway", "Start gateway")
+                                .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Start, cx))),
+                        )
+                    })
                     .child(
                         ui.button(Secondary, "retry", "Refresh")
                             .on_click(cx.listener(|v, _, _, cx| v.send(Command::Status, cx))),

@@ -1,5 +1,45 @@
 # 安装网关和 CLI
 
+## Windows x64 普通用户
+
+将 `p2p-tunnel-windows-x64.zip` 完整解压到自己的用户目录。免安装包包含原生网关、CLI 和桌面界面，程序静态链接 Visual C++ 运行库。
+
+1. 双击 `tunnel-gui.exe`。首次启动会以当前用户身份在后台启动同目录的 `tunnel-gateway.exe`，在 `%LOCALAPPDATA%\P2PTunnel` 创建 `node.toml` 和 `device.key`。在 **Home** 页面配对。
+2. 打开 **Menu → Settings → Gateway** 可停止、重启网关或选择启动方式。停止会断开活动终端和转发。关闭 GUI 后，网关仍会运行。主页离线时可以点击 **Start gateway**。
+3. 在解压目录的 PowerShell 也可以运行以下命令。`tunnel-gui.exe` 支持相同子命令。
+
+```powershell
+.\tunnel.exe gateway start
+.\tunnel.exe gateway status
+.\tunnel.exe gateway restart
+.\tunnel.exe gateway stop
+.\tunnel.exe gateway startup
+.\tunnel.exe gateway startup login
+```
+
+| 启动方式 | CLI 参数 | 生效时机 |
+| --- | --- | --- |
+| Manually | `manual` | 手动点击启动或执行 `gateway start` |
+| When the app opens | `gui` | 默认。打开 GUI，已有网关时直接连接 |
+| At sign-in | `login` | 当前用户登录时启动，也可从 GUI 启动 |
+| At system startup | `system` | 系统启动时以当前用户的受限身份运行，需要有权注册启动任务 |
+
+设置保存在同一份 `node.toml` 的 `[gateway]` 表，键为 `startup`。请通过设置页或 `gateway startup <模式>` 更改，以便同步注册或移除操作系统的启动项。Windows 使用任务计划程序。开机模式由同一账户以管理员权限设置或移除，设置时会将启动程序复制到受保护的 Program Files 目录。通过开机任务或已提升权限的 GUI、CLI 启动网关时，网关都使用普通用户权限，沿用原来的设备身份。移动解压目录后，请重新设置启动方式。开机模式使用 S4U 登录，依赖 Windows 登录凭据的网络共享和加密文件受限。权限不足时会显示系统错误，并保留原来的选择。普通用户可选择打开 GUI 时启动或登录时启动。[Windows 任务登录方式](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/ne-taskschd-task_logon_type)
+
+Windows 11 24H2 及以上版本双击 `tunnel-gui.exe` 会直接打开主页。较早的 Windows 版本双击时可能闪过命令窗口，可在已打开的 PowerShell 中运行 `.\tunnel-gui.exe` 来避免闪现。同一个 EXE 在命令行运行 `exec` 时支持输出重定向，并返回远端程序的退出码。[Windows 控制台分配策略](https://learn.microsoft.com/en-us/windows/console/console-allocation-policy)
+
+同一台电脑有多个节点时，使用独立的配置目录和 IPC 名称。例如 `.\tunnel-gui.exe --ipc my-node --config "D:\My Node\node.toml"`。CLI 对应 `.\tunnel.exe --ipc my-node gateway start --config "D:\My Node\node.toml"`。设备密钥和后台启动日志 `gateway.log` 位于该 TOML 的同一目录。旧版前台网关仍在运行时，先关闭其命令窗口一次，再从新 GUI 启动。
+
+远端 PowerShell 使用登录用户本身的权限。当前包中的 EXE 未签名，受管电脑需要允许执行这些程序。Windows 防火墙或单位网络可能限制入站连接，直连受限时，默认配置可以使用能从该网络访问的 iroh 中继。[Windows 防火墙规则](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules)
+
+要从源码制作同一安装包，在有 Rust MSVC 工具链和 Python 的 Windows 构建机上运行 `python packaging/windows/build-portable.py`。输出在 `target/dist`。
+
+### Linux 和 macOS 桌面
+
+相同的 `gateway` 命令和 GUI 设置也可管理普通用户网关。Linux 的 `login` 使用桌面会话的 XDG 自启动项，`system` 使用该用户的 systemd 单元和 lingering，账户需要启用 lingering 或有权执行 `loginctl enable-linger`。关闭网关的开机启动会移除它的单元。该账户的其他服务可以继续使用 lingering。[systemd 登录管理](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
+
+macOS 对应用户 LaunchAgent 和系统 LaunchDaemon，系统模式使用配置文件所有者的普通用户身份，安装需要写入 `/Library/LaunchDaemons` 的权限。系统托管的现有网关保持其原有启动方式。
+
 ## Docker Compose
 
 已有镜像时，将对应架构的压缩包与 `compose.yaml` 放进同一目录。`uname -m` 显示 `x86_64` 时选择 `linux-amd64`，显示 `aarch64` 时选择 `linux-arm64`。例如，64 位树莓派可直接加载 ARM64 包并启动网关。

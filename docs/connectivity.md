@@ -6,6 +6,27 @@
 2. 已配对的设备通过已知地址或中继建立加密会话。iroh 交换候选地址并进行双向探测，可以尝试可达的局域网地址、公网 IPv4 映射或 IPv6 地址。公网发现服务观察到的 IP 和端口只是候选，只有实际路径验证成功才能用于直连。[iroh 地址发现](https://www.iroh.computer/blog/qad)
 3. 中继路径可用时，应用可以先开流转发。直连验证成功后，iroh 可切换承载业务的路径。双侧严格 NAT、运营商 CGNAT、UDP 封锁或移动网络切换会影响结果。通过中继可达时继续承载加密流量。中继需要为这一部分流量提供带宽。[iroh 连接机制](https://docs.rs/iroh/latest/iroh/)
 
+### 公共中继如何选区
+
+使用默认公共中继时，每台网关并行连接 iroh 提供的候选节点，在已经完成握手的中继连接上各发送三次 ping，以 RTT 中位数选择本机公布的中继。连续在线时每五分钟重新测量，失联时约十秒后重试。候选之间只差 5 毫秒或约 10% 时沿用当前节点。全部探测失败时恢复 iroh 的完整候选列表。设置 `native.relay_url` 会直接使用指定的自托管中继。
+
+设备重连时会先尝试查询对端最近公布的中继，并保留票据中的直连地址作候选。已连通的配对设备会通过同一条连接交换最新票据。可以使用 `tunnel status <peer> --check` 查看当前业务路径。要单独测量中继，在 `tunnel probe listen` 或 `tunnel probe connect` 的参数中加上 `--relay-only`，每条回显都会打印实际中继地址和应用层 RTT。
+
+## 在设备页和 CLI 查看实际路径
+
+打开设备页的 **Connection**，或运行 `tunnel status raspberrypi`。每个已连接设备显示一条 **Shared connection**，包含当前选中的地址、QUIC 估算的 RTT，以及各类活动流的数量。直连、中继和选路中的连接分别显示 **Direct**、**Relay** 和 **Selecting path**。两端都能查看已建立的连接。尚未建连时显示 **No active connection**。会话可以在业务流结束后保持连接，供下一次使用。**Check connection** 或 `tunnel status raspberrypi --check` 会通过已配对的设备信息协议检查连通性。该操作可以复用转发连接。`--json` 会返回逐连接的数据。
+
+### VPN 和多个 IPv4 出口
+
+默认配置由操作系统决定 UDP 的出口。设备可以公布多个内网地址，公网探测服务只能观察到实际发出探测的出口。需要通过物理局域网直连时，在**有路由器映射能力的一端**的 `node.toml` 中设置以下选项并重启网关。
+
+```toml
+[native]
+lan_port_mapping = true
+```
+
+启用后，网关从系统网卡信息中查找活动、非隧道接口的 IPv4 网关，并向同一子网上的路由器查询 NAT-PMP。找到支持 NAT-PMP 的路由器后，它用对应的 LAN 地址绑定 IPv4 QUIC 套接字，向路由器为这个套接字申请有限期 UDP 租约，并公布路由器返回的实际地址和端口。网关按获批租期的一半续租，在关闭时释放。如果启动时没有路由器响应，则沿用 iroh 默认选路和端口映射。IPv6 和中继仍可使用。设置适用于允许这个应用经物理网卡直连的网络。上游运营商 NAT 或对端网络的 UDP 限制仍可能使映射无法从公网到达，实际结果以设备页的路径为准。[NAT-PMP 租约协议](https://www.rfc-editor.org/rfc/rfc6886.html)
+
 ## 节点作为备用中继
 
 设 A 和 B 在两个内网，C 是一台常开的家用机或服务器。若 B 只需要访问 C 的服务，B 持有 C 的设备公钥和可达 UDP 地址就可直接连接。若 A 与 B 无法直连，C 可以另行运行 `iroh-relay`，接收 A、B 主动建立的连接，并在它们之间转送加密数据。主中继失联时，已经走通的 A–B 直连可以继续承载流量。[iroh 连接模型](https://github.com/n0-computer/iroh/blob/main/iroh/README.md) · [iroh-relay 1.4.1](https://docs.rs/crate/iroh-relay/1.4.1)

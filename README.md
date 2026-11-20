@@ -19,6 +19,8 @@ tunnel-gui exec yzzpc -c "Get-Date" > result.txt
 
 ### 安装网关
 
+Windows x64 的免安装包可在普通账户下运行。解压后双击 `tunnel-gui.exe` 即可启动后台网关。可在 **Settings → Gateway** 或通过 `tunnel gateway` 管理启停、登录启动和开机启动。网关以当前用户身份运行，配置与密钥保存在 `%LOCALAPPDATA%\P2PTunnel`。[Windows 使用说明](docs/installation.md#windows-x64-普通用户)
+
 在装有 Docker Engine 和 Compose 的 Linux 主机上，从项目根目录运行以下命令。Docker 负责启动网关，CLI 已包含在镜像中。
 
 ```sh
@@ -90,7 +92,9 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 1. 在家里电脑执行 `tunnel identity home.key`，在笔记本执行 `tunnel identity laptop.key`。互相核对输出的公钥，分别填入[家里配置](examples/home.toml)和[笔记本配置](examples/laptop.toml)的 `peers` 条目。在家里先启动目标服务，例如监听 `127.0.0.1:3000` 的开发服务器。
 2. 在家里运行 `tunnel-gateway --config home.toml --key home.key`，笔记本运行 `tunnel-gateway --config laptop.toml --key laptop.key`。使用默认中继时，网关通过 iroh 的公共地址发现按公钥寻址。两端也可以显式设置同一个 `native.relay_url`，使用自己的中继。
-3. 在笔记本运行 `tunnel status` 查看实际监听地址，再访问 `http://127.0.0.1:8080`。每条连接通过授权服务名 `dev-web` 到达家里电脑的目标。打开 `tunnel-gui`，在 **Home → Device settings → Port forwarding → Add rule → Named service** 填写规则名、监听地址（如 `127.0.0.1:8080`），填写该设备发布的服务名。保存后立即开始监听。设备页也支持修改、暂停、恢复和删除规则。
+3. 在笔记本设备页的 **Connection** 会显示两端共享连接当前选中的直连地址或中继、QUIC 往返时间和各类活动流的数量。空闲设备可以点击 **Check connection** 发起一次已配对设备检查。CLI 的对应命令为 `tunnel status <设备名>` 和 `tunnel status <设备名> --check --json`。
+
+运行 `tunnel status` 查看实际监听地址，再访问 `http://127.0.0.1:8080`。每条连接通过授权服务名 `dev-web` 到达家里电脑的目标。打开 `tunnel-gui`，在 **Home → Device settings → Port forwarding → Add rule → Named service** 填写规则名、监听地址（如 `127.0.0.1:8080`），填写该设备发布的服务名。保存后立即开始监听。设备页也支持修改、暂停、恢复和删除规则。
 
 `tunnel forward pause home-web` 会释放监听端口，现有连接继续传输。`tunnel forward resume home-web` 会重新绑定端口。暂停只影响本次运行。重启后重新加载 TOML。查看机器可读状态可用 `tunnel status --json`。
 
@@ -106,7 +110,7 @@ journalctl --user-unit=p2p-tunnel-dev-watch.service -f
 
 在 **Settings → Terminal** 中，**Color scheme** 默认跟随应用主题，也可以选择 **Neutral light**、**Neutral dark** 或 **Midnight**。**Default cursor shape** 与 **Default cursor blink** 设置本机默认光标。这些选项保存在 `[gui.terminal]` 下。远端 shell 或编辑器可以移动、隐藏光标，指定形状、闪烁和颜色，复位后恢复本机设置。CLI 使用启动它的终端的外观。
 
-运行 `tunnel status` 或打开 **Settings → Gateway** 可以查看当前节点配置的路径。GUI 在线时通过本机 IPC 将设置写入这份文件。网关离线时，可用 `tunnel-gui --config /path/to/node.toml` 指定要编辑的节点文件。校验配置可用 `tunnel config check /path/to/node.toml`。
+运行 `tunnel status` 或打开 **Settings → Connection** 可以查看当前节点配置的路径。GUI 在线时通过本机 IPC 将设置写入这份文件。网关离线时，可用 `tunnel-gui --config /path/to/node.toml` 指定要编辑的节点文件。校验配置可用 `tunnel config check /path/to/node.toml`。
 
 在 Wayland 桌面会话中可以拖出标签建立独立窗口。
 
@@ -196,7 +200,7 @@ tunnel probe connect --key laptop.key --config laptop.toml --peer home --ticket 
 
 每行结果包含回显耗时、采样时选中的路径及路径收发字节数。`path=direct` 表示直连，`path=relay` 表示中继。要观察 NAT 打洞，请使用不同外网。要单独检查局域网直连，可在监听和连接命令上都加 `--no-relay`。[路径与测试条件](docs/connectivity.md)
 
-诊断协议用于编号回显。网关的 TCP 转发使用独立的 `tcp-forward/1` 协议。备用中继接管和 WebRTC 适配仍在设计阶段。
+诊断协议用于编号回显。网关的 TCP 转发、终端和设备查询各自在 `p2p-tunnel/session/1` 共享连接上打开业务流。备用中继接管和 WebRTC 适配仍在设计阶段。
 
 ## 设计文档
 

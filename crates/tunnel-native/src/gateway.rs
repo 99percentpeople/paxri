@@ -1,91 +1,65 @@
-//! iroh adapter for the resident gateway. Each paired destination has its own connection pool slot.
+//! iroh adapter for paired, multiplexed gateway sessions.
 use anyhow::{Context, Result, ensure};
-use iroh::{
-    Endpoint, EndpointAddr, EndpointId, SecretKey,
-    endpoint::{Connection, RecvStream, SendStream, presets},
-    protocol::{AcceptError, ProtocolHandler, Router},
-};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, protocol::Router};
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
 };
-use tokio::{
-    io::Join,
-    sync::{Mutex, Semaphore},
-    task::JoinSet,
-    time::timeout,
-};
+use tokio::sync::{mpsc, watch};
 use tunnel_config::Config;
-use tunnel_core::{PROTOCOL, Transport};
+use tunnel_core::{
+    Transport,
+    session::{IncomingStream, PROTOCOL},
+};
 
-use crate::{CONNECT_TIMEOUT, EndpointTicket};
+use crate::EndpointTicket;
+mod addresses;
+mod connections;
+mod lan_mapping;
+pub use lan_mapping::LanMapping;
 pub mod pairing;
-mod reverse;
-mod terminal;
-pub use reverse::{BindingState, RemoteForward};
-use tokio::sync::watch;
-
-struct Destination {
-    address: EndpointAddr,
-    connection: Mutex<Option<Connection>>,
-}
-
+pub use connections::{NativeSession, NativeStream};
 pub struct NativeTransport {
     endpoint: Endpoint,
-    peers: RwLock<BTreeMap<String, Arc<Destination>>>,
+    connections: Arc<connections::Connections>,
+    peers: RwLock<BTreeMap<String, EndpointAddr>>,
     config: watch::Sender<Arc<Config>>,
 }
 
 impl Transport for NativeTransport {
-    type Stream = Join<RecvStream, SendStream>;
-
-    async fn open(&self, peer: &str) -> Result<Self::Stream> {
-        let dest = self.peer(peer)?;
-        timeout(CONNECT_TIMEOUT, async {
-            let connection = {
-                let mut slot = dest.connection.lock().await;
-                match slot.as_ref().filter(|c| c.close_reason().is_none()) {
-                    Some(conn) => conn.clone(),
-                    None => {
-                        let conn = self
-                            .endpoint
-                            .connect(dest.address.clone(), PROTOCOL)
-                            .await?;
-                        *slot = Some(conn.clone());
-                        conn
-                    }
-                }
-            };
-            let (send, recv) = connection.open_bi().await?;
-            Ok(tokio::io::join(recv, send))
-        })
-        .await
-        .context("opening peer stream timed out")?
+    type Session = NativeSession;
+    async fn session(&self, peer: &str) -> Result<NativeSession> {
+        let address = self
+            .peers
+            .read()
+            .expect("peer map")
+            .get(peer)
+            .cloned()
+            .context("unknown peer")?;
+        self.connections.get(&self.endpoint, address).await
     }
 }
-
 impl NativeTransport {
-    fn peer(&self, name: &str) -> Result<Arc<Destination>> {
+    pub fn connections(&self) -> BTreeMap<String, Vec<tunnel_core::connection::PeerConnection>> {
+        let live = self.connections.snapshot();
         self.peers
             .read()
             .expect("peer map")
-            .get(name)
-            .cloned()
-            .context("unknown peer")
+            .iter()
+            .map(|(name, dest)| {
+                (
+                    name.clone(),
+                    live.get(&dest.id).cloned().into_iter().collect(),
+                )
+            })
+            .collect()
     }
 
     pub fn set_peer(&self, name: String, ticket: EndpointTicket) {
-        let address = ticket.into();
-        let mut peers = self.peers.write().expect("peer map");
-        if peers.get(&name).is_none_or(|dest| dest.address != address) {
-            peers.insert(
-                name,
-                Arc::new(Destination {
-                    address,
-                    connection: Mutex::new(None),
-                }),
-            );
-        }
+        self.peers
+            .write()
+            .expect("peer map")
+            .insert(name, ticket.into());
     }
 
     pub async fn initial_pairing_ticket(&self, direct_only: bool) -> Result<EndpointTicket> {
@@ -114,57 +88,14 @@ impl NativeTransport {
     }
 }
 
-#[derive(Debug)]
-struct Services {
-    config: watch::Receiver<Arc<Config>>,
-    streams: Arc<Semaphore>,
-}
-
-impl ProtocolHandler for Services {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let peer = connection.remote_id().to_string();
-        if !self
-            .config
-            .borrow()
-            .peers
-            .values()
-            .any(|p| p.endpoint_id.eq_ignore_ascii_case(&peer))
-        {
-            connection.close(1u32.into(), b"peer not allowed");
-            return Ok(());
-        }
-        let mut tasks = JoinSet::new();
-        loop {
-            tokio::select! {
-                result = connection.accept_bi() => {
-                    let Ok((mut send, mut recv)) = result else { break };
-                    let Ok(permit) = self.streams.clone().try_acquire_owned() else {
-                        let _ = send.reset(2u32.into());
-                        let _ = recv.stop(2u32.into());
-                        continue;
-                    };
-                    let config = self.config.clone();
-                    let peer = peer.clone();
-                    tasks.spawn(async move {
-                        let _permit = permit;
-                        if let Err(e) = tunnel_core::serve(|| config.borrow().clone(), &peer, tokio::io::join(recv, send)).await {
-                            eprintln!("inbound stream from {peer}: {e:#}");
-                        }
-                    });
-                }
-                _ = tasks.join_next(), if !tasks.is_empty() => {}
-            }
-        }
-        Ok(())
-    }
-}
-
 pub async fn start(
     key: SecretKey,
     config: Arc<Config>,
     no_relay: bool,
-    incoming: tokio::sync::mpsc::Sender<pairing::Incoming>,
-) -> Result<(NativeTransport, Router)> {
+    incoming: mpsc::Sender<pairing::Incoming>,
+    streams: mpsc::Sender<IncomingStream<NativeSession>>,
+    peer_addresses: mpsc::Sender<EndpointTicket>,
+) -> Result<(NativeTransport, Router, Option<LanMapping>)> {
     let mut peers = BTreeMap::new();
     for (name, peer) in &config.peers {
         let id: EndpointId = peer
@@ -188,73 +119,86 @@ pub async fn start(
             );
             EndpointAddr::new(id)
         };
-        peers.insert(
-            name.clone(),
-            Arc::new(Destination {
-                address,
-                connection: Mutex::new(None),
-            }),
-        );
+        peers.insert(name.clone(), address);
     }
-    // With no relay or discovery the saved code's LAN ports are its only introduction path.
+    // Reusing the LAN socket port also keeps a router mapping useful across gateway restarts.
     let saved = config
         .pairing_code
         .as_deref()
         .and_then(|code| pairing::Invitation::parse(code).ok())
-        .filter(|invite| no_relay && invite.ticket.endpoint_addr().id == key.public());
-    let endpoint = if let Some(saved) = saved {
-        let mut builder = Endpoint::builder(presets::Minimal)
-            .secret_key(key.clone())
-            .ca_tls_config(iroh::tls::CaTlsConfig::system())
-            .relay_mode(iroh::RelayMode::Disabled);
-        let address = saved.ticket.endpoint_addr();
-        if let Some(v4) = address.ip_addrs().find(|a| a.is_ipv4()) {
-            builder = builder.bind_addr((std::net::Ipv4Addr::UNSPECIFIED, v4.port()))?;
+        .filter(|invite| {
+            (no_relay || config.native.lan_port_mapping)
+                && invite.ticket.endpoint_addr().id == key.public()
+        });
+    let (public, router) = tokio::join!(crate::public_relays(&config.native, no_relay), async {
+        if config.native.lan_port_mapping {
+            lan_mapping::LanRouter::discover().await
+        } else {
+            None
         }
-        if let Some(v6) = address.ip_addrs().find(|a| a.is_ipv6()) {
+    });
+    let base = || crate::builder(key.clone(), &config.native, no_relay, true, public.as_ref());
+    let bind = |reuse_saved: bool, lan: Option<lan_mapping::LanRouter>| -> Result<_> {
+        let mut builder = base();
+        if lan.is_some() {
+            // One owner renews and releases this socket's router lease.
+            builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
+        }
+        let saved = saved
+            .as_ref()
+            .filter(|_| reuse_saved)
+            .map(|i| i.ticket.endpoint_addr());
+        let v4_port = saved
+            .and_then(|a| a.ip_addrs().find(|s| s.is_ipv4()))
+            .map(|a| a.port());
+        if lan.is_some() || v4_port.is_some() {
+            let ip = lan.map_or(std::net::Ipv4Addr::UNSPECIFIED, |r| r.local);
+            builder = builder.bind_addr((ip, v4_port.unwrap_or(0)))?;
+        }
+        if let Some(v6) = saved.and_then(|a| a.ip_addrs().find(|s| s.is_ipv6())) {
             builder = builder.bind_addr_with_opts(
                 (std::net::Ipv6Addr::UNSPECIFIED, v6.port()),
                 iroh::endpoint::BindOpts::default().set_is_required(false),
             )?;
         }
-        match builder.bind().await {
-            Ok(endpoint) => endpoint,
-            Err(_) => crate::bind(key, &config.native, true).await?,
-        }
-    } else if !no_relay && config.native.relay_url.is_none() {
-        Endpoint::builder(presets::N0)
-            .secret_key(key)
-            .ca_tls_config(iroh::tls::CaTlsConfig::system())
-            .bind()
-            .await?
-    } else {
-        crate::bind(key, &config.native, no_relay).await?
+        Ok(builder)
     };
+    let (endpoint, router) = match bind(true, router)?.bind().await {
+        Ok(endpoint) => (endpoint, router),
+        Err(_) if saved.is_some() => {
+            // The saved port or the selected LAN interface may have disappeared.
+            match bind(false, router)?.bind().await {
+                Ok(endpoint) => (endpoint, router),
+                Err(_) if router.is_some() => (base().bind().await?, None),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(_) if router.is_some() => (base().bind().await?, None),
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(public) = public {
+        public.monitor(endpoint.clone());
+    }
+    let mapping = router.and_then(|r| r.start(&endpoint));
     let (config, settings) = watch::channel(config);
-    let streams = Arc::new(Semaphore::new(256));
-    let terminals = Arc::new(terminal::Terminals::new(settings.clone()));
+    let connections = Arc::new(connections::Connections::new(
+        endpoint.clone(),
+        settings,
+        streams,
+        peer_addresses,
+    ));
     let router = Router::builder(endpoint.clone())
         .accept(pairing::PROTOCOL, pairing::PairingHandler::new(incoming))
-        .accept(tunnel_terminal::PROTOCOL, terminals.clone())
-        .accept(tunnel_terminal::exec::PROTOCOL, terminals)
-        .accept(
-            tunnel_core::reverse::PROTOCOL,
-            reverse::Listeners::new(settings.clone(), streams.clone()),
-        )
-        .accept(
-            PROTOCOL,
-            Services {
-                config: settings,
-                streams,
-            },
-        )
+        .accept(PROTOCOL, connections.clone())
         .spawn();
     Ok((
         NativeTransport {
             endpoint,
+            connections,
             peers: RwLock::new(peers),
             config,
         },
         router,
+        mapping,
     ))
 }
