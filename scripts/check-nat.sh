@@ -3,7 +3,10 @@
 set -euo pipefail
 family=ipv4
 verify_gateway=0
-if [[ ${1:-} == --gateway && $# == 1 ]]; then
+if [[ ${1:-} == --roam && $# == 1 ]]; then
+    verify_gateway=2
+    set -- symmetric symmetric
+elif [[ ${1:-} == --gateway && $# == 1 ]]; then
     verify_gateway=1
     set -- symmetric symmetric
 fi
@@ -13,7 +16,7 @@ if [[ ${1:-} == --ipv6-only && $# == 1 ]]; then
 else
     if [[ ${1:-} == --dual-stack ]]; then family=dual; shift; fi
     if [[ $# != 2 || ! $1 =~ ^(cone|symmetric)$ || ! $2 =~ ^(cone|symmetric)$ ]]; then
-        echo "Usage: $0 [--dual-stack] {cone|symmetric} {cone|symmetric} | --ipv6-only | --gateway" >&2
+        echo "Usage: $0 [--dual-stack] {cone|symmetric} {cone|symmetric} | --ipv6-only | --gateway | --roam" >&2
         exit 2
     fi
 fi
@@ -159,6 +162,17 @@ for node in a b; do
     if [[ $node == a ]]; then peer=$b; fi
     printf 'version=1\n[native]\nrelay_url="https://%s"\n[peers.other]\nendpoint_id="%s"\n' "$relay_url_host" "$peer" > "$node.toml"
 done
+if [[ $8 == 2 ]]; then
+    gateway c symmetric 203.0.113.30
+    ip -n gw-c addr del 10.77.0.1/24 dev internal
+    ip -n gw-c addr add 10.78.0.1/24 dev internal
+    ip -n node-c link set eth0 down
+    ip -n node-c addr flush dev eth0
+    ip -n node-c link set eth0 name wifi
+    ip -n node-c link set wifi netns node-b
+    python3 "$root/scripts/check-nat-roaming.py" "$tunnel"
+    exit
+fi
 if [[ $8 == 1 ]]; then
     gateway_bin=$(dirname "$tunnel")/tunnel-gateway
     [[ -x "$gateway_bin" ]]

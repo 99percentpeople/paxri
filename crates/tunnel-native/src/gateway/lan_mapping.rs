@@ -1,15 +1,16 @@
 //! Opt-in direct IPv4 through a physical LAN router, independent of a VPN's default route.
 use anyhow::{Result, ensure};
 use crab_nat::{InternetProtocol, PortMapping, PortMappingOptions, TimeoutConfig, natpmp};
-use iroh::Endpoint;
+use iroh::{Endpoint, Watcher};
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, UdpSocket},
     num::NonZeroU16,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::oneshot,
+    sync::{Notify, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{sleep, timeout},
 };
@@ -18,6 +19,8 @@ use tokio::{
 pub(super) struct LanRouter {
     pub(super) local: Ipv4Addr,
     gateway: Ipv4Addr,
+    interface: u32,
+    gateway_mac: [u8; 6],
 }
 
 fn retry() -> Option<TimeoutConfig> {
@@ -28,8 +31,8 @@ fn retry() -> Option<TimeoutConfig> {
     })
 }
 
-fn candidates() -> BTreeSet<LanRouter> {
-    let mut routers = BTreeSet::new();
+fn candidates() -> BTreeMap<LanRouter, bool> {
+    let mut routers = BTreeMap::new();
     for interface in netdev::get_interfaces() {
         if !interface.is_up()
             || interface.is_loopback()
@@ -43,7 +46,7 @@ fn candidates() -> BTreeSet<LanRouter> {
         };
         for gateway in gateways.ipv4 {
             // NAT-PMP maps to the requester's source. Verify that a request to this
-            // on-link router actually leaves via the address our data socket will bind.
+            // on-link router actually leaves via the address used by our data socket.
             let source = || -> std::io::Result<SocketAddr> {
                 let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
                 sock.connect((gateway, 5351))?;
@@ -55,10 +58,15 @@ fn candidates() -> BTreeSet<LanRouter> {
                     .iter()
                     .any(|net| net.addr() == *local.ip() && net.contains(&gateway))
             {
-                routers.insert(LanRouter {
-                    local: *local.ip(),
-                    gateway,
-                });
+                routers.insert(
+                    LanRouter {
+                        local: *local.ip(),
+                        gateway,
+                        interface: interface.index,
+                        gateway_mac: gateways.mac_addr.octets(),
+                    },
+                    interface.default,
+                );
             }
         }
     }
@@ -66,34 +74,24 @@ fn candidates() -> BTreeSet<LanRouter> {
 }
 
 impl LanRouter {
-    pub(super) async fn discover() -> Option<Self> {
-        let candidates = tokio::task::spawn_blocking(candidates).await.ok()?;
+    async fn discover(routers: &BTreeMap<Self, bool>, previous: Option<Self>) -> Option<Self> {
         let mut probes = JoinSet::new();
-        for router in candidates {
+        for (&router, &preferred) in routers {
             probes.spawn(async move {
                 natpmp::external_address(router.gateway.into(), retry())
                     .await
-                    .ok()
-                    .map(|_| router)
+                    .ok()?;
+                Some((!preferred, Some(router) != previous, router))
             });
         }
+        // Prefer the current system route, then keep an already-working interface.
+        let mut best = None;
         while let Some(result) = probes.join_next().await {
-            if let Ok(Some(router)) = result {
-                return Some(router);
+            if let Ok(Some(rank)) = result {
+                best = Some(best.map_or(rank, |old| rank.min(old)));
             }
         }
-        None
-    }
-
-    pub(super) fn start(self, ep: &Endpoint) -> Option<LanMapping> {
-        let port = ep
-            .bound_sockets()
-            .into_iter()
-            .find(|a| a.ip() == self.local)
-            .and_then(|a| NonZeroU16::new(a.port()))?;
-        let (stop, stopping) = oneshot::channel();
-        let task = tokio::spawn(self.maintain(ep.clone(), port, stopping));
-        Some(LanMapping { stop, task })
+        best.map(|(_, _, router)| router)
     }
 
     async fn request(
@@ -123,14 +121,22 @@ impl LanRouter {
         Ok((lease, address))
     }
 
-    async fn maintain(self, ep: Endpoint, port: NonZeroU16, mut stop: oneshot::Receiver<()>) {
+    async fn maintain(
+        self,
+        ep: Endpoint,
+        port: NonZeroU16,
+        mut stop: oneshot::Receiver<bool>,
+        refresh: Arc<Notify>,
+        expires: watch::Sender<Option<Instant>>,
+    ) {
         let mut current: Option<(PortMapping, SocketAddr)> = None;
         let mut delay = Duration::ZERO;
         let mut failed = false;
-        loop {
+        let release = loop {
             tokio::select! {
                 biased;
-                _ = &mut stop => break,
+                reason = &mut stop => break reason.unwrap_or(false),
+                _ = refresh.notified() => {},
                 _ = sleep(delay) => {}
             }
             let suggested = current
@@ -138,6 +144,7 @@ impl LanRouter {
                 .map_or(port, |(lease, _)| lease.external_port());
             match self.request(port, suggested).await {
                 Ok((lease, addr)) => {
+                    expires.send_replace(Some(lease.expiration()));
                     if current.as_ref().is_none_or(|(_, old)| *old != addr) {
                         ep.add_external_addr(addr).await;
                         if let Some((_, old)) = &current {
@@ -170,12 +177,91 @@ impl LanRouter {
                     }
                 }
             }
-        }
+        };
         if let Some((lease, addr)) = current {
             ep.remove_external_addr(&addr).await;
-            if lease.expiration() > Instant::now() {
+            if release && lease.expiration() > Instant::now() {
                 let _ = timeout(Duration::from_secs(2), lease.try_drop()).await;
             }
+        }
+    }
+}
+
+struct MappingWorker {
+    router: Option<LanRouter>,
+    port: NonZeroU16,
+    refresh: Arc<Notify>,
+    expires: watch::Receiver<Option<Instant>>,
+    stop: oneshot::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl MappingWorker {
+    async fn start(ep: &Endpoint, router: Option<LanRouter>, port: NonZeroU16) -> Self {
+        let ep = ep.clone();
+        let (stop, stopping) = oneshot::channel();
+        let refresh = Arc::new(Notify::new());
+        let update = refresh.clone();
+        let (expiry, expires) = watch::channel(None);
+        ep.set_ipv4_source(router.map(|r| r.local)).await;
+        let task = tokio::spawn(async move {
+            match router {
+                Some(router) => router.maintain(ep, port, stopping, update, expiry).await,
+                None => default_mapping(ep, port, stopping, update).await,
+            }
+        });
+        Self {
+            router,
+            port,
+            refresh,
+            expires,
+            stop,
+            task,
+        }
+    }
+
+    async fn finish(self, release: bool) {
+        let _ = self.stop.send(release);
+        let _ = self.task.await;
+    }
+}
+
+// Preserve iroh's normal PCP/UPnP/NAT-PMP fallback on networks without a physical
+// NAT-PMP router. Only one worker ever publishes or renews a lease on this port.
+async fn default_mapping(
+    ep: Endpoint,
+    port: NonZeroU16,
+    mut stop: oneshot::Receiver<bool>,
+    refresh: Arc<Notify>,
+) {
+    let client = portmapper::Client::default();
+    let mut addresses = client.watch_external_address();
+    client.update_local_port(port);
+    let mut advertised = None;
+    let release = loop {
+        tokio::select! {
+            biased;
+            reason = &mut stop => break reason.unwrap_or(false),
+            _ = refresh.notified() => client.procure_mapping(),
+            result = addresses.changed() => {
+                if result.is_err() { break false; }
+                let next = (*addresses.borrow_and_update()).map(SocketAddr::V4);
+                if advertised != next {
+                    if let Some(addr) = next { ep.add_external_addr(addr).await; }
+                    if let Some(old) = advertised { ep.remove_external_addr(&old).await; }
+                    advertised = next;
+                }
+            }
+        }
+    };
+    if let Some(old) = advertised {
+        ep.remove_external_addr(&old).await;
+    }
+    if release {
+        client.deactivate();
+        // The actor processes this after the request to release its old mapping.
+        if advertised.is_some() {
+            let _ = timeout(Duration::from_secs(2), client.probe()).await;
         }
     }
 }
@@ -186,10 +272,112 @@ pub struct LanMapping {
 }
 
 impl LanMapping {
+    pub(super) fn start(ep: Endpoint) -> Self {
+        let (stop, stopping) = oneshot::channel();
+        Self {
+            stop,
+            task: tokio::spawn(Self::supervise(ep, stopping)),
+        }
+    }
+
+    async fn supervise(ep: Endpoint, mut stop: oneshot::Receiver<()>) {
+        let mut interfaces = ep.watch_network_interfaces();
+        let mut active: Option<MappingWorker> = None;
+        let mut notified = true;
+        let mut previous_network = None;
+        loop {
+            let routers = match tokio::task::spawn_blocking(candidates).await {
+                Ok(routers) => routers,
+                Err(_) => break,
+            };
+            let network = (routers.clone(), interfaces.get().default_route_interface);
+            let changed = previous_network
+                .replace(network.clone())
+                .is_some_and(|old| old != network);
+            let previous = active.as_ref().and_then(|worker| worker.router);
+            // Do not send a delete to the same private gateway address on a new LAN.
+            if previous.is_some_and(|r| !routers.contains_key(&r)) {
+                ep.set_ipv4_source(None).await;
+                if let Some(old) = active.take() {
+                    old.finish(false).await;
+                }
+            }
+            let router = tokio::select! {
+                biased;
+                _ = &mut stop => break,
+                _ = ep.closed() => break,
+                router = LanRouter::discover(&routers, previous) => router,
+            };
+            // A missed discovery reply does not invalidate a lease on the same LAN.
+            let router = router.or_else(|| {
+                active.as_ref().and_then(|worker| {
+                    worker.router.filter(|_| {
+                        worker
+                            .expires
+                            .borrow()
+                            .is_some_and(|end| end > Instant::now())
+                    })
+                })
+            });
+            let port = ep
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .and_then(|addr| NonZeroU16::new(addr.port()));
+            let same = active.as_ref().is_some_and(|worker| {
+                worker.router == router
+                    && Some(worker.port) == port
+                    && !(changed && router.is_none())
+            });
+            if same {
+                if let Some(worker) = &active
+                    && (notified || router.is_none())
+                {
+                    worker.refresh.notify_one();
+                }
+            } else {
+                if let Some(old) = active.take() {
+                    old.finish(old_route_reachable(previous, &routers, changed))
+                        .await;
+                }
+                if let Some(port) = port {
+                    active = Some(MappingWorker::start(&ep, router, port).await);
+                } else {
+                    ep.set_ipv4_source(None).await;
+                }
+            }
+            // Some platforms coalesce route changes. Retry discovery even when a
+            // router only becomes available after its interface is already up.
+            notified = tokio::select! {
+                biased;
+                _ = &mut stop => break,
+                _ = ep.closed() => break,
+                update = interfaces.updated() => { if update.is_err() { break; } true },
+                _ = sleep(Duration::from_secs(30)) => false,
+            };
+        }
+        if let Some(old) = active {
+            let present = tokio::task::spawn_blocking(candidates)
+                .await
+                .unwrap_or_default();
+            let release = old_route_reachable(old.router, &present, false);
+            old.finish(release).await;
+        }
+        ep.set_ipv4_source(None).await;
+    }
+
     pub async fn stop(self) {
         let _ = self.stop.send(());
         let _ = self.task.await;
     }
+}
+
+fn old_route_reachable(
+    old: Option<LanRouter>,
+    routers: &BTreeMap<LanRouter, bool>,
+    changed: bool,
+) -> bool {
+    old.map_or(!changed, |r| routers.contains_key(&r))
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -237,12 +425,21 @@ mod tests {
             .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
             .bind()
             .await?;
-        let lease = LanRouter {
+        let router = LanRouter {
             local: Ipv4Addr::LOCALHOST,
             gateway: router,
-        }
-        .start(&ep)
+            interface: 1,
+            gateway_mac: [0; 6],
+        };
+        let port = NonZeroU16::new(
+            ep.bound_sockets()
+                .into_iter()
+                .find(|a| a.is_ipv4())
+                .unwrap()
+                .port(),
+        )
         .unwrap();
+        let lease = MappingWorker::start(&ep, Some(router), port).await;
         let first: SocketAddr = (external, 45101).into();
         let second: SocketAddr = (external, 45102).into();
         for addr in [first, second] {
@@ -254,7 +451,7 @@ mod tests {
             .await?;
         }
         assert!(!ep.addr().ip_addrs().any(|a| *a == first));
-        lease.stop().await;
+        lease.finish(true).await;
         assert!(timeout(Duration::from_secs(2), service).await??? >= 2);
         assert!(!ep.addr().ip_addrs().any(|a| *a == second));
         ep.close().await;

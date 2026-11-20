@@ -83,6 +83,12 @@ pub(crate) struct PublicRelays {
 }
 
 impl PublicRelays {
+    pub(crate) fn discovery(&self) -> iroh::endpoint::NetReportConfig {
+        let mut config = iroh::endpoint::NetReportConfig::default();
+        config.qad_servers = Some(self.candidates.clone());
+        config
+    }
+
     pub(crate) async fn rank() -> Self {
         let candidates = RelayMode::Default.relay_map();
         let times = latencies(&candidates, DnsResolver::new()).await;
@@ -108,6 +114,9 @@ impl PublicRelays {
     pub(crate) fn monitor(mut self, ep: Endpoint) {
         tokio::spawn(async move {
             let mut status = ep.home_relay_status();
+            let mut interfaces = ep.watch_network_interfaces();
+            let mut reports = ep.net_report();
+            let mut last_observations = None;
             loop {
                 let connected =
                     |items: &[iroh::endpoint::RelayStatus]| items.iter().any(|r| r.is_connected());
@@ -121,6 +130,23 @@ impl PublicRelays {
                     tokio::select! {
                         _ = ep.closed() => return,
                         _ = sleep_until(deadline) => break,
+                        update = interfaces.updated() => {
+                            if update.is_err() { return; }
+                            deadline = deadline.min(Instant::now() + Duration::from_secs(1));
+                        }
+                        update = reports.updated() => {
+                            let Ok(report) = update else { return };
+                            if let Some(report) = report {
+                                let v4 = report.observed_udp_addresses.keys().filter(|ip| ip.is_ipv4()).count();
+                                let v6 = report.observed_udp_addresses.len() - v4;
+                                let observations = (v4, report.mapping_varies_by_dest_ipv4, v6, report.mapping_varies_by_dest_ipv6);
+                                if last_observations != Some(observations) {
+                                    let mapping = |v| match v { Some(true) => "varies", Some(false) => "consistent", None => "unknown" };
+                                    eprintln!("UDP discovery: IPv4 observers={v4} mapping={}, IPv6 observers={v6} mapping={}", mapping(observations.1), mapping(observations.3));
+                                    last_observations = Some(observations);
+                                }
+                            }
+                        }
                         change = status.updated() => match change {
                             Ok(items) if !connected(&items) => deadline = deadline.min(Instant::now() + RETRY),
                             Ok(_) => {},
@@ -179,6 +205,111 @@ mod tests {
         assert_eq!(fastest(&times, Some(&a)), Some(b));
         assert_eq!(fastest(&BTreeMap::new(), Some(&a)), None);
     }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn independent_udp_observers_share_the_data_socket_and_preserve_home() -> Result<()> {
+        use iroh::endpoint::presets;
+        use iroh_relay::{
+            RelayConfig, RelayQuicConfig,
+            server::{self, CertConfig, QuicConfig, Server, ServerConfig, TlsConfig},
+        };
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use tokio::net::UdpSocket;
+        async fn observer(ip: Ipv4Addr) -> Result<(Server, RelayConfig)> {
+            let (_, server_config) = server::testing::self_signed_tls_certs_and_config();
+            let mut relay = server::RelayConfig::new((ip, 0));
+            relay.tls = Some(TlsConfig::new(
+                (ip, 0),
+                CertConfig::Manual { server_config },
+            ));
+            let mut config = ServerConfig::default();
+            config.relay = Some(relay);
+            config.quic = Some(QuicConfig::new((ip, 0)));
+            let server = Server::spawn(config).await?;
+            let url = format!("https://{}", server.https_addr().unwrap()).parse()?;
+            let qad = Some(RelayQuicConfig::new(server.quic_addr().unwrap().port()));
+            Ok((server, RelayConfig::new(url, qad)))
+        }
+        let home_ip = Ipv4Addr::LOCALHOST;
+        let other_ip = Ipv4Addr::new(127, 0, 0, 2);
+        let (home_server, home) = observer(home_ip).await?;
+        let (other_server, other) = observer(other_ip).await?;
+        let blocked = UdpSocket::bind((home_ip, 0)).await?;
+        // Translate the source port only for the second destination. The actual QAD
+        // exchange and its authenticated address report pass through unchanged.
+        let inside = UdpSocket::bind((other_ip, 0)).await?;
+        let outside = UdpSocket::bind((home_ip, 0)).await?;
+        let translated = outside.local_addr()?;
+        let router_port = inside.local_addr()?.port();
+        outside.connect(other_server.quic_addr().unwrap()).await?;
+        let router = tokio::spawn(async move {
+            let mut peer: Option<SocketAddr> = None;
+            let mut outgoing = vec![0; 65_535];
+            let mut incoming = vec![0; 65_535];
+            loop {
+                tokio::select! {
+                    result = inside.recv_from(&mut outgoing) => {
+                        let (len, source) = result.unwrap();
+                        peer = Some(source);
+                        outside.send(&outgoing[..len]).await.unwrap();
+                    }
+                    result = outside.recv(&mut incoming) => {
+                        let len = result.unwrap();
+                        if let Some(peer) = peer { inside.send_to(&incoming[..len], peer).await.unwrap(); }
+                    }
+                }
+            }
+        });
+        for expected_variation in [Some(false), Some(true), None] {
+            let mut primary = home.clone();
+            let mut secondary = other.clone();
+            match expected_variation {
+                None => primary.quic = Some(RelayQuicConfig::new(blocked.local_addr()?.port())),
+                Some(true) => secondary.quic = Some(RelayQuicConfig::new(router_port)),
+                Some(false) => {}
+            }
+            let ranked = PublicRelays {
+                candidates: RelayMap::from_iter([primary.clone(), secondary]),
+                selected: Some(home.url.clone()),
+            };
+            let ep = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Custom(RelayMap::from(primary)))
+                .net_report_config(ranked.discovery())
+                .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+                .bind()
+                .await?;
+            timeout(Duration::from_secs(14), ep.online()).await?;
+            let report = timeout(Duration::from_secs(14), ep.net_report().initialized()).await?;
+            let observed = &report.observed_udp_addresses;
+            let port = ep
+                .bound_sockets()
+                .into_iter()
+                .find(|a| a.is_ipv4())
+                .unwrap()
+                .port();
+            assert_eq!(
+                observed.get(&IpAddr::V4(home_ip)).map(SocketAddr::port),
+                expected_variation.map(|_| port),
+                "{report:?}"
+            );
+            let secondary = observed[&IpAddr::V4(other_ip)];
+            if expected_variation == Some(true) {
+                assert_eq!(secondary, translated);
+                assert_ne!(secondary.port(), port);
+            } else {
+                assert_eq!(secondary.port(), port);
+            }
+            assert_eq!(report.mapping_varies_by_dest_ipv4, expected_variation);
+            assert_eq!(report.preferred_relay.as_ref(), Some(&home.url));
+            assert_eq!(ep.addr().relay_urls().collect::<Vec<_>>(), vec![&home.url]);
+            ep.close().await;
+        }
+        router.abort();
+        home_server.shutdown().await?;
+        other_server.shutdown().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn disconnected_home_moves_to_the_surviving_relay() -> Result<()> {
         use iroh::endpoint::presets;

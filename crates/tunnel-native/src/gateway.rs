@@ -130,30 +130,20 @@ pub async fn start(
             (no_relay || config.native.lan_port_mapping)
                 && invite.ticket.endpoint_addr().id == key.public()
         });
-    let (public, router) = tokio::join!(crate::public_relays(&config.native, no_relay), async {
+    let public = crate::public_relays(&config.native, no_relay).await;
+    let bind = |reuse_saved: bool| -> Result<_> {
+        let mut builder =
+            crate::builder(key.clone(), &config.native, no_relay, true, public.as_ref());
         if config.native.lan_port_mapping {
-            lan_mapping::LanRouter::discover().await
-        } else {
-            None
-        }
-    });
-    let base = || crate::builder(key.clone(), &config.native, no_relay, true, public.as_ref());
-    let bind = |reuse_saved: bool, lan: Option<lan_mapping::LanRouter>| -> Result<_> {
-        let mut builder = base();
-        if lan.is_some() {
-            // One owner renews and releases this socket's router lease.
+            // The roaming controller owns both physical LAN and default-router leases.
             builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
         }
         let saved = saved
             .as_ref()
             .filter(|_| reuse_saved)
             .map(|i| i.ticket.endpoint_addr());
-        let v4_port = saved
-            .and_then(|a| a.ip_addrs().find(|s| s.is_ipv4()))
-            .map(|a| a.port());
-        if lan.is_some() || v4_port.is_some() {
-            let ip = lan.map_or(std::net::Ipv4Addr::UNSPECIFIED, |r| r.local);
-            builder = builder.bind_addr((ip, v4_port.unwrap_or(0)))?;
+        if let Some(v4) = saved.and_then(|a| a.ip_addrs().find(|s| s.is_ipv4())) {
+            builder = builder.bind_addr((std::net::Ipv4Addr::UNSPECIFIED, v4.port()))?;
         }
         if let Some(v6) = saved.and_then(|a| a.ip_addrs().find(|s| s.is_ipv6())) {
             builder = builder.bind_addr_with_opts(
@@ -163,23 +153,18 @@ pub async fn start(
         }
         Ok(builder)
     };
-    let (endpoint, router) = match bind(true, router)?.bind().await {
-        Ok(endpoint) => (endpoint, router),
-        Err(_) if saved.is_some() => {
-            // The saved port or the selected LAN interface may have disappeared.
-            match bind(false, router)?.bind().await {
-                Ok(endpoint) => (endpoint, router),
-                Err(_) if router.is_some() => (base().bind().await?, None),
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Err(_) if router.is_some() => (base().bind().await?, None),
+    let endpoint = match bind(true)?.bind().await {
+        Ok(endpoint) => endpoint,
+        Err(_) if saved.is_some() => bind(false)?.bind().await?,
         Err(e) => return Err(e.into()),
     };
     if let Some(public) = public {
         public.monitor(endpoint.clone());
     }
-    let mapping = router.and_then(|r| r.start(&endpoint));
+    let mapping = config
+        .native
+        .lan_port_mapping
+        .then(|| LanMapping::start(endpoint.clone()));
     let (config, settings) = watch::channel(config);
     let connections = Arc::new(connections::Connections::new(
         endpoint.clone(),

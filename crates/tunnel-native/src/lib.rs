@@ -70,6 +70,10 @@ fn builder(
         };
         Endpoint::builder(presets::Minimal).relay_mode(mode)
     };
+    let builder = match public {
+        Some(relays) => builder.net_report_config(relays.discovery()),
+        None => builder,
+    };
     builder
         .ca_tls_config(iroh::tls::CaTlsConfig::system())
         .secret_key(key)

@@ -9,8 +9,9 @@ futures-util = { version = "0.3", features = ["sink"] }
 iroh-relay = "1.4.1"
 getrandom = "0.4"
 crab_nat = "0.8.1"
+portmapper = "0.19.3"
 anyhow = "1"
-iroh = { version = "1.4.1", features = ["platform-verifier"] }
+iroh = { version = "=1.4.1", features = ["platform-verifier", "unstable-net-report"] }
 iroh-tickets = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,7 +20,7 @@ tokio = { version = "1", features = ["time", "io-util"] }
 tunnel-config = { path = "../tunnel-config" }
 
 [dev-dependencies]
-iroh-relay = { version = "1.4.1", features = ["server"] }
+iroh-relay = { version = "1.4.1", features = ["server", "test-utils"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dependencies.tunnel-core]

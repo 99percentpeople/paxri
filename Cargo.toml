@@ -8,6 +8,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# GPUI 0.2.2 pulls zed-async-tar, whose xattr 0.2 uses a removed Linux libc alias.
 [patch.crates-io]
+# GPUI 0.2.2 pulls zed-async-tar, whose xattr 0.2 uses a removed Linux libc alias.
 xattr = { path = "compat/xattr" }
+# See compat/iroh/LOCAL_CHANGES.md for the native endpoint extensions.
+iroh = { path = "compat/iroh" }
