@@ -1,0 +1,20 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - run: cargo test --locked -p peerhatch-config -p peerhatch-core -p peerhatch-files -p peerhatch-native -p peerhatch-terminal --lib
+      - run: cargo build --locked -p peerhatch-cli -p peerhatch-gateway
+      - run: python3 scripts/check-gateway.py --file-copy

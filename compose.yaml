@@ -1,8 +1,6 @@
 services:
   gateway:
-    image: p2p-tunnel:local
-    build: .
-    pull_policy: never
+    image: ghcr.io/99percentpeople/peerhatch:${PEERHATCH_VERSION:-latest}
     network_mode: host
     uts: host
     init: true
@@ -10,7 +8,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - node-data:/var/lib/p2p-tunnel
+      - node-data:/var/lib/peerhatch
 
 volumes:
   node-data:

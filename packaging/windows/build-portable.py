@@ -17,21 +17,25 @@ def main():
     env = dict(os.environ, CARGO_ENCODED_RUSTFLAGS="-C\x1ftarget-feature=+crt-static")
     subprocess.run(
         ["cargo", "build", "--locked", "--release", "--target", TARGET,
-         "--target-dir", str(build_dir), "-p", "tunnel-gateway", "-p", "tunnel-cli",
-         "-p", "tunnel-gui"],
+         "--target-dir", str(build_dir), "-p", "peerhatch-gateway", "-p", "peerhatch-cli",
+         "-p", "peerhatch-gui"],
         cwd=ROOT, env=env, check=True,
     )
     binaries = build_dir / TARGET / "release"
+    for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
+        subprocess.run([str(binaries / name), "--version"], check=True)
     dist = ROOT / "target" / "dist"
     dist.mkdir(parents=True, exist_ok=True)
-    archive = dist / "p2p-tunnel-windows-x64.zip"
+    archive = dist / "peerhatch-windows-x64.zip"
     # The ZIP must inherit dist's Windows ACL, including when the builder is elevated.
     temp = tempfile.NamedTemporaryFile(dir=dist, suffix=".zip", delete=False)
     staged = Path(temp.name)
     try:
         with temp, zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            for name in ("tunnel.exe", "tunnel-gateway.exe", "tunnel-gui.exe"):
+            for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
                 bundle.write(binaries / name, name)
+            bundle.write(ROOT / "README.md", "README.md")
+            bundle.write(ROOT / "docs/installation.md", "installation.md")
             launcher = Path(__file__).with_name("start-gateway.cmd")
             bundle.writestr(launcher.name, launcher.read_text(encoding="ascii").replace("\n", "\r\n"))
         staged.replace(archive)

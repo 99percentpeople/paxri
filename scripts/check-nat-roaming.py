@@ -59,11 +59,11 @@ class Echo(socketserver.StreamRequestHandler):
             self.wfile.write(line)
 
 
-def run(tunnel):
+def run(peerhatch):
     script = Path(__file__).resolve()
-    gateway = Path(tunnel).with_name("tunnel-gateway")
-    a = [tunnel, "--ipc", str(Path("a.sock").resolve())]
-    b = [tunnel, "--ipc", str(Path("b.sock").resolve())]
+    gateway = Path(peerhatch).with_name("peerhatch-gateway")
+    a = [peerhatch, "--ipc", str(Path("a.sock").resolve())]
+    b = [peerhatch, "--ipc", str(Path("b.sock").resolve())]
     config = Path("b.toml")
     config.write_text(config.read_text().replace("[native]", "[native]\nlan_port_mapping=true") +
                       '\n[services.echo]\ntarget="127.0.0.1:9001"\nallow_peers=["other"]\n')

@@ -7893,7 +7893,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tunnel-cli"
+name = "peerhatch-cli"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
@@ -7905,14 +7905,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-subscriber",
- "tunnel-config",
- "tunnel-control",
- "tunnel-native",
+ "peerhatch-config",
+ "peerhatch-control",
+ "peerhatch-native",
+ "unicode-width",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "tunnel-config"
+name = "peerhatch-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -7925,7 +7926,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tunnel-control"
+name = "peerhatch-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -7934,25 +7935,38 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tunnel-config",
- "tunnel-core",
- "tunnel-terminal",
+ "peerhatch-config",
+ "peerhatch-core",
+ "peerhatch-files",
+ "peerhatch-terminal",
  "widestring",
 ]
 
 [[package]]
-name = "tunnel-core"
+name = "peerhatch-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
  "serde_json",
  "tokio",
- "tunnel-config",
+ "peerhatch-config",
 ]
 
 [[package]]
-name = "tunnel-gateway"
+name = "peerhatch-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "filetime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "peerhatch-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -7963,17 +7977,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit 0.25.19+spec-1.1.0",
- "tunnel-config",
- "tunnel-control",
- "tunnel-core",
- "tunnel-native",
- "tunnel-terminal",
+ "peerhatch-config",
+ "peerhatch-control",
+ "peerhatch-core",
+ "peerhatch-native",
+ "peerhatch-terminal",
  "windows-service",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "tunnel-gui"
+name = "peerhatch-gui"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
@@ -7983,6 +7997,7 @@ dependencies = [
  "block2",
  "clap",
  "embed-resource",
+ "gethostname",
  "gpui",
  "objc2",
  "objc2-app-kit",
@@ -7990,16 +8005,16 @@ dependencies = [
  "raw-window-handle",
  "tempfile",
  "tokio",
- "tunnel-cli",
- "tunnel-config",
- "tunnel-control",
+ "peerhatch-cli",
+ "peerhatch-config",
+ "peerhatch-control",
  "unicode-segmentation",
  "windows-sys 0.61.2",
  "x11rb",
 ]
 
 [[package]]
-name = "tunnel-native"
+name = "peerhatch-native"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -8016,12 +8031,12 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tunnel-config",
- "tunnel-core",
+ "peerhatch-config",
+ "peerhatch-core",
 ]
 
 [[package]]
-name = "tunnel-terminal"
+name = "peerhatch-terminal"
 version = "0.1.0"
 dependencies = [
  "anyhow",

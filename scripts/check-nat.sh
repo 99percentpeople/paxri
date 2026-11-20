@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the real tunnel CLI and a private relay inside a disposable Linux test network.
+# Run the real peerhatch CLI and a private relay inside a disposable Linux test network.
 set -euo pipefail
 family=ipv4
 verify_gateway=0
@@ -21,16 +21,16 @@ else
     fi
 fi
 root=$(cd "$(dirname "$0")/.." && pwd)
-tunnel=$(realpath "${TUNNEL_BIN:-$root/target/debug/tunnel}")
+peerhatch=$(realpath "${PEERHATCH_BIN:-$root/target/debug/peerhatch}")
 relay=$(realpath "${IROH_RELAY_BIN:-$(command -v iroh-relay)}")
-[[ -x "$tunnel" && -x "$relay" ]]
+[[ -x "$peerhatch" && -x "$relay" ]]
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
 timeout 110s unshare --user --map-root-user --mount --net --pid --fork --kill-child --mount-proc \
-    bash -seu -o pipefail -- "$tmp" "$tunnel" "$relay" "$root" "$family" "$@" "$verify_gateway" <<'LAB'
+    bash -seu -o pipefail -- "$tmp" "$peerhatch" "$relay" "$root" "$family" "$@" "$verify_gateway" <<'LAB'
 cd "$1"
-tunnel=$2 relay=$3 root=$4 family=$5 mode_a=$6 mode_b=$7
+peerhatch=$2 relay=$3 root=$4 family=$5 mode_a=$6 mode_b=$7
 mount --make-rprivate /
 mount -t tmpfs tmpfs /run
 ip link set lo up
@@ -155,8 +155,8 @@ for _ in {1..100}; do
     sleep 0.1
 done
 
-a=$("$tunnel" identity a.key)
-b=$("$tunnel" identity b.key)
+a=$("$peerhatch" identity a.key)
+b=$("$peerhatch" identity b.key)
 for node in a b; do
     peer=$a
     if [[ $node == a ]]; then peer=$b; fi
@@ -170,11 +170,11 @@ if [[ $8 == 2 ]]; then
     ip -n node-c addr flush dev eth0
     ip -n node-c link set eth0 name wifi
     ip -n node-c link set wifi netns node-b
-    python3 "$root/scripts/check-nat-roaming.py" "$tunnel"
+    python3 "$root/scripts/check-nat-roaming.py" "$peerhatch"
     exit
 fi
 if [[ $8 == 1 ]]; then
-    gateway_bin=$(dirname "$tunnel")/tunnel-gateway
+    gateway_bin=$(dirname "$peerhatch")/peerhatch-gateway
     [[ -x "$gateway_bin" ]]
     # Require traffic to traverse the relay even if new direct candidates appear.
     ip netns exec gw-a nft insert rule ip lab forward_traffic ip daddr 203.0.113.20 meta l4proto udp drop
@@ -206,7 +206,7 @@ EOF
     done
     exit 1
 fi
-ip netns exec node-b "$tunnel" probe listen --key b.key --config b.toml --peer other >ticket.log &
+ip netns exec node-b "$peerhatch" probe listen --key b.key --config b.toml --peer other >ticket.log &
 listener=$!
 for _ in {1..150}; do
     kill -0 "$listener"
@@ -226,7 +226,7 @@ add rule ip6 lab6 block_peer ip6 daddr 2001:db8:b::2 meta l4proto udp drop
 add rule ip6 lab6 block_peer ip6 saddr 2001:db8:b::2 meta l4proto udp drop
 NFT
 fi
-ip netns exec node-a "$tunnel" probe connect --key a.key --config a.toml --peer other \
+ip netns exec node-a "$peerhatch" probe connect --key a.key --config a.toml --peer other \
     "${connect_args[@]}" --count 20 | while IFS= read -r sample; do
         echo "$sample"
         if [[ $family == ipv6 && $sample == "seq=3 "* ]]; then

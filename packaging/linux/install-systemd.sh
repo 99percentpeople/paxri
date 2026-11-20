@@ -7,9 +7,9 @@ if [ "$#" -gt 1 ]; then
 fi
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bin_dir=${1:-"$here/../../target/release"}
-for binary in tunnel tunnel-gateway; do
+for binary in peerhatch peerhatch-gateway; do
     if [ ! -x "$bin_dir/$binary" ]; then
-        echo "Missing $bin_dir/$binary. Build with cargo build --locked --release -p tunnel-gateway -p tunnel-cli first." >&2
+        echo "Missing $bin_dir/$binary. Build with cargo build --locked --release -p peerhatch-gateway -p peerhatch-cli first." >&2
         exit 1
     fi
 done
@@ -18,13 +18,13 @@ if [ "$(id -u)" != 0 ]; then
     exit 1
 fi
 
-getent group p2p-tunnel >/dev/null || groupadd --system p2p-tunnel
-getent passwd p2p-tunnel >/dev/null || useradd --system --gid p2p-tunnel --no-create-home \
-    --home-dir /var/lib/p2p-tunnel --shell /bin/bash p2p-tunnel
-install -d -m 0700 -o p2p-tunnel -g p2p-tunnel /etc/p2p-tunnel
-install -D -m 0755 -t /usr/local/bin "$bin_dir/tunnel" "$bin_dir/tunnel-gateway"
-install -D -m 0755 "$here/start-gateway" /usr/local/libexec/p2p-tunnel/start-gateway
-install -D -m 0644 "$here/p2p-tunnel-gateway.service" /etc/systemd/system/p2p-tunnel-gateway.service
+getent group peerhatch >/dev/null || groupadd --system peerhatch
+getent passwd peerhatch >/dev/null || useradd --system --gid peerhatch --no-create-home \
+    --home-dir /var/lib/peerhatch --shell /bin/bash peerhatch
+install -d -m 0700 -o peerhatch -g peerhatch /etc/peerhatch
+install -D -m 0755 -t /usr/local/bin "$bin_dir/peerhatch" "$bin_dir/peerhatch-gateway"
+install -D -m 0755 "$here/start-gateway" /usr/local/libexec/peerhatch/start-gateway
+install -D -m 0644 "$here/peerhatch-gateway.service" /etc/systemd/system/peerhatch-gateway.service
 systemctl daemon-reload
-systemctl enable p2p-tunnel-gateway.service
-systemctl restart p2p-tunnel-gateway.service
+systemctl enable peerhatch-gateway.service
+systemctl restart peerhatch-gateway.service

@@ -1,0 +1,14 @@
+[Unit]
+Description=Build and update the Linux and Windows PeerHatch development apps
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/peerhatch
+EnvironmentFile=-%h/.config/peerhatch/dev-watch.env
+Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -u %h/peerhatch/scripts/sync-windows.py --watch --dev
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

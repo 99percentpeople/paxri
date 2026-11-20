@@ -1,117 +1,82 @@
-# 原生隧道协议与配置 v1 草案
+# Native protocol and configuration
 
-已配对的两个网关通过 `p2p-tunnel/session/1` 共享一条经过身份验证的连接。iroh 用 QUIC/TLS ALPN 协商版本。两端网关均需支持该版本。原来的配对身份、票据和 TOML 可以继续使用。[传输接口](architecture.md#可替换的-p2p-传输接口)
+PeerHatch gateways share an authenticated connection using the iroh QUIC ALPN `p2p-tunnel/session/1`. The protocol identifiers and pairing-code prefix are stable across the PeerHatch rename. Each application operation opens an independent reliable, ordered, bidirectional stream.
 
-iroh 握手后，公钥字节序较小的一方负责选择连接，并串行处理同一设备的并发建连请求。它先打开一条双向控制流，发送一个字节表明有无现存连接（0 或 1），有则附其 16 字节标识，随后发送一个新生成的 16 字节候选标识并结束写入。对方持有同一条存活连接时回复 1 并继续复用，否则安装新连接并回复 0。双方只在选定连接上分派业务流。两端同时拨号时会收敛到同一连接。对端重启后可以替换旧连接。
+## Node configuration
 
-任一端都可以打开可靠有序的双向流。流的第一个字节指定后续格式。关闭单条流只结束该项业务。
+Each computer owns one version 1 TOML file. For a working pair of service and listener configurations, start with [home.toml](../examples/home.toml) and [laptop.toml](../examples/laptop.toml). Replace the example Ed25519 public keys with your devices’ keys or pair interactively. `peerhatch config check FILE` validates a file locally.
 
-| 类型字节 | 用途 |
+| Key | Meaning |
 | --- | --- |
-| 1 | TCP 服务、目标端口或设备信息请求 |
-| 2 | 交互终端 |
-| 3 | 带初始命令的 PTY |
-| 4 | 申请远端监听 |
-| 5 | 远端监听收到的 TCP 连接 |
+| `version` | Integer `1` |
+| `device_name` | Display name, defaulting to the computer name |
+| `pairing_code` | Persistent invitation maintained by the gateway |
+| `gateway.startup` | `manual`, `gui`, `login`, or `system`. Use the GUI or CLI to also update OS registration |
+| `gui.appearance` | `system` (default), `light`, or `dark` |
+| `gui.terminal.scheme` | `follow-app` (default), `light`, `dark`, or `midnight` |
+| `gui.terminal.cursor_shape`, `blink_cursor` | `underline` (default), `bar`, or `block`. Blinking defaults to false |
+| `native.relay_url` | Optional HTTP(S) relay. Use HTTPS for a public deployment |
+| `native.lan_port_mapping` | Opt in to physical IPv4 interface selection and NAT-PMP lease renewal |
+| `peers.<alias>.endpoint_id`, `ticket` | 64 hex digits identifying the device and its optional addressing ticket |
+| `peers.<alias>.platform` | Reported OS, including `windows`, `linux`, `macos`, or `web`. Unrecognized values display as unknown |
+| `peers.<alias>.last_status_change_ms` | Last recorded pairing or connection transition, used by the device list |
+| `peers.<alias>.ports.connect`, `ports.listen` | TCP destinations the peer can reach here and addresses it can listen on here. Both lists start empty |
+| `services.<name>.target`, `allow_peers` | Local TCP destination and the aliases allowed to open it |
+| `forwards.<name>.listen`, `direction` | Listen address and `local` (default) or `remote` |
+| `forwards.<name>.peer` | Paired device that owns the other end |
+| `forwards.<name>.service` or `target` | Named service for a local listener or explicit TCP destination. Choose one |
 
-已实现的诊断协议单独使用 `p2p-tunnel/probe/1`。发起方在一个双向流上先写入 2 字节大端回显次数，然后逐次发送从 1 起递增的 2 字节大端序号。监听端从连接握手取得身份，确认与配置选中的对端公钥一致，逐个核对并原样回送序号，最后关闭发送方向。探测不读取服务规则，也不连接目标 TCP 端口。下面的 `OPEN` 帧用于网关的 TCP 转发。
+A listen address can be a loopback address, a particular interface, `0.0.0.0` or `[::]`. Port zero asks the OS for an available port. A bare port in the CLI uses IPv4 loopback. The running gateway reports the actual bound address.
 
-## 本机配置
+## Pairing and addressing
 
-结合[服务提供端](../examples/home.toml)和[监听端](../examples/laptop.toml)示例阅读。两份文件分别属于两台机器。
+Pairing uses the separate ALPN `p2p-tunnel/pair/1`. The code `p2p1.<endpoint ticket>.<token>` contains the issuer’s addressing ticket and a random 128-bit invitation. Each request has a fresh random request ID. Each side sends a UTF-8 JSON message of up to 16 KiB followed by FIN. The receiver verifies the ticket’s key against the authenticated peer before asking the local user to approve.
 
-| 字段 | 含义 |
+The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases and permissions. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. New peers can use PTY and files and begin with empty TCP allowlists.
+
+On an established connection, each peer can open a unidirectional stream to announce updated addressing tickets. Version byte `1` precedes the sequence of UTF-8 tickets, each with a big-endian `u16` length of at most 8192 bytes. The receiver verifies the device ID before updating its cache.
+
+## Shared connection and stream types
+
+The peer with the lexicographically smaller public key serializes connection selection. On the first bidirectional control stream it sends a presence byte, a 16-byte identifier if there is an existing connection, and a fresh 16-byte candidate identifier, then finishes sending. The other peer replies `1` if both still hold the same connection, or installs the candidate and replies `0`. Simultaneous dials converge. Each subsequent bidirectional stream opens with a type byte.
+
+| Byte | Operation |
 | --- | --- |
-| `version` | 当前为整数 `1`。 |
-| `device_name` | CLI 和 GUI 显示的本机名称。省略时使用计算机名。 |
-| `gui.appearance` | GUI 主题，取 `system`（默认）、`light` 或 `dark`。 |
-| `gui.terminal.scheme` | 终端配色，取 `follow-app`（默认）、`light`、`dark` 或 `midnight`。 |
-| `gui.terminal.cursor_shape` | 默认光标，取 `underline`（默认）、`bar` 或 `block`。 |
-| `gui.terminal.blink_cursor` | 默认光标是否闪烁，布尔值，默认 `false`。 |
-| `pairing_code` | 网关首次运行时保存的本机配对码。GUI 和 CLI 均可读取或刷新。 |
-| `native.relay_url` | 可选的 iroh 中继 HTTP(S) 地址。设计上省略时使用 iroh 的默认中继配置。自托管公网部署使用 HTTPS，两机可指定同一个中继。 |
-| `peers.<别名>.endpoint_id` | 对端设备公钥的 64 位十六进制文本。配对时用可信渠道核对。配置检查验证外形，网络握手验证对端持有对应私钥。 |
-| `peers.<别名>.ticket` | 可选的对端寻址票据。用运行中的网关导出，网关启动时验证其设备公钥。 |
-| `peers.<别名>.platform` | 对端报告的平台标识，可省略。已知值为 `windows`、`linux`、`macos` 和 `web`。其他值显示为未知平台。 |
-| `peers.<别名>.ports` | `connect` 是允许对端访问的 TCP 目标列表，`listen` 是允许对端在本机监听的 IP:端口列表。两者默认均为空。 |
-| `services.<服务名>.target` | TCP 目标地址，例如 `localhost:3000` 或 `[::1]:3000`。 |
-| `services.<服务名>.allow_peers` | 允许访问的本机设备别名列表。空列表不向任何对端开放。 |
-| `forwards.<规则名>.listen` | 规则监听的 IP 和端口。桌面界面默认填入回环地址。显式填写局域网地址会把入口开放给能访问该地址的客户端。 |
-| `forwards.<规则名>.direction` | `local`（默认）在本机监听，`remote` 在配对设备监听。 |
-| `forwards.<规则名>.peer` | 配对设备在本机的别名。 |
-| `forwards.<规则名>.service` 或 `target` | 二选一。`service` 使用对端发布的服务名，适用于本机监听。`target` 是监听另一端的 TCP 目标，例如 `127.0.0.1:3000`。 |
+| 1 | Named service, explicit TCP target, or device information |
+| 2 | Interactive PTY |
+| 3 | Execute a program or shell command in a PTY |
+| 4 | Request a TCP listener on the peer |
+| 5 | TCP connection accepted by that listener |
+| 6 | File transfer |
 
-示例采用手动配对。两台设备预先知道同一中继时，公钥加该中继 URL 足以构造初始寻址信息。使用不同中继时，配对信息需携带对端的可达地址，或通过地址查询补齐。公钥在网络地址变化时保持稳定。运行时还需检查实际端口绑定、对端身份、允许列表及目标服务是否可达。[iroh 地址与身份](https://docs.rs/iroh/latest/iroh/)
+## TCP opening, permissions, and EOF
 
-## 常驻配对码
+On a type 1 stream the initiator immediately sends a big-endian `u32` byte length and 1–4096 bytes of UTF-8 JSON. For example, `{"type":"OPEN","service":"dev-web"}` opens a named service. `{"type":"OPEN_TCP","target":"127.0.0.1:3000"}` opens a target authorized in `ports.connect` or explicitly published to this peer. Device-information requests are also authenticated.
 
-`p2p-tunnel/pair/1` 使用独立的 iroh ALPN。配对码 `p2p1.<endpoint ticket>.<token>` 携带发码设备的寻址票据和 128 位随机邀请值。配对码保存在网关 TOML 中，手动刷新后才更换。每次申请使用独立的随机请求 ID，确认操作绑定到经过认证的设备和该次申请。两端各发送一个以 QUIC FIN 结束的 UTF-8 JSON 消息，单条上限 16 KiB。申请方提交邀请值、显示名和本机票据。发码方核对票据公钥与连接认证身份，并把请求交给本地用户确认。
+The host looks up the authenticated device and opens the approved TCP destination. It responds with `{"type":"OK"}` or `{"type":"ERROR","code":"DENIED"}` using the same framing. Other errors are `TARGET_REFUSED`, `TARGET_TIMEOUT`, `TARGET_UNREACHABLE`, and `INVALID_REQUEST`. Unknown and unauthorized services both return `DENIED`. After `OK`, exchange raw bytes. TCP EOF finishes only that sending direction. Preserve buffered bytes following the handshake and allow the reverse direction to complete.
 
-批准后，发码方先把对端写入网关 TOML，并返回本机名称和票据。申请方核对返回身份后保存到自己的 TOML。两端立即更新运行中的设备表，双方随后均可请求终端会话。手动刷新会撤销旧码下的待确认请求。拒绝或取消只结束该次申请。相同公钥沿用已有别名和权限，不同公钥重名时为新别名添加数字后缀。新配对设备的端口授权默认为空。仅用直连或启用物理网卡映射时，网关重启会尝试复用配对码中的 UDP 端口。如果网络地址变化或原端口被占用，可刷新配对码以更新寻址信息。
+A type 4 request carries length-prefixed JSON with a `listen` address and a random 16-byte `id`. After checking `ports.listen`, the host replies with `bound` or `error` and keeps the control stream open. Each accepted TCP socket starts a type 5 stream with the raw 16-byte ID. The initiator checks the peer and active ID before connecting its local target. Closing the control stream releases the port. Removing authorization also releases the listener. Existing streams can finish. Persisted rules retry after a disconnect.
 
-原生适配器在选定的共享连接上，各自打开一条单向流发送最新寻址票据。流以版本字节 `1` 开头，后续每个 UTF-8 票据前有一个大端 u16 长度，最多 8192 字节。接收方核对票据与连接的设备公钥后更新该配对设备的寻址缓存。已经发出的配对码继续有效。应用层的终端、命令和 TCP 流独立使用双向流。
+## Native PTY
 
-## 线上消息
+For types 2 and 3 the initiator sends rows and columns as two big-endian `u16` values, each between 1 and 1024. Type 3 also carries a big-endian `u16` length and 1–32768 bytes of UTF-8 JSON. `{"kind":"program","program":"vim","args":["notes.txt"]}` preserves argument boundaries. `{"kind":"shell","script":"uptime"}` invokes the gateway account’s shell.
 
-每个本地 TCP 连接或 `tunnel connect` 请求独占一条逻辑双向流。发起端开流后立即发送一个 `OPEN`，以支持服务端先发欢迎语的协议。同一设备会话可以承载多条并发流。原生适配器直接使用 QUIC 双向流。[iroh 双向流](https://docs.rs/iroh/latest/iroh/endpoint/struct.Connection.html)
+The host checks pairing, account privileges, and the 16-session quota. Its one-byte status is ready (0), denied (1), unavailable (2), busy (3), or privileged account (4). After ready, frames use a type byte and big-endian fields:
 
-握手帧由 **4 字节无符号大端整数 N + N 字节 UTF-8 JSON** 组成。N 按字节计算，范围为 1 到 4096。接收方先校验长度再分配空间，并按长度读满，支持任意网络分片。v1 规定每条流一个请求、一个响应。
-
-```json
-{"type":"OPEN","service":"dev-web"}
-```
-
-服务端从已认证的会话取得设备身份，查找本机服务及授权，再连接配置中的 TCP 目标。成功后回复 `{"type":"OK"}`。打开目标失败时回复一帧错误，结束该流。服务端对未知服务或无权调用的设备统一返回 `DENIED`。
-
-| 错误码 | 含义 |
-| --- | --- |
-| `DENIED` | 调用方没有该服务的访问权限。 |
-| `TARGET_REFUSED` | 目标 TCP 服务拒绝连接。 |
-| `TARGET_TIMEOUT` | 在规定时间内未建立目标 TCP 连接。 |
-| `TARGET_UNREACHABLE` | 目标地址解析或连接失败。 |
-| `INVALID_REQUEST` | 收到可判定为无效的请求，例如缺少服务名。 |
-
-错误帧示例为 `{"type":"ERROR","code":"TARGET_REFUSED"}`。非法长度、截断或握手超时可以直接复位当前流。发送方应等待 `OK` 再传输业务字节。响应与首批业务字节可能一起抵达，读取方必须保留握手帧之后的数据。
-
-按地址连接时，设备服务流使用 `{"type":"OPEN_TCP","target":"127.0.0.1:3000"}`。接收方检查经过认证的对端身份，目标须与其 `ports.connect` 条目或已向该设备发布的 TCP 服务地址匹配。旧版本之间仍可使用原有的命名服务 `OPEN`。
-
-配对请求和批准响应的联系人对象均可携带 `platform` 字段。已有配对缺少这个字段时，网关在设备服务流上发送 `{"type":"DEVICE_INFO"}`。接收方按当前配对公钥核验请求，回复如 `{"type":"DEVICE_INFO","platform":"windows"}` 并结束该流。发起方将结果缓存在对应身份的本机配置中。平台字段只用于展示。
-
-## 对端监听
-
-申请方为每次监听申请生成独立的 16 字节随机标识，在类型 4 流上发送长度前缀 JSON，字段为 `listen`（例如 `127.0.0.1:9000`）和 `id`（16 个字节的 JSON 数组）。监听方按对端公钥核对本机 `ports.listen` 后绑定，回复 `{"bound":"127.0.0.1:9000"}` 或 `{"error":"…"}`。控制流在监听期间保留。
-
-每次接受 TCP 连接时，监听方在同一会话上打开类型 5 流，先写入监听标识的 16 个原始字节。申请方核对经认证的对端身份和活动监听标识，再连接规则指定的本地目标。业务字节支持双向传输与半关闭。暂停时，申请方关闭控制流的发送方向，监听方释放端口并用 FIN 确认。撤销监听授权同样释放端口，已经接受的流可传输至结束。设备掉线后申请方按退避间隔重新申请监听。
-
-## 数据与结束
-
-收到 `OK` 后，应用协议只传原始业务字节。TCP EOF 对应逻辑流的 `finish_send`，对端读到 EOF 后关闭目标 TCP 的写端，反向数据仍可继续传输。iroh 把这一操作映射为 QUIC FIN，WebRTC 适配器需要在 DataChannel 上显式传递单向 EOF。异常断开复位该流并关闭关联的 TCP 连接。单条流错误不应主动关闭同设备的其他流。[QUIC 流及半关闭语义](https://www.rfc-editor.org/rfc/rfc9000.html#section-3)
-
-若路径改变但会话仍然存续，保留现有流。整个会话失效时结束其上所有 TCP 连接，保留本地监听器供新连接重新建连。已发送的字节可能已被目标处理，重连后不得自动重放。写入应支持背压，资源受限时限制并发开流和缓存，避免慢连接耗尽后台内存。
-
-## 原生终端
-
-每个交互终端在共享设备会话上打开一个类型 2 流。接收端核对连接认证的公钥是否在本机配对设备表中。匹配成功的设备可以打开交互 shell 或执行命令。客户端发送行数和列数，依次为两个大端 `u16`，每项范围为 1 到 1024。接收端成功创建本地默认 shell 的 PTY 后返回状态字节 0。其他状态为 1 拒绝、2 无法启动、3 会话已满、4 网关权限过高。未配对身份可直接被关闭连接。
-
-单次命令使用类型 3 流，沿用相同的配对身份检查、会话配额和 PTY。行列之后附加一个大端 `u16` 字节长度和 UTF-8 JSON（1 至 32768 字节）。`{"kind":"program","program":"vim","args":["notes.txt"]}` 逐项指定可执行程序和参数，`{"kind":"shell","script":"uptime"}` 由远端默认 shell 解释。主机启动该进程后返回相同的状态字节。本机 IPC 的 `exec` 请求携带 `peer`、`size` 和 `invocation`。两端网关均需支持此协议。
-
-两种 PTY 的后续帧都以一个类型字节开始，多字节整数采用大端序。
-
-| 类型 | 方向 | 负载 |
+| Type | Direction | Payload |
 | --- | --- | --- |
-| 1 | 双向 | `u16` 长度（1 到 32768），后跟该长度的原始终端字节。 |
-| 2 | 客户端到主机 | `u16` 行数和 `u16` 列数。 |
-| 3 | 主机到客户端 | `u32` 前台程序退出码，位于最后一段终端输出之后。 |
+| 1 | Either | `u16` byte count (1–32768) and raw PTY data |
+| 2 | Client to host | `u16` rows and `u16` columns |
+| 3 | Host to client | `u32` child exit code after the final output |
 
-本机 IPC 的 `open_terminal` 请求携带对端别名和初始行列，成功应答后在该 IPC 连接上传送同样的终端帧。关闭客户端、网络连接断开或对端公钥从网关的配对设备表移除时，网关会释放会话。shell 和账户由主机决定。每个接收网关同时允许最多 16 个原生终端会话。
+UTF-8 characters and escape sequences may span frames. The CLI uses the host terminal. The GUI emulator handles cursor position, alternate screen, SGR colors, application mouse reporting, bracketed paste, focus events, terminal queries, and palette or cursor changes. OSC 0/2 can update a tab title until the user renames it. Closing the client, losing the session, or unpairing the peer releases the PTY.
 
-数据帧允许任意字节，一个控制序列或一个 UTF-8 字符可以跨帧。客户端必须按顺序处理同一方向的字节。终端查询的回答通过反向数据帧写回同一个 PTY。CLI 将 VT 输入输出交给本机终端。GUI 的常用交互如下。
+## File transfer
 
-| 方向 | GUI 的行为 |
-| --- | --- |
-| 主机 → GUI | `OSC 0` 和 `OSC 2` 更新当前会话的自动标题。手动名称优先。当两者都为空时，GUI 使用设备名。遇到同名终端标签时，从 `-1` 开始取最小可用后缀。 |
-| 主机 → GUI | 处理光标定位、显隐、备用屏、清屏、滚动及常用 SGR 样式。`DECSCUSR` 切换光标形状和闪烁，`OSC 12` 设置光标颜色，`OSC 112` 恢复默认颜色。 |
-| GUI → 主机 | 发送键盘输入、方向键与功能键、按远端模式封装的粘贴。启用鼠标模式 1000、1002 或 1003 后按模式发送按下、释放、拖动、移动和滚轮，支持传统坐标、UTF-8 坐标（1005）和 SGR 坐标（1006）。Shift 保留本机选择与滚动。 |
-| GUI → 主机 | 模式 1004 开启时，终端标签获得或失去输入焦点会发送对应报告。远端可以查询当前光标位置、屏幕行列以及前景、背景、光标颜色（OSC 10/11/12）。 |
+Type 6 streams require a paired identity and run as the gateway account. A big-endian `u32` precedes each frame. Its high bit selects binary data or JSON control, and the low 31 bits give a length of 1–65536. A `get` or `put` request carries a path and the `recursive`, `preserve`, and `no_clobber` flags. `put` can require an existing directory. The recipient replies with `ready` or `error`.
 
-GUI 的模拟范围是上述 VT 交互。Kitty 图形、Sixel 图像和 OSC 52 远程剪贴板不在当前支持范围内。协议单独编码行列变化和退出码，平台专用的 Unix ioctl、POSIX 信号及 Win32 控制台事件没有跨平台消息类型。例如 Ctrl+C 作为输入字节传给 PTY，其效果由主机终端模式和前台程序决定。鼠标、焦点和光标序列见 [XTerm Control Sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)。
+Senders bracket directory entries with `directory` and `end_directory`. A `file` header declares name and size, followed by data frames and `end_file`. A receiver checks the size, stages the file alongside its destination, commits it atomically, and acknowledges with `done`. No-clobber mode can reply `skipped` if a file exists or another writer creates it first. A final `done` confirms the root entry. Preserved metadata includes timestamps and ordinary Unix permissions where supported. Received child names are validated, links and special files are rejected, and recursive depth is limited to 128.
+
+## Diagnostic echo
+
+`p2p-tunnel/probe/1` uses its own authenticated bidirectional stream. The caller sends a big-endian `u16` count, then successive `u16` sequence numbers starting at 1. The listener checks the configured peer and echoes each sequence. The probe exercises path selection and measures application-level RTT. [Network experiments](connectivity.md)

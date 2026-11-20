@@ -153,8 +153,8 @@ def apply_archive(archive, root, manifest):
 def receive():
     import msvcrt
 
-    root = (Path.home() / "p2p-tunnel").resolve()
-    state = Path(os.environ["LOCALAPPDATA"]) / "P2PTunnel" / "source-sync"
+    root = (Path.home() / "peerhatch").resolve()
+    state = Path(os.environ["LOCALAPPDATA"]) / "PeerHatch" / "source-sync"
     state.mkdir(parents=True, exist_ok=True)
     with (state / "lock").open("a+b") as lock, zipfile.ZipFile(sys.argv[0]) as archive:
         lock.seek(0)
@@ -175,7 +175,7 @@ def dev_command(host, action):
     else:
         command = ["ssh", "-nT", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--",
-                   host, "python -u p2p-tunnel/scripts/dev-update.py " + action]
+                   host, "python -u peerhatch/scripts/dev-update.py " + action]
     subprocess.run(command, check=True)
 
 
@@ -199,10 +199,12 @@ def main():
         receive()
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="yzzpc", help="Windows SSH host (default: yzzpc)")
+    parser.add_argument("--host", default=os.getenv("PEERHATCH_DEV_WINDOWS_HOST"), help="Windows SSH host (or PEERHATCH_DEV_WINDOWS_HOST)")
     parser.add_argument("--watch", action="store_true", help="continue syncing local source changes")
     parser.add_argument("--dev", action="store_true", help="build on both machines and update the running development apps")
     args = parser.parse_args()
+    if not args.host:
+        parser.error("Set --host or PEERHATCH_DEV_WINDOWS_HOST to your Windows SSH host")
     if args.dev:
         if not sys.platform.startswith("linux"):
             parser.error("--dev runs on the Linux development machine")

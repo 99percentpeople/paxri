@@ -124,13 +124,13 @@ def check_native_terminal(root, keys, call, start, cli, ipc, wait):
     with session() as (child, _, _):
         assert child.wait(14) != 0
     marker = root / "exec-ran"
-    with session("exec", "host", "--", "touch", str(marker)) as (child, _, _):
+    with session("exec", keys["host"][:8], "--", "touch", str(marker)) as (child, _, _):
         assert child.wait(14) != 0
         assert not marker.exists()
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: s["pairing"]["message"] == "Paired with host.")
     assert not json.loads(call("host", "status", "--json"))["port_access"]
-    assert call("host", "exec", "client", "--", "printf", "paired") == "paired"
+    assert call("host", "exec", keys["client"][:8].upper(), "--", "printf", "paired") == "paired"
     # Launch the foreground program directly, including an empty argument and a literal shell metacharacter.
     screen = r"""
 import os, sys, time, tty
@@ -164,7 +164,7 @@ sys.exit(37)
     assert (captured.returncode, captured.stdout, captured.stderr) == (17, b"\x1b[6noutputerror", b""), captured
     with session() as (child, fd, slave):
         ready(slave)
-        with session() as (second, second_fd, second_slave):
+        with session("shell", keys["host"][:8]) as (second, second_fd, second_slave):
             ready(second_slave)
             assert call("host", "exec", "client", "--", "printf", "reverse") == "reverse"
             for node, peer in (("client", "host"), ("host", "client")):
@@ -274,6 +274,8 @@ def check_pairing(root, keys, call, start, target_port, wait):
     # First use can race in both directions; subsequent checks must use the same session.
     assert json.loads(call("host", "status", "Laptop", "--json"))["connections"] == []
     directions = [("client", "Studio-2"), ("host", "Laptop")]
+    paired_at = {node: status(node)["peer_last_status_change_ms"][peer] for node, peer in directions}
+    assert "Studio" not in status("client")["peer_last_status_change_ms"]  # An existing idle device has no history.
     barrier = threading.Barrier(2)
 
     def check_from(direction):
@@ -284,6 +286,14 @@ def check_pairing(root, keys, call, start, target_port, wait):
     with ThreadPoolExecutor(2) as workers:
         checked = list(workers.map(check_from, directions))
     assert [r["device_id"] for r in checked] == [keys["host"], keys["client"]]
+    connected_at = {node: status(node)["peer_last_status_change_ms"][peer] for node, peer in directions}
+    assert all(connected_at[node] > paired_at[node] for node, _ in directions)
+    listing = call("client", "status")
+    devices = listing.split("Paired devices (2)\n", 1)[1].split("\nConnections (", 1)[0]
+    assert [name for name in devices.split() if name in {"Studio-2", "Studio"}] == ["Studio-2", "Studio"], devices
+    host_short = next(word for word in devices.split() if len(word) >= 8 and keys["host"].startswith(word))
+    selected = json.loads(call("client", "status", host_short, "--check", "--json"))
+    assert (selected["peer"], selected["device_id"]) == ("Studio-2", keys["host"])
     for node, peer in directions:
         # QUIC can finish the application exchange before publishing its selected path.
         deadline = time.monotonic() + 5
@@ -301,8 +311,10 @@ def check_pairing(root, keys, call, start, target_port, wait):
     wait("spare", lambda s: not s["pairing"]["outgoing"] and "invalid" in (s["pairing"]["message"] or "").lower())
     assert not status("spare")["peers"]
 
-    call("host", "port-access", "set", "Laptop", "--connect", str(target_port))
-    call("client", "forward", "add", "echo", "--peer", "Studio-2", "--listen", "0", "--target", str(target_port))
+    call("host", "port-access", "set", keys["client"][:8], "--connect", str(target_port))
+    assert str(target_port) in call("host", "port-access", "show", keys["client"])
+    call("client", "forward", "add", "echo", "--peer", host_short, "--listen", "0", "--target", str(target_port))
+    assert status("client")["forwards"]["echo"]["peer"] == "Studio-2"
     port = int(status("client")["forwards"]["echo"]["bound"].rsplit(":", 1)[1])
     with socket.create_connection(("127.0.0.1", port), timeout=8) as conn, conn.makefile("rb") as received:
         assert received.readline() == b"ready\n"
@@ -314,10 +326,15 @@ def check_pairing(root, keys, call, start, target_port, wait):
     join_and_wait(call("host", "pair", "code"))
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: not s["pairing"]["outgoing"])
+    for node, peer in directions:
+        assert status(node)["peer_last_status_change_ms"][peer] == connected_at[node]
     for node in ["client", "host"]:
         processes[node].terminate()
         processes[node].wait(timeout=12)
         if node == "client":
+            if os.name != "nt":  # SIGTERM allows the client gateway to close QUIC before exiting.
+                wait("host", lambda s: not s["peer_connections"]["Laptop"]
+                     and s["peer_last_status_change_ms"]["Laptop"] > connected_at["host"])
             # Simulate a pairing saved before platform exchange existed.
             path = root / "client.toml"
             lines = path.read_text().splitlines(keepends=True)
@@ -338,6 +355,57 @@ def check_pairing(root, keys, call, start, target_port, wait):
     wait("host", lambda s: not s["pairing"]["incoming"])
     assert status("host")["peers"] == {"Laptop": keys["client"]}
     print("Pairing, peer platform exchange and backfill, live forwarding and shared settings passed.")
+
+
+def check_file_copy(root, cli, ipc, host_short):
+    src = root / "source tree"
+    (src / "empty").mkdir(parents=True)
+    (src / "nested").mkdir()
+    data = bytes(range(256)) * 4097
+    item = src / "nested" / "你好.bin"
+    item.write_bytes(data)
+    (src / ".hidden").write_bytes(b"")
+    stamp = 1_650_000_123
+    os.utime(item, (stamp, stamp))
+    if os.name != "nt":
+        item.chmod(0o751)
+    remote = root / "remote"
+    remote.mkdir()
+    local = root / "downloads"
+    local.mkdir()
+
+    def cp(*args, ok=True):
+        result = subprocess.run([cli, "--ipc", ipc("client"), "cp", *map(str, args)],
+                                capture_output=True, timeout=30)
+        assert (result.returncode == 0) == ok and not result.stdout, (args, result.stderr)
+        return result.stderr
+
+    peer = lambda p: f"host:{p}"
+    cp(src, peer(remote), ok=False)
+    assert not (remote / src.name).exists()
+    assert cp("-rqp", src, f"{host_short}:{remote}") == b""
+    tree = remote / src.name
+    assert (tree / "nested" / item.name).read_bytes() == data
+    assert (tree / ".hidden").is_file() and (tree / "empty").is_dir()
+    cp("-rp", f"{host_short}:{tree}", local)
+    copied = local / src.name / "nested" / item.name
+    assert int(copied.stat().st_mtime) == stamp
+    if os.name != "nt":
+        assert copied.stat().st_mode & 0o777 == 0o751
+    assert copied.read_bytes() == data
+
+    copied.write_bytes(b"keep me")
+    assert b"Skipped" in cp("-rnv", peer(tree), local)
+    assert copied.read_bytes() == b"keep me"
+    cp(peer(tree / ".hidden"), peer(tree / "nested" / item.name), local)
+    assert (local / item.name).read_bytes() == data
+    cp("--", src / ".hidden", item, peer(remote))
+    assert (remote / item.name).read_bytes() == data
+    missing = remote / "missing"
+    cp(item, src / ".hidden", peer(missing), ok=False)
+    assert not missing.exists()
+    assert cp("-q", peer(missing), copied, ok=False) and copied.read_bytes() == b"keep me"
+    print("File copy passed: binary upload/download, recursive trees, metadata, no-clobber and multiple sources.")
 
 
 def check_lifecycle(client):
@@ -375,17 +443,18 @@ def check_lifecycle(client):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
-    parser.add_argument("--client", choices=("tunnel", "tunnel-gui"), default="tunnel",
+    parser.add_argument("--client", choices=("peerhatch", "peerhatch-gui"), default="peerhatch",
                         help="client executable to use for gateway commands")
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
     parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
+    parser.add_argument("--file-copy", action="store_true", help="copy files and directories between two isolated gateways")
     parser.add_argument("--lifecycle", action="store_true", help="exercise background launch, restart and stop")
     args = parser.parse_args()
     if args.native_terminal and (not sys.platform.startswith("linux") or os.geteuid() == 0):
         parser.error("--native-terminal requires a standard Linux user")
     bins = args.bin_dir.resolve()
     suffix = ".exe" if os.name == "nt" else ""
-    cli, gateway = (str(bins / (n + suffix)) for n in (args.client, "tunnel-gateway"))
+    cli, gateway = (str(bins / (n + suffix)) for n in (args.client, "peerhatch-gateway"))
 
     if args.lifecycle:
         return check_lifecycle(cli)
@@ -493,9 +562,12 @@ ticket="{ticket}"
         (root / "client.toml").write_text(client_config)
         direct, status = start("client")
         assert not status["forwards"] and not host["forwards"]
+        if args.file_copy:
+            return check_file_copy(root, cli, ipc, keys["host"][:8])
         command = [cli, "--ipc", ipc("client"), "connect", "host"]
         payload = bytes(range(256)) * 1024
-        echo = subprocess.run([*command, "echo"], input=payload, capture_output=True, timeout=15)
+        echo = subprocess.run([cli, "--ipc", ipc("client"), "connect", keys["host"][:8], "echo"],
+                              input=payload, capture_output=True, timeout=15)
         assert echo.returncode == 0 and echo.stdout == b"ready\n" + payload[::-1], echo.stderr
         duplex = subprocess.run([*command, "streaming"], input=payload, capture_output=True, timeout=15)
         assert duplex.returncode == 0 and duplex.stdout == payload, duplex.stderr

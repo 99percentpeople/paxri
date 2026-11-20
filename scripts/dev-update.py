@@ -19,7 +19,7 @@ TARGET = ROOT / "target"
 STAGE = TARGET / "dev-watch" / "debug"
 LIVE = TARGET / "debug"
 WINDOWS = os.name == "nt"
-NAMES = [n + (".exe" if WINDOWS else "") for n in ("tunnel", "tunnel-gateway", "tunnel-gui")]
+NAMES = [n + (".exe" if WINDOWS else "") for n in ("peerhatch", "peerhatch-gateway", "peerhatch-gui")]
 
 
 def build():
@@ -27,7 +27,7 @@ def build():
     env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     env["CARGO_BUILD_BUILD_DIR"] = str(TARGET)
     subprocess.run(["cargo", "build", "--locked", "--target-dir", str(STAGE.parent),
-                    "-p", "tunnel-cli", "-p", "tunnel-gateway", "-p", "tunnel-gui"],
+                    "-p", "peerhatch-cli", "-p", "peerhatch-gateway", "-p", "peerhatch-gui"],
                    cwd=ROOT, env=env, check=True)
 
 
@@ -48,7 +48,7 @@ def systemctl(*args):
 def linux_apps():
     apps = []
     for name in NAMES[1:]:
-        unit = "p2p-" + name + ".service"
+        unit = name + ".service"
         result = subprocess.run(["systemctl", "--user", "show", unit, "-p", "MainPID", "--value"],
                                 capture_output=True, text=True)
         pid = int(result.stdout.strip() or 0)
@@ -75,8 +75,8 @@ def gateway_status(app):
     if not WINDOWS:
         proc_env = Path(f"/proc/{app['pid']}/environ").read_bytes().split(b"\0")
         for entry in proc_env:
-            if entry.startswith(b"TUNNEL_IPC="):
-                env["TUNNEL_IPC"] = os.fsdecode(entry.partition(b"=")[2])
+            if entry.startswith(b"PEERHATCH_IPC="):
+                env["PEERHATCH_IPC"] = os.fsdecode(entry.partition(b"=")[2])
     return json.loads(subprocess.check_output([*cli, "status", "--json"], env=env,
                       stderr=subprocess.DEVNULL, timeout=5))["device_id"]
 

@@ -1,0 +1,21 @@
+[Unit]
+Description=PeerHatch Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=peerhatch
+Group=peerhatch
+StateDirectory=peerhatch
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/peerhatch
+RuntimeDirectory=peerhatch
+RuntimeDirectoryMode=0750
+UMask=0027
+ExecStart=/usr/local/libexec/peerhatch/start-gateway /etc/peerhatch --ipc /run/peerhatch/gateway.sock
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

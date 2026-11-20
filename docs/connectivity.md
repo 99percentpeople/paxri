@@ -1,158 +1,73 @@
-# NAT 穿透、速度与弱网验收
+# NAT traversal and connectivity
 
-## 原生连接过程
+PeerHatch authenticates a device by its public key. An endpoint ticket provides its identity, relay hints, and IP candidates. When the default public infrastructure is enabled, the gateway can also look up the peer’s current address. A relay gives the two endpoints an initial path. iroh checks direct IPv4 and IPv6 UDP paths while the same encrypted connection carries traffic.
 
-1. 两端的 iroh 节点使用持久设备身份上线，取得本机可用地址以及公网服务观察到的地址。自托管时可用同一台公网机器提供 HTTPS 中继和 UDP 地址发现。部署时分别检查这两个入口的可达性。[iroh Relay](https://github.com/n0-computer/iroh/tree/main/iroh-relay)
-2. 已配对的设备通过已知地址或中继建立加密会话。iroh 交换候选地址并进行双向探测，可以尝试可达的局域网地址、公网 IPv4 映射或 IPv6 地址。公网发现服务观察到的 IP 和端口只是候选，只有实际路径验证成功才能用于直连。[iroh 地址发现](https://www.iroh.computer/blog/qad)
-3. 中继路径可用时，应用可以先开流转发。直连验证成功后，iroh 可切换承载业务的路径。双侧严格 NAT、运营商 CGNAT、UDP 封锁或移动网络切换会影响结果。通过中继可达时继续承载加密流量。中继需要为这一部分流量提供带宽。[iroh 连接机制](https://docs.rs/iroh/latest/iroh/)
+## Observe the actual path
 
-### 公共中继如何选区
+Open a device page or run `peerhatch status PEER --check`. **Direct** shows the peer address used by the connection. **Relay** identifies the relay carrying traffic. **Selecting path** means path selection is in progress. The displayed RTT is the QUIC estimate. `--json` includes per-connection details and counts of active streams. After a stream closes, the connection can remain open for reuse. The desktop automatically checks idle devices while their detail page is open.
 
-使用默认公共中继时，每台网关并行连接 iroh 提供的候选节点，在已经完成握手的中继连接上各发送三次 ping，以 RTT 中位数选择本机公布的中继。连续在线时每五分钟重新测量，失联时约十秒后重试。候选之间只差 5 毫秒或约 10% 时沿用当前节点。全部探测失败时恢复 iroh 的完整候选列表。设置 `native.relay_url` 会直接使用指定的自托管中继。
+To measure application echo time between two nodes, use `peerhatch probe listen` and `peerhatch probe connect`. Pass `--relay-only` when measuring relay performance. Use `--no-relay` to test an IP-only route with a known peer ticket. Set `RUST_LOG=iroh::net_report=debug,iroh::socket::remote_map=debug` for detailed native diagnostics.
 
-设备重连时会先尝试查询对端最近公布的中继，并保留票据中的直连地址作候选。已连通的配对设备会通过同一条连接交换最新票据。可以使用 `tunnel status <peer> --check` 查看当前业务路径。要单独测量中继，在 `tunnel probe listen` 或 `tunnel probe connect` 的参数中加上 `--relay-only`，每条回显都会打印实际中继地址和应用层 RTT。
+## Public relay and UDP discovery
 
-使用默认公共中继时，网关用传输业务的同一个 UDP 套接字向多个公共 QAD 服务探测。IPv4 和 IPv6 分别比较来自不同目的 IP 的观测结果。网关日志中的 `mapping=consistent` 表示至少两个观测点看到了相同的出口地址和端口，`varies` 表示观测不同，`unknown` 表示本次观测不足。可用的地址会作为直连候选发布。业务中继仍按已认证的中继连接 RTT 选取，即使该中继的 UDP 探测失败，也可以使用其他观测点的结果。指定 `native.relay_url` 时只探测指定的中继。两个观测点看到相同映射时，对端仍需通过实际的双向 UDP 探测验证入站可达性。
+With the default public relays, each gateway measures three authenticated ping/pong exchanges to each reachable candidate and ranks them by median RTT. It periodically rechecks the ranking, keeps the current home when latencies are close, and checks sooner on disconnect or network change. A peer that is already online can exchange fresh tickets over its shared connection. A configured `native.relay_url` selects a private relay and limits discovery to that relay.
 
-## 在设备页和 CLI 查看实际路径
+Public UDP address discovery uses the **same QUIC socket** as gateway traffic. IPv4 and IPv6 observations are grouped separately by the actual IP address of the observer. Even if the lowest-latency data relay cannot answer UDP discovery, other observers can return candidates.
 
-打开设备页的 **Connection**，或运行 `tunnel status raspberrypi`。每个已连接设备显示一条 **Shared connection**，包含当前选中的地址、QUIC 估算的 RTT，以及各类活动流的数量。直连、中继和选路中的连接分别显示 **Direct**、**Relay** 和 **Selecting path**。两端都能查看已建立的连接。尚未建连时显示 **No active connection**。会话可以在业务流结束后保持连接，供下一次使用。**Check connection** 或 `tunnel status raspberrypi --check` 会通过已配对的设备信息协议检查连通性。该操作可以复用转发连接。`--json` 会返回逐连接的数据。
+| Gateway log | Interpretation |
+| --- | --- |
+| `mapping=consistent` | At least two different observer IPs saw the same source IP and port |
+| `mapping=varies` | Observers saw different public mappings |
+| `mapping=unknown` | Fewer than two independent observations were available for this family |
 
-### VPN 和多个 IPv4 出口
+A consistent mapping still needs a successful peer-to-peer check. UDP filtering, carrier NAT, VPN routing, and the peer’s network determine whether an address is actually reachable.
 
-默认配置由操作系统决定 UDP 的出口。设备可以公布多个内网地址，公网探测服务只能观察到实际发出探测的出口。需要通过物理局域网直连时，在**有路由器映射能力的一端**的 `node.toml` 中设置以下选项并重启网关。
+## Multiple IPv4 exits and roaming
+
+Operating-system routing selects the default UDP exit. If a physical LAN router supports mapping and that path should carry direct traffic, enable this on that device:
 
 ```toml
 [native]
 lan_port_mapping = true
 ```
 
-启用后，网关在通配 IPv4 地址上保持 QUIC 套接字，选择活动物理网卡作为新路径的源地址，向同一子网的路由器申请 NAT-PMP UDP 租约。网关监听系统网络变化，重新选择网卡和路由器，撤下旧地址，并把新租约的公网地址发给已连接的设备。租约在有效期的一半时续租。原路由器仍可确认时会主动释放租约，已经离开的网络让旧租约自然到期。没有物理 NAT-PMP 路由器响应时，使用系统默认选路及 PCP、UPnP、NAT-PMP 映射。网关也会重新检查稍后上线的路由器。已有连接能否跨越换网取决于新路径或中继能否及时恢复。[NAT-PMP 租约协议](https://www.rfc-editor.org/rfc/rfc6886.html)
+The IPv4 QUIC socket stays bound to a wildcard address. The gateway chooses an active physical source, verifies the on-link router, and requests a finite NAT-PMP lease for the actual socket port. It renews at half the granted lifetime. After a network change it reselects the interface and router, withdraws an obsolete address, and announces the replacement. A router that comes online later is retried. If no physical NAT-PMP router responds, the normal OS-selected PCP, UPnP, and NAT-PMP mapper can be used. IPv6 paths and the relay remain available. A stream can survive a move when QUIC recovers a usable path before the connection times out. [NAT-PMP](https://www.rfc-editor.org/rfc/rfc6886.html)
 
-运行 `scripts/check-nat.sh --roam` 可验证物理网络切换。实验在双侧严格对称的 IPv4 网络中启动两台真实网关，将一侧从第一张网卡和路由器切到不同子网的第二张网卡和路由器。检验条件是同一条双向回显流切到第二个路由器分配的公网端口，并且导出的票据已撤下旧映射。
+A machine with a reachable public UDP address can accept direct traffic itself. To forward encrypted traffic between two *other* peers, run a separate iroh relay with a publicly reachable HTTPS endpoint. Creating a port mapping alone does not make a gateway a relay. The default public-relay selection can fail over between its candidates. An explicitly configured private relay is a single discovery and fallback endpoint. Established direct paths can continue during a relay outage.
 
-## 节点作为备用中继
+## Reproduce the Linux network experiments
 
-设 A 和 B 在两个内网，C 是一台常开的家用机或服务器。若 B 只需要访问 C 的服务，B 持有 C 的设备公钥和可达 UDP 地址就可直接连接。若 A 与 B 无法直连，C 可以另行运行 `iroh-relay`，接收 A、B 主动建立的连接，并在它们之间转送加密数据。主中继失联时，已经走通的 A–B 直连可以继续承载流量。[iroh 连接模型](https://github.com/n0-computer/iroh/blob/main/iroh/README.md) · [iroh-relay 1.4.1](https://docs.rs/crate/iroh-relay/1.4.1)
-
-| C 的网络条件 | 如何提供可达入口 |
-| --- | --- |
-| 主机有公网 IPv4 或可路由 IPv6 | 监听相应地址，在主机和边界防火墙放行服务端口。仅有 IPv6 时，使用它的节点也要有可用 IPv6 路径。 |
-| 路由器有公网 IPv4，C 只有内网地址 | 手动端口转发，或经管理员启用后用 UPnP IGD 向路由器申请映射。为 relay 的 HTTPS 监听映射 TCP，启用 QUIC 地址发现时再单独映射对应 UDP 端口。 |
-| 路由器外层还有 NAT 或运营商 CGNAT | 内层映射只覆盖当前网关。还需要上游提供入站映射，或改走可达的 IPv6。仅把本机观察到的出口 IPv4 告知对端不足以提供入口。 |
-
-本项目使用的 iroh 1.4.1 默认启用了 `portmapper`，原生 Endpoint 已可用 UPnP、PCP 或 NAT-PMP 尝试映射自身的 UDP 端口。给独立 relay 建立 HTTPS 入口还需要管理它自己的 TCP 映射。设计上记录路由器实际分配的外部端口、维护租约、对公网地址变化更新 DNS 或配对信息，停用时释放本服务创建的映射。仅映射声明的传输入口，本机管理 IPC 和业务 TCP 目标继续留在原有作用域。[iroh 端口映射配置](https://docs.rs/crate/iroh/1.4.1/source/src/portmapper.rs) · [UPnP IGD 端口映射](https://upnp.org/specs/gw/UPnP-gw-WANIPConnection-v2-Service.pdf)
-
-### 主中继失联时如何恢复
-
-1. C 提前运行备用 relay，提供带有效证书的稳定 HTTPS 地址，并用 `access.allowlist` 配置获准借用带宽的设备。用另一个网络上的配对节点验证 TLS 和 relay 握手，再由两个节点强制走该 relay 完成回显，确认实际可以转送数据。[iroh-relay 访问控制](https://docs.rs/crate/iroh-relay/1.4.1)
-2. 在配对时或主中继可用期间，把 C 的地址分发给 A、B 并持久化。动态公网地址宜使用动态 DNS 和稳定的外部端口。冷启动时两端都能从本地取得可信候选，主中继离线时仍能会合。
-3. 备用地址与对端的在线状态分别处理。只有 B 已在 C 上建立 relay 连接，A 才能经 C 找到 B。失去主中继时，B 重新连接可达中继，A 用已缓存的候选重试 B，并校验 B 的设备公钥。单侧失联时，若 B 仍只连接主中继，A 单独切换到 C 也无法完成会合。若产品要求覆盖这种情况，需要让 B 同时可经备用入口到达，或提供独立可达的协调通道。
-4. 健康直连保留。原来经主中继的会话能否保留，取决于能否在超时前验证另一条路径。会话失效后为新 TCP 连接重建隧道，已发送的数据不重放。
-
-目前配置只接受一个显式的 `native.relay_url`。多中继会合、relay 的 UPnP 映射管理和故障切换均为设计项。验收时应分别测量主中继关闭后的现有直连、强制中继的现有流和两端重启后的新连接，再独立测试单侧失联。记录实际选中的 relay URL、恢复时间及原连接是否中断。
-
-## 路径与流的观测
-
-每次建连按设备对记录首次可用耗时、首次验证直连耗时、路径变化和会话结束原因。分别统计路径上的实际收发字节，避免只凭「有直连候选」或「中继在线」来判断流量走向。会话路径、监听器状态和每次目标 TCP 建连结果分别呈现。对单条转发统计活动 TCP 连接数、业务字节、目标建连错误和中断原因。[iroh 路径事件](https://docs.rs/iroh/latest/iroh/endpoint/struct.Connection.html)
-
-QUIC 负责可靠传输、拥塞控制与流控。底层丢包会产生等待和降速。同一流内必须等待缺失字节。不同流可以独立交付已经收到的数据，同时共享链路容量。优先测量应用实际收到的字节和交互延迟。若怀疑窗口限制吞吐，先比较带宽时延积，例如 100 Mbit/s、80 ms RTT 约需 1 MB 在途数据，再评估流级或连接级窗口。[QUIC 流控](https://www.rfc-editor.org/rfc/rfc9000.html#section-4) · [QUIC 丢失恢复](https://www.rfc-editor.org/rfc/rfc9002.html)
-
-## 已验证的双 NAT 场景
-
-在同一台 Linux 主机创建两个隔离内网，各有一个地址为 `10.77.0.2` 的客户端。两个网关分别用 nftables 做源地址转换，外侧地址为 `203.0.113.10` 和 `203.0.113.20`。外侧测试网内运行 iroh-relay 1.4.1，启用 HTTPS 和 UDP 地址发现，两端信任临时测试 CA。网关允许内网发起连接和已建立连接的回包，并丢弃发给网关本机的未匹配 UDP。实验全程没有配置端口转发。
-
-| 网络条件 | 同一条探测流的结果 |
-| --- | --- |
-| 先阻断设备间 UDP，收到第 3 次回显后放行 | 25 次回显全部成功。前 3 次走中继，第 4 至 25 次走直连。两侧网关外网口之间出现双向 UDP，直连路径收发计数持续增长。 |
-| 升级到直连后，在第 10 次回显后双向阻断设备间 UDP，保持中继可达 | 同一条流完成 25 次回显。第 11 次经中继返回，耗时 14.16 秒。最初的 10 秒应用超时会提前终止这次恢复，因此探测读写时限调整为 35 秒。 |
-| 不同目的地得到不兼容的 UDP 映射 | 一轮 75 次回显全部通过中继完成。在相同网关配置的诊断复测中，地址发现服务看到的端口与发往对端时实际使用的源端口不同。 |
-
-排查时可对探测命令设置 `RUST_LOG=iroh::net_report=debug,iroh::socket::remote_map=debug`，从标准错误查看地址发现结果。结合网关外侧抓包，可区分「取不到映射地址」和「取得的地址对另一个目的地无效」。目前这些记录来自隔离网络实验。真实家庭宽带、运营商网络的打洞率及吞吐需要单独测量。
-
-### 网关 TCP 转发经中继
-
-在两个独立的对称型 IPv4 NAT 后分别运行 `tunnel-gateway`，另外阻断网关之间的公网 UDP，保留私有 HTTPS relay 可达。服务端只在本机回环地址发布 HTTP 文件服务，发起端通过本机 TCP 监听器取回 256 KiB 随机文件，逐字节比较一致。此场景覆盖实际授权和 TCP 转发数据路径。使用以下命令复现，`iroh-relay` 可以在 PATH 中，也可以通过 `IROH_RELAY_BIN` 指定。
+Use a kernel that permits unprivileged network namespaces. Install iproute2, nftables, util-linux, OpenSSL, Python 3.8+, and an `iroh-relay` 1.4.1 binary. Build `peerhatch` and `peerhatch-gateway` with `cargo build --locked`. Override `PEERHATCH_BIN` and `IROH_RELAY_BIN` to select specific binaries.
 
 ```sh
-cargo build --locked
-scripts/check-nat.sh --gateway
-```
-
-### 全锥型与对称型组合
-
-[Linux 实验脚本](../scripts/check-nat.sh)在独立网络命名空间中启动两个内网、两个网关、私有 HTTPS 中继和 UDP 地址发现服务。每一端先用同一个 UDP 套接字向三个外部地址发包，其中两个目的地使用相同 IP、不同端口。再分别由原目的地址、同 IP 的未联系端口以及第三方 IP 发包，检查入站过滤。随后两个实际 CLI 节点通过同一条 QUIC 流完成 20 次编号回显。表中为此次实验结果，组合顺序为发起端、监听端。
-
-| 发起端 | 监听端 | 20 次回显期间观测到的业务路径 |
-| --- | --- | --- |
-| 全锥型 | 全锥型 | 已直连 |
-| 对称型 | 全锥型 | 已直连 |
-| 全锥型 | 对称型 | 已直连 |
-| 对称型 | 对称型 | 全程中继 |
-
-全锥型网关在首次出站后复用同一个外部端口，并接受第三方通过该映射发来的 UDP。混合组合中，对称型节点可以向这个稳定地址发送探测包，全锥型一侧能从收到的包得知对方实际使用的源端口。CLI 发起会话的方向和底层双向探测的方向可以不同。[UDP NAT 映射与过滤行为](https://www.rfc-editor.org/rfc/rfc4787.html)
-
-对称型实验网关针对地址发现服务、校准端点和对端使用互不重叠的端口范围，并通过连接跟踪过滤回包。在双对称型组合中，两端从地址发现服务取得的端口都与对端实际可用的端口不同。这里验证的是该配置下的中继可达性。20 次回显是同一次连接上的采样，无法据此估计不同运营商的直连成功率。
-
-在允许非特权用户创建网络命名空间的 Linux 上，准备 `iproute2`、`nftables`、`util-linux`、OpenSSL、Python 3.8+、`tunnel` 和 iroh-relay 1.4.1。脚本默认使用 `target/debug/tunnel` 和 PATH 中的 `iroh-relay`，也可通过 `TUNNEL_BIN` 和 `IROH_RELAY_BIN` 指定。测试网络、网关规则和临时设备身份随实验结束回收。
-
-```sh
-cargo build --locked --bin tunnel
 scripts/check-nat.sh cone cone
 scripts/check-nat.sh symmetric cone
 scripts/check-nat.sh cone symmetric
 scripts/check-nat.sh symmetric symmetric
-```
-
-### IPv6 与双栈直连
-
-两端都有可路由的 IPv6 地址时，iroh 可以验证 IPv6 UDP 路径，即使 IPv4 两端都处在对称型 NAT 后面。地址可达性和防火墙规则仍会影响结果。探测输出中的 `path=direct addr=ip:[IPv6地址]:端口` 表示该次回显后选中的路径是 IPv6 直连。程序按实际路径选路，不强制优先使用某个地址族。
-
-以下两组 IPv6 实验中，发起端只使用配置中的对端公钥和共同中继 URL 启动连接。两个 CLI 进程均为全新启动，发起端省略 `--ticket`，配置中也没有对端的 IP 或端口。双方通过已认证会话交换本机候选地址，验证可达性后切换承载路径。IPv4 中继同样可以用于协商 IPv6 直连。这里使用操作系统已经配置的 IPv6 地址。
-
-| Linux 隔离网络条件 | 观测结果 |
-| --- | --- |
-| 两端只有 IPv6，位于不同的 /64 子网，中继主机名只解析到 IPv6。先阻断设备间 UDP，第 3 次回显后放行 | 前 3 次通过 IPv6 中继，之后通过 IPv6 直连，同一条流完成 20 次回显。 |
-| 两端均为双栈，IPv4 使用已校准的对称型 NAT，中继使用 IPv4，IPv6 使用带状态防火墙的路由网络 | 同一条流完成 20 次回显，观察到 IPv6 直连。仅保留 IPv4 的对照实验全程使用中继。 |
-
-复现命令如下，依赖和二进制设置与前述 NAT 实验相同。
-
-```sh
-scripts/check-nat.sh --ipv6-only
 scripts/check-nat.sh --dual-stack symmetric symmetric
+scripts/check-nat.sh --ipv6-only
+scripts/check-nat.sh --gateway
+scripts/check-nat.sh --roam
 ```
 
-自托管 IPv6 中继时，使用具有 AAAA 记录的主机名和匹配的 TLS 证书，例如 `https://relay.example.org`。此次实验中，iroh-relay 1.4.1 使用 `https://[IPv6地址]` 时 HTTPS 中继握手失败。相同网络使用主机名后通过。TCP 服务配置支持 `[::1]:3000` 这样的地址。上述 IPv6 实验使用回显探测协议。[iroh-relay 1.4.1 TLS 实现](https://docs.rs/iroh-relay/1.4.1/src/iroh_relay/client/tls.rs.html)
+Each client gets its own isolated LAN and router. The routers’ external addresses are on a documentation network. A private HTTPS relay with a temporary test CA also provides UDP address discovery. Calibration sends packets from one socket to distinct destination addresses and ports, then checks which third-party senders can reach the mapping.
 
-## Windows x64 实机监听与 SSH
-
-在 Windows x64 build 26300 上运行网关和 CLI，Linux ARM64 主机作为局域网对端。两个网关使用临时设备身份。下表中的成功表示经 Windows TCP 入口发送的数据由 Linux 上的目标服务回显，并已核对内容。
-
-| Windows 监听配置 | 实测结果 |
+| Network or event | Observed result |
 | --- | --- |
-| 指定以太网 IPv4 | Windows 通过该以太网地址访问成功，以回环地址访问同一端口被拒绝。 |
-| `0.0.0.0` | Windows 分别通过 IPv4 回环、以太网和另一块虚拟网卡的地址访问成功。 |
-| `[::]` | Windows 通过 `::1` 和一块虚拟网卡的 IPv6 地址访问成功。单独测试此规则时，IPv4 回环连接被拒绝。 |
-| `0.0.0.0` 与 `[::]` 使用同一端口号 | 两条规则同时绑定成功，IPv4、IPv6 均完成数据转发。 |
+| Cone/cone, symmetric/cone, cone/symmetric IPv4 | Each combination reached a direct path during 20 echoes on one stream |
+| Symmetric/symmetric IPv4, disjoint port pools and strict filtering | All 20 echoes used the relay |
+| Dual stack with two symmetric IPv4 routers | IPv6 direct traffic succeeded through stateful IPv6 firewalls |
+| Peer UDP initially blocked, then allowed | In a 25-echo run the first three used the relay and the remaining 22 used direct UDP |
+| A direct path was blocked during transfer | The same stream completed. Its first relay response after the loss took 14.16 seconds in one run |
+| TCP forward forced through a private relay | Two gateways transferred a 256 KiB random file and verified its contents |
+| Physical interface and NAT-PMP router replaced | The same open bidirectional stream went direct through the second router. The ticket dropped the old mapping |
 
-Windows 主动连接 Linux 的直连转发已通过。从 Linux 主动连接 Windows 的临时 TCP 监听端口时，TCP 握手超时。Windows 专用网络防火墙开启，默认入站策略为阻止，未对测试端口增加放行规则。反向 SSH 测试中，仅使用直连时等待 SSH 标识超时，配置两端均可访问的临时 iroh relay 后，从 Linux 经隧道登录 Windows 并执行 `hostname` 成功。
+The IPv6-only fixture uses a relay hostname with an AAAA record and a matching certificate. Give self-hosted relays a DNS name and matching TLS certificate. Configure IPv6 TCP targets using bracket notation such as `[::1]:3000`.
 
-Windows CLI 通过本机命名管道完成状态查询和监听暂停、恢复。[网关回归脚本](../scripts/check-gateway.py)也在 Windows 实机通过，覆盖 TCP 半关闭后的 256 KiB 响应、端口冲突、服务授权拒绝和进程异常退出后的恢复。
+On a Windows x64 machine paired with a Linux ARM64 device, a listener pinned to Ethernet accepted traffic on that IPv4 address. A wildcard IPv4 listener accepted loopback, Ethernet, and virtual-interface traffic. A separate IPv6 listener accepted IPv6, and both families could bind the same numeric port. The Windows inbound firewall affected new inbound TCP connections. SSH over an explicitly forwarded SSH service and PeerHatch’s own native PTY are separate uses of the transport.
 
-## 首轮验收设计
+## Measure performance on your network
 
-使用 [CLI 探测](../README.md#用两台电脑测试打洞) 可以验证路径和编号回显。每个样本在收到对应回显后读取选中路径，`path_tx_bytes` 和 `path_rx_bytes` 是该路径含协议开销的传输计数。路径切换时计数所属路径会变化。`echo_ms` 衡量应用层往返耗时。监听端等待中继上线最多 8 秒，只有直接地址时会告知用户。使用自托管部署时，两端可填写相同的 `native.relay_url`。公网 HTTPS 和 UDP 地址发现使用系统信任的证书。
+Report cold connection time, time to direct, selected path, application throughput, RTT, and interruptions. Measure both directions. QUIC flow control and loss recovery preserve stream ordering, and a slow or lossy network can still increase latency. A 100 Mbit/s path with an 80 ms RTT has about 1 MB of data in flight at full throughput. [QUIC flow control](https://www.rfc-editor.org/rfc/rfc9000.html#section-4) · [Loss recovery](https://www.rfc-editor.org/rfc/rfc9002.html)
 
-下表列出网关 TCP 转发的网络验收场景。每次实测记录两端系统、客户端与中继版本、网络类型、基线 RTT、测试方向和持续时间。速度记录为接收端应用有效吞吐，另记 RTT、重传估计、CPU 和峰值内存。
-
-| 场景 | 操作 | 观察结果 |
-| --- | --- | --- |
-| 局域网基线 | 同一对设备直接连接目标，再通过隧道做等量传输 | 两方向吞吐、CPU、内存，以及协议引入的耗时 |
-| 两个独立外网 | 家庭宽带与另一宽带或手机热点互连，重复冷启动 | 首次可用时间、10 秒与 30 秒内直连比例、实走路径。分别报告总尝试数和成功数 |
-| 两端均在 NAT 后 | 不预配端口映射，记录两端网络条件。可加一组双重 NAT | 是否经中继起连、是否升级直连、两端所见路径和实际业务字节 |
-| UDP 受限 | 保持 HTTPS 中继可达，封锁公网 UDP，再从本地 TCP 入口请求服务 | 数据正确传输，状态显示中继，记录中继吞吐和延迟 |
-| 随机与突发丢包 | 在传输路径上注入 1%、3% 随机丢包及单独的突发丢包。同时传文件和发交互请求 | 校验文件哈希、有效吞吐、交互 P95 延迟和最长停顿，记录最终路径 |
-| 路径和会话恢复 | 传输时撤掉直连路径，再单独测试完全断网后恢复 | 分别记录路径切换停顿、旧 TCP 流结局及新连接恢复时间，检查没有重放旧数据 |
-| 并发与半关闭 | 三台设备同时访问一个服务。让一个慢接收端堆积数据，并运行发送 EOF 后等待响应的程序 | 检查其他流能前进、缓冲有界、EOF 后响应完整 |
-
-连接成功率的分母是全部有效尝试。另用同一分母报告规定时间内成功直连的比例。性能结果按直连和中继分组。真实跨网结果与本地弱网注入分别报告。
+For repeatable comparisons, start with a LAN baseline, then repeat from different ISPs, mobile networks, and with direct UDP blocked. Test concurrent file and interactive streams, half-close, and recovery from both a single-path loss and a complete disconnect. The namespace results describe these fixtures. Estimating a real-world direct-connection rate requires independent connections on representative networks.

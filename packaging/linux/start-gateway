@@ -17,5 +17,5 @@ if [ ! -e "$config" ]; then
     trap - EXIT
 fi
 
-tunnel identity "$key" >/dev/null
-exec tunnel-gateway --config "$config" --key "$key" "$@"
+peerhatch identity "$key" >/dev/null
+exec peerhatch-gateway --config "$config" --key "$key" "$@"

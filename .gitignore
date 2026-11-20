@@ -1,3 +1,8 @@
 /target/
 *.key
 __pycache__/
+node.toml
+.env
+.env.*
+*.p12
+*.pfx
