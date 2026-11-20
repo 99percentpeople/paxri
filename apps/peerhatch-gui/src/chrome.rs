@@ -59,7 +59,7 @@ mod mac {
     // moving window only when it actually covers the pointer.
     pub fn tab_dock_sample(
         w: &Window,
-    ) -> Option<(bool, impl Fn(&Window) -> Option<Point<Pixels>>)> {
+    ) -> Option<(bool, impl Fn(&Window) -> Option<Point<Pixels>> + use<>)> {
         let screen = NSEvent::mouseLocation();
         let mtm = MainThreadMarker::new()?;
         let moving = with_window(w, |win, _| win.windowNumber())?;

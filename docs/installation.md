@@ -10,6 +10,8 @@ The [latest release](https://github.com/99percentpeople/peerhatch/releases/lates
 | Apple Silicon | `peerhatch-macos-arm64.tar.gz` |
 | Intel Mac | `peerhatch-macos-amd64.tar.gz` |
 
+Native Linux archives are built on Debian 12 with glibc 2.36. The desktop also needs a Vulkan-capable graphical session, Fontconfig, and XKB runtime libraries.
+
 ## Desktop and per-user gateway
 
 Extract the complete archive. On Windows double-click `peerhatch-gui.exe`. On macOS open `PeerHatch.app`. The macOS application is ad-hoc signed and distributed outside the App Store. On Linux run `bin/peerhatch-gui` in a graphical session. The GUI starts a per-user gateway if needed. Closing it leaves that gateway running. Keep the CLI, GUI, and gateway together so the clients can find the gateway executable.
@@ -43,7 +45,7 @@ docker compose exec gateway peerhatch pair code
 docker compose logs -f gateway
 ```
 
-The default tag is `latest`. To pin a version, put `PEERHATCH_VERSION=0.1.0` in the Compose project's `.env`. To upgrade, run `docker compose pull` and `docker compose up -d --wait`. The registry publishes a multi-platform index for AMD64 and ARM64.
+The default tag is `latest`. To pin a version, put `PEERHATCH_VERSION=0.1.1` in the Compose project's `.env`. To upgrade, run `docker compose pull` and `docker compose up -d --wait`. The registry publishes a multi-platform index for AMD64 and ARM64.
 
 Compose uses the host network and hostname on native Linux. A forward to `127.0.0.1` can reach the host’s loopback services. Remote terminals run the container’s shell as UID/GID `10001:10001`. The named volume at `/var/lib/peerhatch` holds the identity, peers, and configuration. Reuse the same Compose project name across upgrades. Removing the volume removes that device identity. To bring an existing node, stop its old gateway, mount the whole directory containing both `node.toml` and `device.key`, allow UID 10001 to write the directory, and keep the key private.
 
@@ -53,7 +55,7 @@ Download the Docker archive for the target CPU and `compose.yaml` from the same 
 
 ```sh
 docker load -i peerhatch-docker-linux-arm64.tar.gz
-PEERHATCH_VERSION=0.1.0 docker compose up -d --pull never --wait
+PEERHATCH_VERSION=0.1.1 docker compose up -d --pull never --wait
 ```
 
 To build from source and use the same Compose file:

@@ -48,15 +48,22 @@ jobs:
       CARGO_PROFILE_RELEASE_STRIP: debuginfo
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install 1.98.1 --profile minimal
+      - if: runner.os != 'Linux'
+        run: rustup toolchain install 1.98.1 --profile minimal
       - if: runner.os == 'Linux'
+        name: Build on Debian 12 for glibc 2.36 compatibility
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxi-dev clang cmake pkg-config
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -e CARGO_INCREMENTAL -e CARGO_PROFILE_RELEASE_STRIP \
+            rust:1.98.1-bookworm bash -eu -c '
+              apt-get update -q
+              apt-get install -y --no-install-recommends clang cmake pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxi-dev
+              bash packaging/build-unix-release.sh
+            '
       - if: runner.os == 'macOS'
         run: |
           if ! xcrun --sdk macosx metal -v; then xcodebuild -downloadComponent MetalToolchain; fi
-      - if: runner.os != 'Windows'
+      - if: runner.os == 'macOS'
         run: bash packaging/build-unix-release.sh
       - if: runner.os == 'Windows'
         run: python packaging/windows/build-portable.py

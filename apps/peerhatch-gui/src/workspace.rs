@@ -17,6 +17,7 @@ pub(super) use terminals::PeerSessions;
 
 gpui::actions!(workspace, [ReconnectTerminal]);
 
+#[cfg(not(target_os = "macos"))]
 use dock::DockTarget;
 #[cfg(target_os = "macos")]
 pub(super) use drag::{DragEvent, DragSignal};

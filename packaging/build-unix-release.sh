@@ -38,9 +38,11 @@ if [[ $platform == macos-* ]]; then
 PLIST
     for bin in peerhatch peerhatch-gateway peerhatch-gui; do
         install -m 0755 "$bins/$bin" "$app/MacOS/$bin"
+        codesign --force --sign - "$app/MacOS/$bin"
         ln -s "../PeerHatch.app/Contents/MacOS/$bin" "$root/bin/$bin"
     done
     codesign --force --sign - "$root/PeerHatch.app"
+    codesign --verify --deep --strict "$root/PeerHatch.app"
 else
     for bin in peerhatch peerhatch-gateway peerhatch-gui; do install -m 0755 "$bins/$bin" "$root/bin/$bin"; done
     cp packaging/linux/{start-gateway,install-systemd.sh,peerhatch-gateway.service} "$root/"
