@@ -5,12 +5,26 @@ Sign in to GitHub, open a successful **Prototype builds** run on `main`, and dow
 | System | Archive |
 | --- | --- |
 | Windows on Intel or AMD | `peerhatch-windows-x64.zip` |
-| Linux on Intel or AMD | `peerhatch-linux-amd64.tar.gz` |
-| 64-bit Raspberry Pi or other ARM Linux | `peerhatch-linux-arm64.tar.gz` |
+| AMD64 Linux with glibc (e.g. Debian or Ubuntu) | `peerhatch-linux-amd64-glibc.tar.gz` |
+| ARM64 Linux with glibc (e.g. 64-bit Raspberry Pi OS) | `peerhatch-linux-arm64-glibc.tar.gz` |
+| ARM64 Linux with musl (e.g. Alpine or OpenWrt) | `peerhatch-linux-arm64-musl.tar.gz` |
 | Apple Silicon | `peerhatch-macos-arm64.tar.gz` |
 | Intel Mac | `peerhatch-macos-amd64.tar.gz` |
 
-Native Linux archives are built on Debian 12 with glibc 2.36. The desktop also needs a Vulkan-capable graphical session, Fontconfig, and XKB runtime libraries.
+Every Linux archive includes `bin/peerhatch`, `bin/peerhatch-gateway`, and `bin/peerhatch-gui`. The glibc builds target Debian 12 (glibc 2.36). The musl build targets Alpine 3.23. Opening the GUI requires a graphical session, a Vulkan driver, and the desktop runtime libraries, including Fontconfig and XKB.
+
+## Headless ARM64 musl installation
+
+All three programs in the ARM64 musl archive use the system loader at `/lib/ld-musl-aarch64.so.1`. The CLI and gateway also need `libgcc_s.so.1`, provided by `libgcc` on Alpine and `libgcc1` on OpenWrt 25.12. On a router, extract just these two programs to persistent storage. From an unprivileged account with a writable home directory, start the gateway and print the pairing code.
+
+```sh
+bundle=peerhatch-linux-arm64-musl
+tar -xzf "$bundle.tar.gz" "$bundle/bin/peerhatch" "$bundle/bin/peerhatch-gateway"
+"$bundle/bin/peerhatch" gateway start
+"$bundle/bin/peerhatch" pair code
+```
+
+Keep the gateway account’s configuration directory on persistent storage so that its identity and pairings survive a reboot.
 
 ## Desktop and per-user gateway
 
@@ -86,7 +100,7 @@ sudo -u peerhatch /usr/local/bin/peerhatch pair code
 journalctl -u peerhatch-gateway -f
 ```
 
-From a source checkout, build `cargo build --locked --release` and run `sudo ./packaging/linux/install-systemd.sh`. The installer registers `peerhatch-gateway.service` under a dedicated `peerhatch` account. It uses `/etc/peerhatch` for the key and configuration, `/var/lib/peerhatch` as the home directory, and `/run/peerhatch/gateway.sock` for local management. Add authorized operators to the `peerhatch` group and sign in again. To disable boot startup and stop the service, run `sudo systemctl disable --now peerhatch-gateway`.
+From a source checkout, build `cargo --config packaging/distribution.toml build --locked --profile distribution` and run `sudo ./packaging/linux/install-systemd.sh ./target/distribution`. The installer registers `peerhatch-gateway.service` under a dedicated `peerhatch` account. It uses `/etc/peerhatch` for the key and configuration, `/var/lib/peerhatch` as the home directory, and `/run/peerhatch/gateway.sock` for local management. Add authorized operators to the `peerhatch` group and sign in again. To disable boot startup and stop the service, run `sudo systemctl disable --now peerhatch-gateway`.
 
 You can also run a separate foreground node from the archive:
 

@@ -1,12 +1,14 @@
 FROM rust:1.98.1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY packaging/distribution.toml packaging/distribution.toml
 COPY compat/ compat/
 COPY crates/ crates/
 COPY apps/ apps/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --locked --release -p peerhatch-gateway -p peerhatch-cli \
-    && install -D -s -t /out target/release/peerhatch-gateway target/release/peerhatch
+    cargo --config packaging/distribution.toml build --locked --profile distribution \
+        -p peerhatch-gateway -p peerhatch-cli \
+    && install -D -t /out target/distribution/peerhatch-gateway target/distribution/peerhatch
 
 FROM debian:bookworm-slim
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

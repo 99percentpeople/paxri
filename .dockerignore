@@ -8,6 +8,7 @@
 !compat/
 !compat/**
 !packaging/
+!packaging/distribution.toml
 !packaging/linux/
 !packaging/linux/start-gateway
 **/target/

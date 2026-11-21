@@ -16,12 +16,13 @@ def main():
     # With an explicit target, these flags apply to the Windows binaries only.
     env = dict(os.environ, CARGO_ENCODED_RUSTFLAGS="-C\x1ftarget-feature=+crt-static")
     subprocess.run(
-        ["cargo", "build", "--locked", "--release", "--target", TARGET,
+        ["cargo", "--config", "packaging/distribution.toml", "build", "--locked",
+         "--profile", "distribution", "--target", TARGET,
          "--target-dir", str(build_dir), "-p", "peerhatch-gateway", "-p", "peerhatch-cli",
          "-p", "peerhatch-gui"],
         cwd=ROOT, env=env, check=True,
     )
-    binaries = build_dir / TARGET / "release"
+    binaries = build_dir / TARGET / "distribution"
     for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
         subprocess.run([str(binaries / name), "--version"], check=True)
     dist = ROOT / "target" / "dist"
@@ -31,7 +32,7 @@ def main():
     temp = tempfile.NamedTemporaryFile(dir=dist, suffix=".zip", delete=False)
     staged = Path(temp.name)
     try:
-        with temp, zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        with temp, zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
             for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
                 bundle.write(binaries / name, name)
             bundle.write(ROOT / "README.md", "README.md")

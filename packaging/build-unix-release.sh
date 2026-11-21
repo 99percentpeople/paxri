@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-case "$(uname -s)/$(uname -m)" in
-  Linux/x86_64) platform=linux-amd64 ;;
-  Linux/aarch64) platform=linux-arm64 ;;
-  Darwin/x86_64) platform=macos-amd64 ;;
-  Darwin/arm64) platform=macos-arm64 ;;
-  *) echo 'Unsupported release platform' >&2; exit 1 ;;
+host=$(rustc -vV | sed -n 's/^host: //p')
+target=${CARGO_BUILD_TARGET:-$host}
+case "$target" in
+  x86_64-unknown-linux-gnu) platform=linux-amd64-glibc ;;
+  aarch64-unknown-linux-gnu) platform=linux-arm64-glibc ;;
+  aarch64-unknown-linux-musl) platform=linux-arm64-musl ;;
+  x86_64-apple-darwin) platform=macos-amd64 ;;
+  aarch64-apple-darwin) platform=macos-arm64 ;;
+  *) echo "Unsupported distribution target: $target" >&2; exit 1 ;;
 esac
-cargo build --locked --release -p peerhatch-cli -p peerhatch-gateway -p peerhatch-gui
-bins="${CARGO_TARGET_DIR:-target}/release"
-"$bins/peerhatch" --version
-"$bins/peerhatch-gateway" --help >/dev/null
-"$bins/peerhatch-gui" --help >/dev/null
+cargo --config packaging/distribution.toml build --locked --profile distribution \
+    -p peerhatch-cli -p peerhatch-gateway -p peerhatch-gui
+bins="${CARGO_TARGET_DIR:-target}${CARGO_BUILD_TARGET:+/$target}/distribution"
+if [[ $platform == linux-arm64-musl ]]; then
+    for bin in peerhatch peerhatch-gateway peerhatch-gui; do
+        elf=$(LC_ALL=C readelf -lW "$bins/$bin")
+        if [[ $elf != *'/lib/ld-musl-aarch64.so.1]'* ]]; then
+            echo "Expected the ARM64 musl loader in $bin" >&2
+            exit 1
+        fi
+    done
+fi
+if [[ $target == "$host" ]]; then
+    "$bins/peerhatch" --version
+    "$bins/peerhatch-gateway" --help >/dev/null
+    "$bins/peerhatch-gui" --help >/dev/null
+fi
 mkdir -p target/dist
-work=$(mktemp -d)
+work=$(mktemp -d target/dist/.native.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
 name=peerhatch-$platform
 root=$work/$name
@@ -50,4 +65,5 @@ else
     cp packaging/linux/{start-gateway,install-systemd.sh,peerhatch-gateway.service} "$root/"
 fi
 cp README.md docs/installation.md "$root/"
-tar -czf "target/dist/$name.tar.gz" -C "$work" "$name"
+tar -cf - -C "$work" "$name" | gzip -9n > "$work/$name.tar.gz"
+mv "$work/$name.tar.gz" "target/dist/$name.tar.gz"

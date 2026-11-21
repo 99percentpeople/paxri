@@ -17,6 +17,8 @@ docker compose exec gateway peerhatch pair code
 
 Compose pulls `ghcr.io/99percentpeople/peerhatch:dev`. You can also pin an image by commit or load it offline. [Installation](docs/installation.md)
 
+Linux archives come in glibc builds for AMD64 and ARM64 and a musl build for ARM64. All three include the CLI, gateway, and GUI. On an ARM64 router you can extract just the CLI and gateway from the musl archive. [Headless installation](docs/installation.md#headless-arm64-musl-installation)
+
 ## Pair two computers
 
 Open **PeerHatch** on macOS or run `peerhatch-gui` on either desktop. **Home** shows the local pairing code and accepts a code from another device. Enter the first computer’s code on the second, then approve the request on the first. Share the code with the person who controls the other device. Approval grants shell and file access as the gateway account. TCP targets and listeners have separate permissions.
