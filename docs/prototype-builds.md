@@ -4,7 +4,9 @@ Each build is identified by its Git commit. Cargo uses `0.0.0-dev` as the worksp
 
 ## Run the workflow
 
-The regular CI workflow checks pushes to `main` and pull requests. When you want packages to share, open **Actions → Prototype builds → Run workflow**, choose a branch, and start the build. From a checkout you can run the same workflow with the GitHub CLI. [Prototype builds](https://github.com/99percentpeople/peerhatch/actions/workflows/prototype.yml)
+Every push to `main` starts the prototype build. Once all native packages and Docker images are ready, the workflow updates the `prototype` tag and its prerelease with the archives, checksums, and Compose files. The release notes link to the commit and build run. [Rolling prototype](https://github.com/99percentpeople/peerhatch/releases/tag/prototype)
+
+You can also start **Prototype builds** manually. Builds from other branches are available as Actions artifacts. [Prototype builds](https://github.com/99percentpeople/peerhatch/actions/workflows/prototype.yml)
 
 ```sh
 gh workflow run prototype.yml --ref main

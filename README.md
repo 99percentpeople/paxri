@@ -6,7 +6,7 @@ The gateway establishes an authenticated iroh connection to each peer. Terminal 
 
 ## Try the prototype
 
-Sign in to GitHub, open a successful **Prototype builds** run on `main`, and download the artifact for your OS from the **Artifacts** section. Builds are available for Windows x64, Linux AMD64 and ARM64, and macOS Intel and Apple Silicon. Extract the archive inside the artifact and keep the three programs together. The CLI is `bin/peerhatch` on Unix and `peerhatch.exe` on Windows. [Download a prototype build](https://github.com/99percentpeople/peerhatch/actions/workflows/prototype.yml)
+Download the archive for your OS from the rolling **PeerHatch prototype** prerelease. Each successful `main` build updates the same page. Builds are available for Windows x64, Linux AMD64 and ARM64, and macOS Intel and Apple Silicon. Extract the archive and keep the three programs together. The CLI is `bin/peerhatch` on Unix and `peerhatch.exe` on Windows. [Download the prototype](https://github.com/99percentpeople/peerhatch/releases/tag/prototype)
 
 For a headless Linux node, run these commands in the directory containing [compose.yaml](compose.yaml).
 

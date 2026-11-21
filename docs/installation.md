@@ -1,6 +1,6 @@
 # Install the PeerHatch prototype
 
-Sign in to GitHub, open a successful **Prototype builds** run on `main`, and download your system's artifact. Extract the artifact to get the archive listed below. For checksums, extract `peerhatch-build-info` from the same run into the same directory. On Linux run `sha256sum -c --ignore-missing SHA256SUMS`. On Windows compare `Get-FileHash -Algorithm SHA256 FILE` with the entry for that file in `SHA256SUMS`. [Prototype builds](https://github.com/99percentpeople/peerhatch/actions/workflows/prototype.yml)
+Download your system's archive and `SHA256SUMS` from the **PeerHatch prototype** prerelease. The release notes identify the source commit. Save both files in the same directory. On Linux run `sha256sum -c --ignore-missing SHA256SUMS`. On Windows compare `Get-FileHash -Algorithm SHA256 FILE` with the entry for that file in `SHA256SUMS`. [Prototype downloads](https://github.com/99percentpeople/peerhatch/releases/tag/prototype)
 
 | System | Archive |
 | --- | --- |
