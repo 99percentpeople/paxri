@@ -4,7 +4,6 @@ use super::{
 use crate::{
     Dashboard, GatewayRequest, Workspace,
     components::{Button, ButtonVariant::Primary, Icon, Ui, single_line, tooltip},
-    peer_check::PeerCheck,
 };
 use gpui::{prelude::*, *};
 use peerhatch_control::{Command, Status};
@@ -97,26 +96,14 @@ impl DeviceSettings {
 }
 
 impl DeviceSettings {
-    fn connection(&self, status: &Status, ui: Ui, cx: &Context<Self>) -> Div {
+    fn connection(&self, status: &Status, ui: Ui) -> Div {
         let paths = status.connections_for(&self.peer);
         let mut card = ui.section("Connection").child(ui.separator());
         let Some(paths) = paths else {
             return card.child(ui.muted("Connection status unavailable."));
         };
         if paths.is_empty() {
-            let check = status
-                .peers
-                .get(self.peer.as_ref())
-                .and_then(|id| self.dashboard.read(cx).peer_checks.get(id));
-            return match check {
-                Some(PeerCheck::Pending) => card.child(ui.muted("Checking connection…")),
-                Some(PeerCheck::Finished {
-                    error: Some(error), ..
-                }) => card
-                    .child(ui.muted("Could not reach this device. Retrying automatically."))
-                    .child(ui.muted(error.clone()).text_xs()),
-                _ => card.child(ui.muted("No active connection.")),
-            };
+            return card.child(ui.muted(status.peer_state(&self.peer)));
         }
         for (i, path) in paths.iter().enumerate() {
             let streams = path.stream_labels().collect::<Vec<_>>().join(" · ");
@@ -205,8 +192,6 @@ impl DeviceSettings {
 impl Render for DeviceSettings {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::new(w, cx);
-        self.dashboard
-            .update(cx, |d, cx| d.check_visible_peer(&self.peer, cx));
         let status = self.dashboard.read(cx).status.as_ref();
         let identity = status.and_then(|s| {
             let name = self.peer.as_ref();
@@ -225,7 +210,9 @@ impl Render for DeviceSettings {
             self.platform(cx),
             identity,
         )
-        .when(paired, |r| r.child(self.new_session(ui)));
+        .when(status.is_some_and(|s| s.peer_online(&self.peer)), |r| {
+            r.child(self.new_session(ui))
+        });
         let page = overview()
             .child(header)
             .when_some(self.action_error.clone(), |p, e| p.child(ui.alert(e)));
@@ -236,7 +223,7 @@ impl Render for DeviceSettings {
             return page.child(ui.muted("This device is no longer paired."));
         }
         page.child(overview_columns(
-            self.connection(status, ui, cx),
+            self.connection(status, ui),
             self.sessions(ui, cx),
         ))
         .child(self.forwarding(status, ui, cx))

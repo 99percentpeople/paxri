@@ -13,6 +13,17 @@ try {
     $service = New-Object -ComObject Schedule.Service
     $service.Connect()
     $folder = $service.GetFolder('\')
+    # Keep a moved/renamed installation on the same per-profile registration.
+    $legacy = $name.Replace('org.peerhatch.', 'org.p2ptunnel.')
+    try { $oldTask = $folder.GetTask($legacy) }
+    catch { if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }
+    if ($oldTask) {
+        try { $currentTask = $folder.GetTask($name) }
+        catch { if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }
+        if ($currentTask) { throw 'Both current and legacy startup tasks exist. Resolve the duplicate registrations in Task Scheduler.' }
+        $name = $legacy
+        $helper = Join-Path $programs ("P2P Tunnel Startup " + $name + ".exe")
+    }
     if ($mode -eq 'system' -or $mode -eq 'login') {
         $task = $service.NewTask(0)
         $task.RegistrationInfo.Description = 'Start the PeerHatch gateway for this account.'
@@ -78,3 +89,4 @@ try {
     if ($draft) { [IO.File]::Delete($draft) }
     if ($backup) { [IO.File]::Delete($backup) }
 }
+exit 0

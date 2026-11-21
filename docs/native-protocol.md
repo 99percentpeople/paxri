@@ -16,6 +16,7 @@ Each computer owns one version 1 TOML file. For a working pair of service and li
 | `gui.terminal.scheme` | `follow-app` (default), `light`, `dark`, or `midnight` |
 | `gui.terminal.cursor_shape`, `blink_cursor` | `underline` (default), `bar`, or `block`. Blinking defaults to false |
 | `native.relay_url` | Optional HTTP(S) relay. Use HTTPS for a public deployment |
+| `native.upnp` | Allow UPnP discovery and UDP mappings on the default router (default `true`). PCP and NAT-PMP remain enabled |
 | `native.lan_port_mapping` | Opt in to physical IPv4 interface selection and NAT-PMP lease renewal |
 | `peers.<alias>.endpoint_id`, `ticket` | 64 hex digits identifying the device and its optional addressing ticket |
 | `peers.<alias>.platform` | Reported OS, including `windows`, `linux`, `macos`, or `web`. Unrecognized values display as unknown |
@@ -35,6 +36,8 @@ Pairing uses the separate ALPN `p2p-tunnel/pair/1`. The code `p2p1.<endpoint tic
 The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases and permissions. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. New peers can use PTY and files and begin with empty TCP allowlists.
 
 On an established connection, each peer can open a unidirectional stream to announce updated addressing tickets. Version byte `1` precedes the sequence of UTF-8 tickets, each with a big-endian `u16` length of at most 8192 bytes. The receiver verifies the device ID before updating its cache.
+
+A gateway announces its availability to paired peers by establishing the shared session when it starts, learns a new pairing or address, or regains local network or relay connectivity. Each side observes admission and closure on the same connection. A lost connection triggers a reconnect attempt. An offline peer can announce itself when it comes back. Announcements use at most four concurrent dials and open no terminal or application stream.
 
 ## Shared connection and stream types
 

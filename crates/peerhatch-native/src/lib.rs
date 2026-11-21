@@ -53,6 +53,10 @@ async fn public_relays(config: &Native, no_relay: bool) -> Option<relay::PublicR
     Some(relay::PublicRelays::rank().await)
 }
 
+fn mapping_protocols(upnp: bool) -> portmapper::Config {
+    portmapper::Config { enable_upnp: upnp, ..Default::default() }
+}
+
 fn builder(
     key: SecretKey,
     config: &Native,
@@ -75,6 +79,7 @@ fn builder(
         None => builder,
     };
     builder
+        .portmapper_config(iroh::endpoint::PortmapperConfig::Custom(mapping_protocols(config.upnp)))
         .ca_tls_config(iroh::tls::CaTlsConfig::system())
         .secret_key(key)
 }

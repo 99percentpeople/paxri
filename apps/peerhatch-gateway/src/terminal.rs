@@ -11,19 +11,18 @@ use tokio::{
     time::timeout,
 };
 use peerhatch_config::Config;
-use peerhatch_core::{PeerSession, StreamKind, Transport};
+use peerhatch_core::{PeerSession, StreamKind};
 use peerhatch_terminal::{
     self as wire, Frame, Size,
     exec::Invocation,
     pty::{CommandBuilder, Output, Session},
 };
 
-pub async fn open_pty<T: Transport>(
-    transport: &T,
-    peer: &str,
+pub async fn open_pty<S: PeerSession>(
+    session: S,
     size: Size,
     invocation: Option<Invocation>,
-) -> Result<<T::Session as PeerSession>::Stream> {
+) -> Result<S::Stream> {
     size.validate()?;
     let kind = if invocation.is_some() {
         StreamKind::Command
@@ -31,7 +30,7 @@ pub async fn open_pty<T: Transport>(
         StreamKind::Terminal
     };
     timeout(STREAM_TIMEOUT, async {
-        let mut stream = transport.open(peer, kind).await?;
+        let mut stream = session.open(kind).await?;
         size.write(&mut stream).await?;
         if let Some(command) = &invocation {
             command.write(&mut stream).await?;

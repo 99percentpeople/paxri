@@ -268,6 +268,7 @@ mod tests {
         let mut layout = DockState {
             settings: DockSettings::default(),
             resizing: None,
+            reveal_after_placement: None,
             scroll: Default::default(),
             zone: rect(0., 0., 370., 40.),
             tabs: vec![("one", rect(4., 4., 96., 31.))],
@@ -293,6 +294,7 @@ mod tests {
         let mut dock = DockState {
             settings: DockSettings::default(),
             resizing: None,
+            reveal_after_placement: None,
             scroll: Default::default(),
             zone: rect(0., 0., 400., 40.),
             tabs: vec![("one", rect(4., 4., 96., 32.))],
@@ -331,6 +333,7 @@ mod tests {
         let mut layout = DockState {
             settings: DockSettings::default(),
             resizing: None,
+            reveal_after_placement: None,
             scroll: Default::default(),
             zone: Bounds::new(point(px(0.), px(0.)), size(px(500.), px(40.))),
             tabs: vec![
@@ -388,6 +391,7 @@ mod tests {
         let layout = DockState {
             settings: DockSettings::default().with_placement(DockPlacement::Left),
             resizing: None,
+            reveal_after_placement: None,
             scroll: Default::default(),
             zone: Bounds::new(point(px(0.), px(40.)), size(px(142.), px(480.))),
             tabs: vec![("one", home), ("two", slot(79.))],
@@ -441,6 +445,7 @@ mod tests {
         let mut layout = DockState {
             settings: DockSettings::default(),
             resizing: None,
+            reveal_after_placement: None,
             scroll: Default::default(),
             zone: rect(0., 152.),
             tabs: vec![("one", rect(4., 96.)), ("two", rect(104., 140.))],

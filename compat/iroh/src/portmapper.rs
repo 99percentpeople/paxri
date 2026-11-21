@@ -23,6 +23,9 @@ pub enum PortmapperConfig {
     /// This is the default.
     #[non_exhaustive]
     Enabled {},
+    /// Enable only the protocols selected by the application.
+    #[cfg(all(not(wasm_browser), feature = "portmapper"))]
+    Custom(::portmapper::Config),
     /// Disable portmapping.
     ///
     /// Skips the UPnP/PCP/NAT-PMP gateway probing. Use this to avoid the
@@ -42,6 +45,8 @@ pub(crate) fn create_client(config: &PortmapperConfig) -> Client {
     match config {
         #[cfg(all(not(wasm_browser), feature = "portmapper"))]
         PortmapperConfig::Enabled {} => Client::Enabled(::portmapper::Client::default()),
+        #[cfg(all(not(wasm_browser), feature = "portmapper"))]
+        PortmapperConfig::Custom(options) => Client::Enabled(::portmapper::Client::new(options.clone())),
         _ => {
             let (tx, rx) = watch::channel(None);
             Client::Disabled { _tx: tx, rx }

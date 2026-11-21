@@ -44,6 +44,7 @@ pub struct Terminal {
     emulator: Emulator,
     session: Option<Session>,
     error: Option<String>,
+    peer_online: bool,
     marked: String,
     viewport: Bounds<Pixels>,
     selecting: bool,
@@ -89,6 +90,7 @@ impl Terminal {
     pub(super) fn open(
         peer: &str,
         title: TabTitle,
+        dashboard: &Entity<crate::Dashboard>,
         runtime: &tokio::runtime::Handle,
         ipc: Option<&Path>,
         window: &Window,
@@ -99,7 +101,15 @@ impl Terminal {
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
         let (session, events) = Session::start(peer, ipc, runtime);
+        let peer = peer.to_owned();
         cx.new(|cx| {
+            cx.observe(dashboard, move |view: &mut Self, dashboard, cx| {
+                let online = dashboard.read(cx).peer_online(&peer);
+                if view.peer_online != online {
+                    view.peer_online = online;
+                    if !view.is_running() { cx.notify(); }
+                }
+            }).detach();
             let focus = cx.focus_handle();
             cx.spawn(async move |this, cx| {
                 while let Ok(event) = events.recv().await {
@@ -140,6 +150,7 @@ impl Terminal {
                 emulator,
                 session: Some(session),
                 error: None,
+                peer_online: true,
                 marked: String::new(),
                 viewport: Bounds::default(),
                 selecting: false,
@@ -228,6 +239,11 @@ impl Terminal {
         if focused != self.focused {
             self.focused = focused;
             if !focused {
+                #[cfg(windows)]
+                if !self.marked.is_empty() {
+                    crate::ime::blur(window);
+                }
+                self.marked.clear();
                 self.selecting = false;
                 self.hidden_pointer_at = None;
                 self.release_pointer();
@@ -247,6 +263,7 @@ impl Terminal {
             .is_none_or(|(old, _)| *old != id)
         {
             self.hidden_pointer_at = None;
+            self.marked.clear();
             self.focus_observers = Some((
                 id,
                 [
@@ -302,7 +319,7 @@ impl Terminal {
         } else {
             key.modifiers.control && key.modifiers.shift
         };
-        if !self.is_running() && key.key == "enter" && !key.modifiers.modified() {
+        if self.peer_online && !self.is_running() && key.key == "enter" && !key.modifiers.modified() {
             window.dispatch_action(Box::new(super::workspace::ReconnectTerminal), cx);
         } else if shortcut && key.key.eq_ignore_ascii_case("v") {
             self.paste(window, cx);
@@ -425,7 +442,7 @@ impl Render for Terminal {
                         .bg(rgb(ui.colors.canvas.background))
                         .text_color(rgb(ui.colors.canvas.foreground))
                         .child(div().flex_1().text_sm().child(error))
-                        .when(!self.is_running(), |bar| {
+                        .when(self.peer_online && !self.is_running(), |bar| {
                             bar.child(ui.button(Primary, "reconnect", "Reconnect").on_click(
                                 |_, w, cx| {
                                     w.dispatch_action(
@@ -496,6 +513,9 @@ impl EntityInputHandler for Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !window.is_window_active() || !self.focus.is_focused(window) {
+            return;
+        }
         self.marked.clear();
         if !text.is_empty() {
             self.write(text.as_bytes().to_vec(), window);
@@ -510,6 +530,9 @@ impl EntityInputHandler for Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !window.is_window_active() || !self.focus.is_focused(window) {
+            return;
+        }
         if !text.is_empty() {
             self.hidden_pointer_at = self.typing_pointer_position(window);
         }

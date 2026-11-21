@@ -274,16 +274,25 @@ impl Workspace {
         if !self.tabs.contains(&page) || page.shell_exited(cx) {
             return;
         }
+        #[cfg(windows)]
+        if page == Page::Settings {
+            self.dashboard.update(cx, |d, cx| d.inspect_startup(cx));
+        }
         self.active = page;
         self.dismiss_menus(cx);
         cx.notify();
     }
 
     fn focus_content(&self, w: &mut Window, cx: &App) {
-        match &self.active {
-            Page::Terminal { view, .. } => view.read(cx).focus_handle(cx).focus(w),
-            _ => self.tab_focus.focus(w),
+        let focus = match &self.active {
+            Page::Terminal { view, .. } => view.read(cx).focus_handle(cx),
+            _ => self.tab_focus.clone(),
+        };
+        #[cfg(windows)]
+        if !focus.is_focused(w) {
+            crate::ime::blur(w);
         }
+        focus.focus(w);
     }
 
     fn focus_tab(&mut self, page: Page, w: &mut Window, cx: &mut Context<Self>) {
@@ -314,6 +323,7 @@ impl Workspace {
         if page == Page::Settings {
             self.dashboard.update(cx, |d, _| {
                 d.name_field = None;
+                d.relay_field = None;
                 d.settings_scroll = ScrollHandle::new();
             });
         }
@@ -410,6 +420,7 @@ impl Workspace {
         if *page == Page::Settings {
             self.dashboard.update(cx, |d, cx| {
                 d.name_field = None;
+                d.relay_field = None;
                 cx.notify()
             });
         }

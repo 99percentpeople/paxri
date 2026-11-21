@@ -29,6 +29,7 @@ const DEADLINE: Duration = Duration::from_secs(5);
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    WatchPeerConnections,
     CheckPeer {
         peer: String,
     },
@@ -64,6 +65,9 @@ pub enum Command {
     },
     SetDeviceName {
         name: Option<String>,
+    },
+    SetNative {
+        change: peerhatch_config::NativeChange,
     },
     SetGui {
         change: GuiChange,
@@ -160,6 +164,17 @@ pub struct PairingPeer {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Status {
     #[serde(default)]
+    pub peer_presence: bool,
+    /// Absent on gateways that predate editable network settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<peerhatch_config::Native>,
+    #[serde(default)]
+    pub network_restart_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipc_path: Option<PathBuf>,
+    #[serde(default)]
     pub user_managed: bool,
     #[serde(default)]
     pub startup: peerhatch_config::startup::Startup,
@@ -213,6 +228,19 @@ impl Status {
 
     pub fn connections_for(&self, peer: &str) -> Option<&[PeerConnection]> {
         self.peer_connections.as_ref()?.get(peer).map(Vec::as_slice)
+    }
+
+    pub fn peer_state(&self, peer: &str) -> &'static str {
+        match self.connections_for(peer) {
+            None => "Unavailable",
+            Some([]) if self.peer_presence => "Offline",
+            Some([]) => "Disconnected",
+            Some(_) => "Connected",
+        }
+    }
+
+    pub fn peer_online(&self, peer: &str) -> bool {
+        self.connections_for(peer).is_some_and(|paths| !paths.is_empty())
     }
 
     pub fn peer_platform(&self, peer: &str) -> DevicePlatform {
@@ -428,13 +456,54 @@ async fn begin<T: DeserializeOwned>(
     .context("gateway request timed out")?
 }
 
+/// The gateway sends a byte on subscription and each time shared peer connections change.
+pub async fn watch_peer_connections(path: &Path) -> Result<Stream> {
+    let (stream, ()) = begin(path, Command::WatchPeerConnections, DEADLINE).await?;
+    Ok(stream)
+}
+
 pub async fn request(path: &Path, command: Command) -> Result<Status> {
     let deadline = if matches!(command, Command::CheckPeer { .. }) {
         Duration::from_secs(30)
     } else {
         DEADLINE
     };
-    Ok(begin(path, command, deadline).await?.1)
+    let (_stream, mut status) = begin::<Status>(path, command, deadline).await?;
+    status.ipc_path = Some(path.to_owned());
+    // Older gateways did not report their image. Ask the OS about this pipe's server.
+    #[cfg(windows)]
+    if status.executable.is_none() {
+        status.executable = _stream
+            .peer_creds()
+            .ok()
+            .and_then(|p| process_image(p.pid()?));
+    }
+    Ok(status)
+}
+
+#[cfg(windows)]
+fn process_image(pid: u32) -> Option<PathBuf> {
+    use std::{
+        ffi::OsString,
+        os::windows::{
+            ffi::OsStringExt,
+            io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        },
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut path = vec![0u16; 32768];
+    let mut len = path.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(process.as_raw_handle(), 0, path.as_mut_ptr(), &mut len)
+    };
+    (ok != 0).then(|| OsString::from_wide(&path[..len as usize]).into())
 }
 
 /// The gateway acknowledges after closing its listeners and transport.

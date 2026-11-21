@@ -130,6 +130,7 @@ def check_native_terminal(root, keys, call, start, cli, ipc, wait):
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: s["pairing"]["message"] == "Paired with host.")
     assert not json.loads(call("host", "status", "--json"))["port_access"]
+    wait("host", lambda s: s["peer_connections"].get("client"))
     assert call("host", "exec", keys["client"][:8].upper(), "--", "printf", "paired") == "paired"
     # Launch the foreground program directly, including an empty argument and a literal shell metacharacter.
     screen = r"""
@@ -271,10 +272,11 @@ def check_pairing(root, keys, call, start, target_port, wait):
     wait("client", lambda s: s["peers"].get("Studio-2") == keys["host"])
     assert status("host")["peers"] == {"Laptop": keys["client"]}
     assert status("host")["peer_platforms"] == {"Laptop": platform}
-    # First use can race in both directions; subsequent checks must use the same session.
-    assert json.loads(call("host", "status", "Laptop", "--json"))["connections"] == []
+    # Both gateways learn about the shared session before any explicit check.
     directions = [("client", "Studio-2"), ("host", "Laptop")]
-    paired_at = {node: status(node)["peer_last_status_change_ms"][peer] for node, peer in directions}
+    for node, peer in directions:
+        wait(node, lambda s: len(s["peer_connections"].get(peer, [])) == 1)
+    announced_at = {node: status(node)["peer_last_status_change_ms"][peer] for node, peer in directions}
     assert "Studio" not in status("client")["peer_last_status_change_ms"]  # An existing idle device has no history.
     barrier = threading.Barrier(2)
 
@@ -287,7 +289,7 @@ def check_pairing(root, keys, call, start, target_port, wait):
         checked = list(workers.map(check_from, directions))
     assert [r["device_id"] for r in checked] == [keys["host"], keys["client"]]
     connected_at = {node: status(node)["peer_last_status_change_ms"][peer] for node, peer in directions}
-    assert all(connected_at[node] > paired_at[node] for node, _ in directions)
+    assert connected_at == announced_at
     listing = call("client", "status")
     devices = listing.split("Paired devices (2)\n", 1)[1].split("\nConnections (", 1)[0]
     assert [name for name in devices.split() if name in {"Studio-2", "Studio"}] == ["Studio-2", "Studio"], devices
@@ -428,6 +430,14 @@ def check_lifecycle(client):
                 assert all("Gateway running" in start.result() for start in starts)
             initial = json.loads(call("status", "--json"))
             assert initial["user_managed"] and initial["startup"] == "gui"
+            assert initial["ipc_path"] == ipc
+            assert Path(initial["executable"]).resolve().parent == Path(client).resolve().parent
+            # A second installation can recover this address by the profile alone.
+            env = dict(os.environ)
+            env.pop("PEERHATCH_IPC", None)
+            reused = subprocess.check_output([client, "gateway", "start", "--config", config],
+                                             env=env, stderr=subprocess.PIPE, timeout=45, encoding="utf-8")
+            assert ipc in reused and "Running executable" in reused
             manage("startup", "manual")
             manage("restart")
             again = json.loads(call("status", "--json"))
@@ -435,6 +445,13 @@ def check_lifecycle(client):
             assert again["pairing"]["code"] == initial["pairing"]["code"]
             assert "Gateway stopped" in manage("stop")
             assert "Gateway stopped" in manage("status")
+            if os.name == "nt":
+                try:
+                    manage("startup", "login")
+                    offline = manage("status")
+                    assert "Gateway stopped" in offline and "Windows task [login, enabled]" in offline, offline
+                finally:
+                    manage("startup", "manual")
         finally:
             manage("stop")
     print("Background gateway lifecycle passed.")

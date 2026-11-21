@@ -102,10 +102,12 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         {
             return;
         }
-        let subscription = cx.on_blur(&self.focus, window, |field, _, cx| {
+        let subscription = cx.on_blur(&self.focus, window, |field, _window, cx| {
             field.drag = None;
-            // The visible IME preedit is already in the buffer.
-            if field.buffer.marked.take().is_some() {
+            if field.buffer.cancel_composition() {
+                #[cfg(windows)]
+                crate::ime::blur(_window);
+                field.after_edit();
                 cx.notify();
             }
         });
@@ -132,14 +134,17 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         true
     }
 
-    fn replace(&mut self, range: Option<Range<usize>>, value: &str) -> Range<usize> {
-        let added = self.buffer.replace(range, value);
+    fn replace(&mut self, range: Option<Range<usize>>, value: &str) {
+        self.buffer.replace(range, value);
+        self.after_edit();
+    }
+
+    fn after_edit(&mut self) {
         self.drag = None;
         self.layout = None;
         self.row_hint = None;
         self.preferred_x = None;
         self.reveal_cursor = true;
-        added
     }
 
     fn key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -526,7 +531,8 @@ impl<const MULTILINE: bool> EntityInputHandler for TextInput<MULTILINE> {
             .map(|r| self.buffer.utf16(r.start)..self.buffer.utf16(r.end))
     }
     fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_focused(window) && self.buffer.marked.take().is_some() {
+        if self.is_focused(window) && self.buffer.marked.is_some() {
+            self.buffer.unmark();
             cx.notify();
         }
     }
@@ -538,7 +544,11 @@ impl<const MULTILINE: bool> EntityInputHandler for TextInput<MULTILINE> {
         cx: &mut Context<Self>,
     ) {
         if self.is_focused(window) {
-            self.replace(r, text);
+            if text.is_empty() && r.is_none() && self.buffer.cancel_composition() {
+                self.after_edit();
+            } else {
+                self.replace(r, text);
+            }
             cx.notify();
         }
     }
@@ -551,8 +561,8 @@ impl<const MULTILINE: bool> EntityInputHandler for TextInput<MULTILINE> {
         cx: &mut Context<Self>,
     ) {
         if self.is_focused(window) {
-            let added = self.replace(r, text);
-            self.buffer.mark(added, text, selection);
+            self.buffer.compose(r, text, selection);
+            self.after_edit();
             cx.notify();
         }
     }

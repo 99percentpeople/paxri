@@ -62,7 +62,7 @@ PLIST
     codesign --verify --deep --strict "$root/PeerHatch.app"
 else
     for bin in peerhatch peerhatch-gateway peerhatch-gui; do install -m 0755 "$bins/$bin" "$root/bin/$bin"; done
-    cp packaging/linux/{start-gateway,install-systemd.sh,peerhatch-gateway.service} "$root/"
+    cp packaging/linux/{install-systemd.sh,peerhatch-gateway.service} "$root/"
 fi
 cp README.md docs/installation.md "$root/"
 tar -cf - -C "$work" "$name" | gzip -9n > "$work/$name.tar.gz"

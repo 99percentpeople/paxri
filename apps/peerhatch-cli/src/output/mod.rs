@@ -5,14 +5,6 @@ use std::collections::BTreeMap;
 use table::Report;
 use peerhatch_control::{Direction, ForwardStatus, PairingStatus, PeerConnection, PortAccess, Status};
 
-fn peer_state(paths: Option<&[PeerConnection]>) -> &'static str {
-    match paths {
-        None => "Unavailable",
-        Some([]) => "Idle",
-        Some(_) => "Connected",
-    }
-}
-
 fn connection_row(link: &PeerConnection) -> [String; 4] {
     let path = link.path.label();
     let path = match link.protocol.as_str() {
@@ -61,7 +53,7 @@ pub(super) fn status(status: &Status) -> String {
         peers.push([
             name.clone(),
             status.peer_platform(name).label().into(),
-            peer_state(paths).into(),
+            status.peer_state(name).into(),
             short_ids
                 .remove(name.as_str())
                 .unwrap_or_else(|| "-".into()),
@@ -104,7 +96,7 @@ pub(super) fn peer(status: &Status, name: &str, id: &str) -> String {
         ("Name", name),
         ("System", status.peer_platform(name).label()),
         ("Device ID", id),
-        ("State", peer_state(paths)),
+        ("State", status.peer_state(name)),
     ]);
     if let Some(paths) = paths.filter(|p| !p.is_empty()) {
         report.table(

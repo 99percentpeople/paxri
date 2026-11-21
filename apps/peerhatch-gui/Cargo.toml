@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 gethostname = "1"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process"] }
 peerhatch-cli = { path = "../peerhatch-cli" }
 peerhatch-control = { path = "../../crates/peerhatch-control" }
 peerhatch-config = { path = "../../crates/peerhatch-config" }
@@ -30,7 +30,7 @@ gpui = "0.2.2"
 [target.'cfg(windows)'.dependencies]
 # The app embeds its own manifest for both desktop and command-line launches.
 gpui = { version = "0.2.2", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 async-io = "2"

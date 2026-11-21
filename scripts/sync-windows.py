@@ -180,17 +180,20 @@ def dev_command(host, action):
 
 
 def update_pair(host, version):
-    print("Building the Linux and Windows development binaries.", flush=True)
+    windows_only = os.getenv("PEERHATCH_DEV_BUILD_HOST") == "windows"
+    nodes = (host,) if windows_only else (host, None)
+    print("Building Windows development binaries." if windows_only else
+          "Building the Linux and Windows development binaries.", flush=True)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        jobs = [pool.submit(dev_command, node, "build") for node in (None, host)]
+        jobs = [pool.submit(dev_command, node, "build") for node in nodes]
         for job in jobs:
             job.result()
     if version != build_inputs({name: digest(data) for name, data in snapshot().items()}):
         print("Sources changed during the build. Updating to the newer revision.", flush=True)
         return False
-    dev_command(host, "apply")
-    dev_command(None, "apply")
-    print("Both development checkouts are up to date.", flush=True)
+    for node in nodes:
+        dev_command(node, "apply")
+    print("Development binaries are up to date.", flush=True)
     return True
 
 

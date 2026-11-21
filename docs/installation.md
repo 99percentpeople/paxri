@@ -46,7 +46,9 @@ peerhatch gateway startup gui
 | `login` | Start when the current user signs in |
 | `system` | Start at boot with the configured user identity and OS registration privileges |
 
-Windows supports the ordinary-user installation without an administrator account. Boot-time registration requires elevation, uses Task Scheduler and stores the startup helper under Program Files. A Windows S4U task has limited access to user-encrypted files and authenticated network shares. Re-register startup if you move the binaries. On Linux the app uses desktop autostart or systemd, and on macOS it uses LaunchAgents or LaunchDaemons. A gateway running as root or an elevated administrator rejects remote PTY and file operations.
+In **Settings → Network**, choose whether to allow UPnP, try a physical LAN router, or use a custom relay. Clearing the relay URL restores automatic selection. Network edits are saved immediately and applied at the next gateway start. Restarting disconnects active sessions. **Open config file** opens the selected node’s full TOML in an editor, including when its gateway is stopped.
+
+Windows supports the ordinary-user installation without an administrator account. Boot-time registration requires elevation, uses Task Scheduler and stores the startup helper under Program Files. A Windows S4U task has limited access to user-encrypted files and authenticated network shares. On Windows, `peerhatch gateway status` and **Settings → Gateway** show the running executable and check the actual Task Scheduler registration, even when the gateway is stopped. The report identifies disabled or missing tasks and startup paths pointing to another installation. A client opened from a new folder reuses the running gateway for the same profile. To switch the running executable, use `peerhatch gateway restart` from the desired folder. To update the login or boot task, select the startup mode again or run `peerhatch gateway startup login` or `peerhatch gateway startup system` there. On Linux the app uses desktop autostart or systemd, and on macOS it uses LaunchAgents or LaunchDaemons. A gateway running as root or an elevated administrator rejects remote PTY and file operations.
 
 ## Docker on Linux
 
@@ -102,12 +104,14 @@ journalctl -u peerhatch-gateway -f
 
 From a source checkout, build `cargo --config packaging/distribution.toml build --locked --profile distribution` and run `sudo ./packaging/linux/install-systemd.sh ./target/distribution`. The installer registers `peerhatch-gateway.service` under a dedicated `peerhatch` account. It uses `/etc/peerhatch` for the key and configuration, `/var/lib/peerhatch` as the home directory, and `/run/peerhatch/gateway.sock` for local management. Add authorized operators to the `peerhatch` group and sign in again. To disable boot startup and stop the service, run `sudo systemctl disable --now peerhatch-gateway`.
 
-You can also run a separate foreground node from the archive:
+To run a separate node for your user, give the CLI its own configuration and socket.
 
 ```sh
 state_dir="$HOME/.local/share/peerhatch/node"
 install -d -m 0700 "$state_dir"
-PATH="$PWD/bin:$PATH" ./start-gateway "$state_dir" --ipc "$state_dir/gateway.sock"
+./bin/peerhatch --ipc "$state_dir/gateway.sock" gateway start --config "$state_dir/node.toml"
+./bin/peerhatch --ipc "$state_dir/gateway.sock" status
+./bin/peerhatch --ipc "$state_dir/gateway.sock" gateway stop --config "$state_dir/node.toml"
 ```
 
 Pass the same `--ipc` to the CLI. For macOS and Windows system-service templates and OS integration details, see [Architecture](architecture.md).

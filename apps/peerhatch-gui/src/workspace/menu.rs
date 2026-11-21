@@ -26,8 +26,12 @@ impl Workspace {
         let trigger = DropdownTrigger::new(button.pressed(self.session_menu.read(cx).is_open()));
         let status = self.dashboard.read(cx).status.as_ref();
         let mut content = DropdownContent::new();
-        if let Some(status) = status.filter(|s| !s.peers.is_empty()) {
-            for (name, _) in status.peers_by_last_change() {
+        if let Some(status) = status.filter(|s| s.peers.keys().any(|name| s.peer_online(name))) {
+            for (name, _) in status
+                .peers_by_last_change()
+                .into_iter()
+                .filter(|(name, _)| status.peer_online(name))
+            {
                 let peer = SharedString::from(name.clone());
                 let label = Icon::device(status.peer_platform(name)).label(peer.clone());
                 let workspace = cx.weak_entity();
@@ -37,7 +41,9 @@ impl Workspace {
                 });
             }
         } else {
-            let (icon, label, page) = if status.is_some() {
+            let (icon, label, page) = if status.is_some_and(|s| !s.peers.is_empty()) {
+                (Icon::Home, "No online devices · View devices", Page::Home)
+            } else if status.is_some() {
                 (Icon::Home, "Pair a device…", Page::Home)
             } else {
                 (Icon::Settings, "Open gateway settings…", Page::Settings)

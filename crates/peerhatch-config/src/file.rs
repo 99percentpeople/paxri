@@ -13,6 +13,8 @@ use toml_edit::{DocumentMut, Item, Table, TableLike, ser::ValueSerializer};
 #[derive(Deserialize)]
 pub struct LocalSettings {
     #[serde(default)]
+    pub native: crate::Native,
+    #[serde(default)]
     pub gateway: crate::startup::GatewaySettings,
     #[serde(default)]
     pub gui: GuiSettings,
@@ -22,6 +24,7 @@ pub fn read_local(path: &Path) -> Result<LocalSettings> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(toml::from_str(&text)?),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings {
+            native: Default::default(),
             gui: Default::default(),
             gateway: Default::default(),
         }),
@@ -100,6 +103,23 @@ pub fn user_config() -> Option<PathBuf> {
     })
 }
 
+// This hint can survive shutdown. Clients verify the live endpoint's configuration
+// before using it, including after a crash or a move to another installation.
+pub fn gateway_address(config: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(config.with_extension("gateway-ipc")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn record_gateway_address(config: &Path, ipc: &Path) -> Result<()> {
+    let path = config.with_extension("gateway-ipc");
+    let mut temp = NamedTempFile::new_in(path.parent().context("missing profile directory")?)?;
+    #[cfg(unix)]
+    let ipc = std::path::absolute(ipc)?;
+    serde_json::to_writer(temp.as_file_mut(), &ipc)?;
+    temp.persist(path)?;
+    Ok(())
+}
+
 pub fn init(path: &Path) -> Result<()> {
     edit(path, true, |current| Ok(current.to_owned()))?;
     Ok(())
@@ -161,6 +181,33 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
     Ok(toml::from_str::<LocalSettings>(&text)?.gui)
 }
 
+pub fn set_native(path: &Path, change: crate::NativeChange, create: bool) -> Result<crate::Native> {
+    use crate::NativeChange;
+    let text = edit(path, create, |current| {
+        let mut doc: DocumentMut = current.parse()?;
+        let native = subtable(doc.as_table_mut(), "native")?;
+        let (key, value) = match change {
+            NativeChange::Upnp(enabled) => ("upnp", Some(toml_edit::Value::from(enabled))),
+            NativeChange::LanPortMapping(enabled) => {
+                ("lan_port_mapping", Some(toml_edit::Value::from(enabled)))
+            }
+            NativeChange::RelayUrl(url) => ("relay_url", url.map(toml_edit::Value::from)),
+        };
+        if let Some(mut value) = value {
+            if let Some(old) = native.get(key).and_then(Item::as_value) {
+                *value.decor_mut() = old.decor().clone();
+            }
+            native.insert(key, Item::Value(value));
+        } else {
+            native.remove(key);
+        }
+        let text = doc.to_string();
+        crate::parse(&text).map_err(anyhow::Error::msg)?;
+        Ok(text)
+    })?;
+    Ok(toml::from_str::<LocalSettings>(&text)?.native)
+}
+
 /// Preserve concurrent desktop and startup-policy edits while retaining the gateway's existing
 /// conflict check for manually edited peers, rules, comments, and other settings.
 pub fn save_gateway(path: &Path, expected: &str, proposed: String) -> Result<String> {
@@ -170,25 +217,59 @@ pub fn save_gateway(path: &Path, expected: &str, proposed: String) -> Result<Str
         }
         let mut old: DocumentMut = expected.parse()?;
         let mut disk: DocumentMut = current.parse()?;
-        old.remove("gui");
-        let gui = disk.remove("gui");
-        old.remove("gateway");
-        let settings = disk.remove("gateway");
+        let mut next: DocumentMut = proposed.parse()?;
+        for key in ["gui", "gateway", "native"] {
+            old.remove(key);
+            next.remove(key);
+            if let Some(settings) = disk.remove(key) {
+                next.insert(key, settings);
+            }
+        }
         ensure!(
             old.to_string() == disk.to_string(),
             "Configuration changed on disk. Restart the gateway before saving."
         );
-        let mut next: DocumentMut = proposed.parse()?;
-        next.remove("gui");
-        if let Some(gui) = gui {
-            next.insert("gui", gui);
-        }
-        next.remove("gateway");
-        if let Some(settings) = settings {
-            next.insert("gateway", settings);
-        }
         let text = next.to_string();
         crate::parse(&text).map_err(anyhow::Error::msg)?;
         Ok(text)
     })
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use crate::NativeChange;
+
+    #[test]
+    fn native_edits_survive_gateway_writes_and_invalid_relay_input() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("node.toml");
+        let initial = "version = 1\n[native]\nlan_port_mapping = true # keep this\n";
+        fs::write(&path, initial)?;
+        assert!(read_local(&path)?.native.upnp);
+        set_native(&path, NativeChange::Upnp(false), false)?;
+        let url = "https://relay.example.org/";
+        set_native(&path, NativeChange::RelayUrl(Some(url.into())), false)?;
+        save_gateway(&path, initial, format!("device_name = 'test'\n{initial}"))?;
+        let before = fs::read_to_string(&path)?;
+        assert!(before.contains("# keep this"));
+        assert!(
+            set_native(
+                &path,
+                NativeChange::RelayUrl(Some("ftp://invalid".into())),
+                false
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path)?, before);
+        let native = crate::parse(&before).unwrap().native;
+        assert!(!native.upnp && native.lan_port_mapping);
+        assert_eq!(native.relay_url.unwrap().as_str(), url);
+        assert!(
+            set_native(&path, NativeChange::RelayUrl(None), false)?
+                .relay_url
+                .is_none()
+        );
+        Ok(())
+    }
 }

@@ -82,3 +82,34 @@ impl Ui {
             .child(content)
     }
 }
+
+impl Ui {
+    pub fn switch(self, id: &'static str, on: bool) -> Button {
+        let colors = self.colors;
+        let track = div()
+            .w(px(30.))
+            .h(px(18.))
+            .px(px(2.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .when(on, |d| d.justify_end())
+            .bg(rgb(if on {
+                colors.primary.background
+            } else {
+                colors.border
+            }))
+            .child(div().size(px(14.)).rounded_full().bg(rgb(if on {
+                colors.primary.foreground
+            } else {
+                colors.card
+            })));
+        let label = div()
+            .flex()
+            .items_center()
+            .gap(SPACE_2)
+            .child(if on { "On" } else { "Off" })
+            .child(track);
+        self.button(ButtonVariant::Ghost, id, label)
+    }
+}

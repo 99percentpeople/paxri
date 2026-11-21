@@ -4,8 +4,8 @@ use alacritty_terminal::{
     term::TermMode,
 };
 use gpui::{
-    Context, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollWheelEvent, Window, px,
+    ClipboardItem, Context, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, ScrollWheelEvent, Window, px,
 };
 
 // xterm pointer coordinates are one-based character cells, including in SGR mode.
@@ -162,6 +162,20 @@ impl Terminal {
             cx.notify();
         } else if e.button == MouseButton::Left && self.mouse.held == 0 {
             self.start_selection(e, w, cx);
+        } else if e.button == MouseButton::Right
+            && self.mouse.held == 0
+            && self.viewport.contains(&e.position)
+        {
+            self.focus.focus(w);
+            if let Some(text) = self.emulator.selected_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.emulator.term.selection = None;
+                self.selecting = false;
+            } else {
+                self.paste(w, cx);
+            }
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 

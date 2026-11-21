@@ -1,6 +1,8 @@
 use crate::{
     Dashboard, Input,
-    components::{Button, ButtonVariant::Secondary, Icon, ListItem, Select, Ui, page, row},
+    components::{
+        Button, ButtonVariant::Secondary, Icon, ListItem, Select, Ui, row, heading, actions,
+    },
     theme::Appearance,
 };
 use gpui::{prelude::*, *};
@@ -42,11 +44,22 @@ impl Dashboard {
     }
 
     fn gateway_settings(&self, ui: Ui, cx: &Context<Self>) -> Div {
-        let mut section = ui.section("Gateway");
-        if self.status.as_ref().is_some_and(|s| !s.user_managed) {
-            return section
-                .child(ui.muted("Running under an external service or foreground launcher."));
-        }
+        let online = self.status.is_some();
+        let external = self.status.as_ref().is_some_and(|s| !s.user_managed);
+        let (state, color) = match self.gateway_action {
+            Some(Action::Start) => ("Starting…", ui.colors.muted_foreground),
+            Some(Action::Stop) => ("Stopping…", ui.colors.muted_foreground),
+            Some(Action::Restart) => ("Restarting…", ui.colors.muted_foreground),
+            _ if external => ("Service-managed", ui.colors.success),
+            _ if online => ("Running", ui.colors.success),
+            _ if self.error.is_some() => ("Offline", ui.colors.warning),
+            _ => ("Connecting", ui.colors.muted_foreground),
+        };
+        let mut section = ui.card().child(
+            row()
+                .child(heading("Gateway"))
+                .child(ui.status_badge(state, color)),
+        );
         let mut policy = Select::new(
             "gateway-startup",
             self.startup,
@@ -62,47 +75,169 @@ impl Dashboard {
         for choice in Startup::ALL {
             policy = policy.option(choice, choice.label());
         }
-        let online = self.status.is_some();
-        let mut controls = crate::components::actions();
-        if self.saving {
-            controls = controls.child(ui.muted("Working…"));
-        } else if online {
-            controls = controls
-                .child(
-                    ui.button(Secondary, "gateway-restart", "Restart gateway")
-                        .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Restart, cx))),
-                )
-                .child(
-                    ui.button(Secondary, "gateway-stop", "Stop gateway")
-                        .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Stop, cx))),
+        if self
+            .status
+            .as_ref()
+            .and_then(peerhatch_cli::gateway::other_installation)
+            .is_some()
+        {
+            section = section.child(ui.muted("Running from a different installation.").text_xs());
+        }
+        if external {
+            section = section
+                .child(ui.muted("Startup and shutdown are controlled by the service manager."));
+        } else {
+            let mut controls = actions();
+            for (id, text, action) in if online {
+                vec![
+                    ("gateway-restart", "Restart", Action::Restart),
+                    ("gateway-stop", "Stop", Action::Stop),
+                ]
+            } else {
+                vec![("gateway-start", "Start gateway", Action::Start)]
+            } {
+                controls = controls.child(
+                    ui.button(Secondary, id, text)
+                        .on_click(cx.listener(move |v, _, _, cx| v.manage(action, cx))),
                 );
+            }
+            section = section
+                .child(ui.labeled("Startup behavior", policy))
+                .child(controls);
         }
-        if !online && !self.saving {
-            controls = controls.child(
-                ui.button(Secondary, "gateway-start", "Start gateway")
-                    .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Start, cx))),
-            );
-        }
-        section = section.child(
-            row()
-                .child(if online {
-                    "Running in background"
-                } else {
-                    "Offline"
-                })
-                .child(controls),
+        section = section.child(ui.separator()).child(
+            ui.button(
+                crate::components::ButtonVariant::Ghost,
+                "gateway-details",
+                "Gateway details",
+            )
+            .icon(if self.gateway_details {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            })
+            .on_click(cx.listener(|v, _, _, cx| {
+                v.gateway_details = !v.gateway_details;
+                cx.notify();
+            })),
         );
-        section.child(ui.labeled("Start gateway", policy))
+        if self.gateway_details {
+            if let Some(image) = self
+                .status
+                .as_ref()
+                .and_then(peerhatch_cli::gateway::running_image)
+            {
+                section = section.child(ui.muted(image).text_xs());
+            }
+            #[cfg(windows)]
+            for line in &self.startup_report {
+                section = section.child(ui.muted(line.clone()).text_xs());
+            }
+            section = section.child(
+                ui.muted(format!(
+                    "Local IPC · {}",
+                    self.active_address()
+                        .unwrap_or_else(peerhatch_control::default_address)
+                        .display()
+                ))
+                .text_xs(),
+            );
+            if let Some(path) = &self.config_path {
+                section = section.child(
+                    ui.muted(format!("Configuration · {}", path.display()))
+                        .text_xs(),
+                );
+            }
+        }
+        section
     }
 
     pub(crate) fn settings(&self, ui: Ui, cx: &mut Context<Self>) -> Div {
-        let page = page("Settings")
+        let mut header = row().child(
+            div()
+                .text_3xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Settings"),
+        );
+        if let Some(path) = self.config_path.clone() {
+            header = header.child(
+                ui.button(Secondary, "open-config", "Open config file")
+                    .icon(Icon::File)
+                    .tooltip(crate::components::tooltip(
+                        path.display().to_string().into(),
+                    ))
+                    .on_click(cx.listener(move |v, _, _, cx| v.open_config_file(path.clone(), cx))),
+            );
+        }
+        let column = || div().min_w_0().flex().flex_col().gap(crate::theme::SPACE_4);
+        let mut primary = column()
             .child(self.gateway_settings(ui, cx))
+            .child(self.network_settings(ui, cx));
+        let mut secondary = column()
             .child(self.appearance_settings(ui, cx))
             .child(self.terminal_settings(ui, cx));
-        let Some(s) = &self.status else {
-            return page;
-        };
+        if let Some(s) = &self.status {
+            secondary = secondary.child(self.device_settings(ui, s, cx));
+            if !s.services.is_empty() {
+                let mut services = ui.section("Published services");
+                for (name, target) in &s.services {
+                    services = services
+                        .child(ui.separator())
+                        .child(ListItem::new(name.clone()).detail(ui.muted(target.clone())));
+                }
+                primary = primary.child(services);
+            }
+        }
+        super::overview()
+            .child(header)
+            .child(super::overview_columns(primary, secondary))
+    }
+
+    fn open_config_file(&self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let launch = self.runtime.spawn(async move {
+            let path = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                if !path.try_exists()? {
+                    peerhatch_config::file::init(&path)?;
+                }
+                Ok(path)
+            })
+            .await??;
+            #[cfg(windows)]
+            let mut command = {
+                let root = std::env::var_os("SystemRoot")
+                    .ok_or_else(|| anyhow::anyhow!("Windows directory unavailable"))?;
+                tokio::process::Command::new(
+                    std::path::Path::new(&root).join("System32/notepad.exe"),
+                )
+            };
+            #[cfg(target_os = "macos")]
+            let mut command = {
+                let mut c = tokio::process::Command::new("open");
+                c.arg("-t");
+                c
+            };
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let mut command = tokio::process::Command::new("xdg-open");
+            let result = command.arg(&path).status().await?;
+            anyhow::ensure!(
+                result.success(),
+                "Could not open {} ({result})",
+                path.display()
+            );
+            Ok::<_, anyhow::Error>(())
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = launch.await.map_err(anyhow::Error::from).and_then(|r| r) {
+                let _ = this.update(cx, |v, cx| {
+                    v.action_error = Some(format!("Open config file: {error:#}"));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn device_settings(&self, ui: Ui, s: &peerhatch_control::Status, cx: &Context<Self>) -> Div {
         let mut device = ui.section("This device").child(ui.separator());
         if let Some(field) = &self.name_field {
             device = device
@@ -113,11 +248,7 @@ impl Dashboard {
                 )))
                 .child(ui.form_actions(
                     "name",
-                    if self.saving {
-                        "Saving…"
-                    } else {
-                        "Save name"
-                    },
+                    "Save name",
                     cx.listener(|v, _, _, cx| {
                         if !v.saving
                             && let Some(field) = &v.name_field
@@ -169,33 +300,12 @@ impl Dashboard {
                     ),
             );
         }
-        let identity = ui
-            .section("Connection")
-            .child(ui.separator())
-            .child(
-                ListItem::new(ui.muted("Device ID"))
-                    .detail(peerhatch_config::peer_id::default_prefix(&s.device_id).to_owned())
-                    .trailing(copy_button(ui, "copy-id", "Copy ID", s.device_id.clone())),
-            )
-            .child(ui.muted(format!(
-                "Local IPC · {}",
-                self.address
-                    .clone()
-                    .unwrap_or_else(peerhatch_control::default_address)
-                    .display()
-            )))
-            .when_some(s.config_path.as_ref(), |section, path| {
-                section.child(ui.muted(format!("Node configuration · {}", path.display())))
-            });
-        let mut services = ui.section("Published services");
-        if s.services.is_empty() {
-            services = services.child(ui.muted("No services published."));
-        }
-        for (name, target) in &s.services {
-            services = services
-                .child(ui.separator())
-                .child(ListItem::new(name.clone()).trailing(ui.muted(target.clone())));
-        }
-        page.child(device).child(identity).child(services)
+        device.child(ui.separator()).child(
+            ListItem::new("Device ID")
+                .detail(
+                    ui.muted(peerhatch_config::peer_id::default_prefix(&s.device_id).to_owned()),
+                )
+                .trailing(copy_button(ui, "copy-id", "Copy ID", s.device_id.clone())),
+        )
     }
 }

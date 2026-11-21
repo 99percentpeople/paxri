@@ -94,11 +94,19 @@ impl Workspace {
     ) -> Page {
         let dashboard = self.dashboard.read(cx);
         let runtime = dashboard.runtime.clone();
-        let ipc = dashboard.address.clone();
+        let ipc = dashboard.active_address();
         let title = previous
             .map(|(_, title)| title.read(cx).for_reconnect())
             .unwrap_or_default();
-        let view = Terminal::open(&peer, title, &runtime, ipc.as_deref(), w, cx);
+        let view = Terminal::open(
+            &peer,
+            title,
+            &self.dashboard,
+            &runtime,
+            ipc.as_deref(),
+            w,
+            cx,
+        );
         App::subscribe(cx, &view, Self::terminal_exited).detach();
         let number = self.dashboard.update(cx, |d, cx| {
             d.register_terminal(peer.clone(), previous.map(|(number, _)| number), &view, cx)
@@ -112,6 +120,9 @@ impl Workspace {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.dashboard.read(cx).peer_online(&peer) {
+            return;
+        }
         let page = self.terminal_tab(peer, None, w, cx);
         self.append_tab(page, w, cx);
     }
@@ -151,7 +162,7 @@ impl Workspace {
         else {
             return;
         };
-        if view.read(cx).is_running() {
+        if view.read(cx).is_running() || !self.dashboard.read(cx).peer_online(peer) {
             return;
         }
         if let Some(index) = self.tabs.iter().position(|p| p == &self.active) {

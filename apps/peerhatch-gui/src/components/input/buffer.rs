@@ -6,6 +6,8 @@ pub(super) struct TextBuffer<const MULTILINE: bool> {
     pub anchor: usize,
     pub cursor: usize,
     pub marked: Option<Range<usize>>,
+    // Restore both the replaced text and its selection if focus leaves during preedit.
+    before_composition: Option<(String, usize, usize)>,
 }
 
 pub(super) fn byte_at_utf16(text: &str, offset: usize) -> usize {
@@ -36,6 +38,7 @@ impl<const MULTILINE: bool> TextBuffer<MULTILINE> {
             cursor: text.len(),
             text,
             marked: None,
+            before_composition: None,
         }
     }
 
@@ -69,7 +72,46 @@ impl<const MULTILINE: bool> TextBuffer<MULTILINE> {
         self.cursor = range.start + value.len();
         self.anchor = self.cursor;
         self.marked = None;
+        self.before_composition = None;
         range.start..self.cursor
+    }
+
+    pub fn compose(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selection: Option<Range<usize>>,
+    ) {
+        if self.read_only {
+            return;
+        }
+        if text.is_empty() {
+            self.cancel_composition();
+            return;
+        }
+        let original = self
+            .before_composition
+            .take()
+            .unwrap_or_else(|| (self.text.clone(), self.anchor, self.cursor));
+        let added = self.replace(range, text);
+        self.mark(added, text, selection);
+        self.before_composition = Some(original);
+    }
+
+    pub fn cancel_composition(&mut self) -> bool {
+        let Some((text, anchor, cursor)) = self.before_composition.take() else {
+            return false;
+        };
+        self.text = text;
+        self.anchor = anchor;
+        self.cursor = cursor;
+        self.marked = None;
+        true
+    }
+
+    pub fn unmark(&mut self) {
+        self.before_composition = None;
+        self.marked = None;
     }
     /// IMEs report their selection in UTF-16 units of the original composition.
     pub fn mark(&mut self, added: Range<usize>, original: &str, selection: Option<Range<usize>>) {
@@ -137,6 +179,24 @@ mod form_controls {
         input.replace(None, "字");
         assert_eq!(input.text, "x字\nabc");
         assert!(input.marked.is_none());
+    }
+    #[test]
+    fn cancelled_preedit_restores_the_original_selection_and_committed_text() {
+        let mut input = TextBuffer::<false>::new("A猫B");
+        input.anchor = "A猫".len();
+        input.cursor = 1;
+        input.compose(None, "n", None);
+        input.compose(None, "ni", None);
+        assert_eq!(input.text, "AniB");
+        assert!(input.cancel_composition());
+        assert_eq!(
+            (&input.text[..], input.anchor, input.cursor),
+            ("A猫B", 4, 1)
+        );
+        input.compose(None, "ni", None);
+        input.replace(None, "你");
+        assert!(!input.cancel_composition());
+        assert_eq!(input.text, "A你B");
     }
     #[test]
     fn textarea_ime_selection_uses_the_normalized_newlines() {

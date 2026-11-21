@@ -28,12 +28,90 @@ pub enum Action {
     Startup { mode: Option<Startup> },
 }
 
-pub async fn status(ipc: &Path) -> Result<Option<Status>> {
+async fn status(ipc: &Path) -> Result<Option<Status>> {
     match peerhatch_control::request(ipc, peerhatch_control::Command::Status).await {
         Ok(s) => Ok(Some(s)),
         Err(e) if peerhatch_control::is_offline(&e) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+fn legacy_address() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return Some(PathBuf::from("p2p-tunnel-gateway"));
+    #[cfg(unix)]
+    Some(
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").or_else(|| std::env::var_os("HOME"))?)
+            .join(".p2p-tunnel/gateway.sock"),
+    )
+}
+
+pub async fn discover(ipc: Option<&Path>, config: Option<&Path>) -> Result<Option<Status>> {
+    let preferred = ipc
+        .map(Path::to_owned)
+        .unwrap_or_else(peerhatch_control::default_address);
+    let primary = status(&preferred).await?;
+    let mismatch = primary
+        .as_ref()
+        .zip(config)
+        .and_then(|(s, path)| check_profile(s, path).err());
+    if primary.is_some() && mismatch.is_none() {
+        return Ok(primary);
+    }
+    if ipc.is_some() || std::env::var_os("PEERHATCH_IPC").is_some() {
+        return mismatch.map_or(Ok(None), Err);
+    }
+    let Some(profile) = config
+        .map(Path::to_owned)
+        .or_else(file::user_config)
+        .and_then(|p| p.canonicalize().ok())
+    else {
+        return Ok(None);
+    };
+    for candidate in [file::gateway_address(&profile), legacy_address()]
+        .into_iter()
+        .flatten()
+    {
+        if candidate != preferred
+            && let Ok(Some(active)) = status(&candidate).await
+            && active
+                .config_path
+                .as_ref()
+                .and_then(|p| p.canonicalize().ok())
+                .as_ref()
+                == Some(&profile)
+        {
+            return Ok(Some(active));
+        }
+    }
+    Ok(None)
+}
+
+pub fn other_installation(status: &Status) -> Option<PathBuf> {
+    let actual = status.executable.as_deref()?;
+    let expected = gateway_exe().ok()?;
+    (!same_path(actual, &expected)).then_some(expected)
+}
+
+pub fn running_image(status: &Status) -> Option<String> {
+    let actual = status.executable.as_deref()?;
+    Some(if let Some(expected) = other_installation(status) {
+        format!(
+            "Running executable: {} (different installation; this copy uses {})",
+            actual.display(),
+            expected.display()
+        )
+    } else {
+        format!("Running executable: {}", actual.display())
+    })
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || a.canonicalize()
+            .ok()
+            .zip(b.canonicalize().ok())
+            .is_some_and(|(a, b)| a == b)
 }
 
 fn profile(path: Option<PathBuf>) -> Result<PathBuf> {
@@ -164,9 +242,13 @@ fn check_profile(status: &Status, config: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn apply(action: Action, ipc: &Path, config: Option<PathBuf>) -> Result<Option<Status>> {
-    if matches!(action, Action::Status) {
-        return status(ipc).await;
+pub async fn apply(
+    action: Action,
+    ipc: Option<&Path>,
+    config: Option<PathBuf>,
+) -> Result<Option<Status>> {
+    if matches!(action, Action::Status | Action::Startup { mode: None }) {
+        return discover(ipc, config.as_deref()).await;
     }
     // An administrator may open Settings to register a boot task. Keep a manual
     // start or restart in that same window at the gateway user's normal rights.
@@ -179,13 +261,13 @@ pub async fn apply(action: Action, ipc: &Path, config: Option<PathBuf>) -> Resul
         } else {
             "start"
         };
-        let address = ipc.to_owned();
+        let address = ipc.map(Path::to_owned);
         let path = config.as_deref().map(std::path::absolute).transpose()?;
         let code = tokio::task::spawn_blocking(move || {
             boot::run_client(
                 Some(token),
                 &std::env::current_exe()?,
-                &address,
+                address.as_deref(),
                 command,
                 path.as_deref(),
             )
@@ -195,16 +277,16 @@ pub async fn apply(action: Action, ipc: &Path, config: Option<PathBuf>) -> Resul
             code == 0,
             "Could not {command} the gateway as the current standard user (exit {code})"
         );
-        return status(ipc).await;
+        return discover(ipc, config.as_deref()).await;
     }
     // Serialize local mutations across independent GUI/CLI processes, including first launch.
     let lock_path = profile(file::user_config().or_else(|| config.clone()))?;
     let _lock = tokio::task::spawn_blocking(move || launcher_lock(&lock_path)).await??;
-    let current = status(ipc).await?;
+    let current = discover(ipc, config.as_deref()).await?;
+    let preferred = ipc
+        .map(Path::to_owned)
+        .unwrap_or_else(peerhatch_control::default_address);
     if let Some(s) = current.as_ref() {
-        if let Some(path) = &config {
-            check_profile(s, path)?;
-        }
         if matches!(action, Action::Start) {
             return Ok(current);
         }
@@ -217,27 +299,39 @@ pub async fn apply(action: Action, ipc: &Path, config: Option<PathBuf>) -> Resul
 
     match action {
         Action::Stop | Action::Restart => {
-            if current.is_some() {
-                peerhatch_control::shutdown(ipc).await?;
+            if let Some(address) = current.as_ref().and_then(|s| s.ipc_path.as_ref()) {
+                peerhatch_control::shutdown(address).await?;
             }
             if matches!(action, Action::Stop) {
                 return Ok(None);
             }
         }
         Action::Startup { mode: Some(mode) } => {
-            let target = ipc.to_owned();
-            tokio::task::spawn_blocking(move || startup::configure(&config, &target, mode))
+            let target = ipc
+                .map(Path::to_owned)
+                .or_else(|| std::env::var_os("PEERHATCH_IPC").map(PathBuf::from));
+            let path = config.clone();
+            tokio::task::spawn_blocking(move || startup::configure(&path, target.as_deref(), mode))
                 .await??;
-            return status(ipc).await;
+            return discover(ipc, Some(&config)).await;
         }
         Action::Start => {}
         Action::Status | Action::Startup { mode: None } => return Ok(current),
     }
-    Ok(Some(start(ipc, &config).await?))
+    if current.is_none() && let Some(other) = status(&preferred).await? {
+        check_profile(&other, &config)?;
+        return Ok(Some(other));
+    }
+    // Restart on the existing address so other clients can reconnect there.
+    let target = current
+        .as_ref()
+        .and_then(|s| s.ipc_path.as_deref())
+        .unwrap_or(&preferred);
+    Ok(Some(start(target, &config).await?))
 }
 
-pub async fn open(ipc: &Path, config: Option<PathBuf>) -> Result<Option<Status>> {
-    if let Some(s) = status(ipc).await? {
+pub async fn open(ipc: Option<&Path>, config: Option<PathBuf>) -> Result<Option<Status>> {
+    if let Some(s) = discover(ipc, config.as_deref()).await? {
         return Ok(Some(s));
     }
     let config = profile(config)?;
@@ -247,26 +341,45 @@ pub async fn open(ipc: &Path, config: Option<PathBuf>) -> Result<Option<Status>>
     apply(Action::Start, ipc, Some(config)).await
 }
 
-pub async fn cli(action: Action, ipc: &Path, config: Option<PathBuf>) -> Result<()> {
-    if let Action::Startup { mode } = action {
-        let active = status(ipc).await?;
-        let path = profile(config.or_else(|| active.and_then(|s| s.config_path)))?;
-        if mode.is_some() {
-            apply(action, ipc, Some(path.clone())).await?;
-        }
-        println!("Startup: {}", file::startup(&path)?.as_str());
-    } else {
-        match apply(action, ipc, config).await? {
-            Some(s) => println!(
+#[cfg(windows)]
+pub fn startup_report(path: &Path) -> Vec<String> {
+    startup::inspect(path)
+        .unwrap_or_else(|err| vec![format!("Windows Task Scheduler unavailable: {err:#}")])
+}
+
+pub async fn cli(action: Action, ipc: Option<&Path>, config: Option<PathBuf>) -> Result<()> {
+    let active = apply(action, ipc, config.clone()).await?;
+    let preferred = ipc
+        .map(Path::to_owned)
+        .unwrap_or_else(peerhatch_control::default_address);
+    if !matches!(action, Action::Startup { .. }) {
+        if let Some(s) = &active {
+            let address = s.ipc_path.as_deref().unwrap_or(&preferred);
+            println!(
                 "Gateway running ({}) at {}",
                 if s.user_managed {
                     "background"
                 } else {
                     "externally managed"
                 },
-                ipc.display()
-            ),
-            None => println!("Gateway stopped at {}", ipc.display()),
+                address.display()
+            );
+            if let Some(image) = running_image(s) {
+                println!("{image}");
+            }
+        } else if matches!(action, Action::Stop) {
+            println!("Gateway stopped");
+        } else {
+            println!("Gateway stopped at {}", preferred.display());
+        }
+    }
+    if matches!(action, Action::Startup { .. } | Action::Status) {
+        let path = profile(config.or_else(|| active.and_then(|s| s.config_path)))?;
+        let mode = file::startup(&path)?;
+        println!("Startup: {}", mode.as_str());
+        #[cfg(windows)]
+        for line in startup_report(&path) {
+            println!("{line}");
         }
     }
     Ok(())

@@ -19,6 +19,8 @@ pub(crate) fn observe_window_focus<V: 'static>(
     fallback: &FocusHandle,
     cx: &mut Context<V>,
 ) {
+    #[cfg(windows)]
+    crate::ime::observe(window);
     let tab = fallback.clone();
     cx.observe_window_activation(window, move |_, window, cx| {
         if !window.is_window_active() {

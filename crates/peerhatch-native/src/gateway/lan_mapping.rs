@@ -197,7 +197,7 @@ struct MappingWorker {
 }
 
 impl MappingWorker {
-    async fn start(ep: &Endpoint, router: Option<LanRouter>, port: NonZeroU16) -> Self {
+    async fn start(ep: &Endpoint, router: Option<LanRouter>, port: NonZeroU16, upnp: bool) -> Self {
         let ep = ep.clone();
         let (stop, stopping) = oneshot::channel();
         let refresh = Arc::new(Notify::new());
@@ -207,7 +207,7 @@ impl MappingWorker {
         let task = tokio::spawn(async move {
             match router {
                 Some(router) => router.maintain(ep, port, stopping, update, expiry).await,
-                None => default_mapping(ep, port, stopping, update).await,
+                None => default_mapping(ep, port, stopping, update, upnp).await,
             }
         });
         Self {
@@ -233,8 +233,9 @@ async fn default_mapping(
     port: NonZeroU16,
     mut stop: oneshot::Receiver<bool>,
     refresh: Arc<Notify>,
+    upnp: bool,
 ) {
-    let client = portmapper::Client::default();
+    let client = portmapper::Client::new(crate::mapping_protocols(upnp));
     let mut addresses = client.watch_external_address();
     client.update_local_port(port);
     let mut advertised = None;
@@ -272,15 +273,15 @@ pub struct LanMapping {
 }
 
 impl LanMapping {
-    pub(super) fn start(ep: Endpoint) -> Self {
+    pub(super) fn start(ep: Endpoint, upnp: bool) -> Self {
         let (stop, stopping) = oneshot::channel();
         Self {
             stop,
-            task: tokio::spawn(Self::supervise(ep, stopping)),
+            task: tokio::spawn(Self::supervise(ep, stopping, upnp)),
         }
     }
 
-    async fn supervise(ep: Endpoint, mut stop: oneshot::Receiver<()>) {
+    async fn supervise(ep: Endpoint, mut stop: oneshot::Receiver<()>, upnp: bool) {
         let mut interfaces = ep.watch_network_interfaces();
         let mut active: Option<MappingWorker> = None;
         let mut notified = true;
@@ -341,7 +342,7 @@ impl LanMapping {
                         .await;
                 }
                 if let Some(port) = port {
-                    active = Some(MappingWorker::start(&ep, router, port).await);
+                    active = Some(MappingWorker::start(&ep, router, port, upnp).await);
                 } else {
                     ep.set_ipv4_source(None).await;
                 }
@@ -439,7 +440,7 @@ mod tests {
                 .port(),
         )
         .unwrap();
-        let lease = MappingWorker::start(&ep, Some(router), port).await;
+        let lease = MappingWorker::start(&ep, Some(router), port, false).await;
         let first: SocketAddr = (external, 45101).into();
         let second: SocketAddr = (external, 45102).into();
         for addr in [first, second] {

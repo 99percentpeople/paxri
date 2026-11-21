@@ -216,6 +216,10 @@ impl Connections {
             .or_default()
             .clone()
     }
+    pub(super) fn live(&self, id: EndpointId) -> Option<NativeSession> {
+        self.slots.lock().expect("peer sessions").get(&id)?.live()
+    }
+
     pub(super) fn snapshot(&self) -> BTreeMap<EndpointId, PeerConnection> {
         self.slots
             .lock()

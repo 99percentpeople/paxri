@@ -17,9 +17,9 @@ RUN groupadd --gid 10001 peerhatch \
         --home-dir /var/lib/peerhatch --shell /bin/bash peerhatch \
     && install -d -m 0700 -o peerhatch -g peerhatch /var/lib/peerhatch /run/peerhatch
 COPY --from=build /out/ /usr/local/bin/
-COPY --chmod=0755 packaging/linux/start-gateway /usr/local/libexec/peerhatch/start-gateway
+COPY --chmod=0755 packaging/docker/entrypoint.sh /usr/local/libexec/peerhatch/docker-entrypoint
 ENV HOME=/var/lib/peerhatch PEERHATCH_IPC=/run/peerhatch/gateway.sock
 USER peerhatch:peerhatch
 WORKDIR /var/lib/peerhatch
 HEALTHCHECK --interval=30s --start-period=20s --timeout=5s CMD peerhatch status >/dev/null
-ENTRYPOINT ["/usr/local/libexec/peerhatch/start-gateway", "/var/lib/peerhatch"]
+ENTRYPOINT ["/usr/local/libexec/peerhatch/docker-entrypoint"]

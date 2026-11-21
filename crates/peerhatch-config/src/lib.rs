@@ -35,13 +35,33 @@ impl Config {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Native {
+    pub upnp: bool,
     pub relay_url: Option<Url>,
     /// Find a LAN router for native IPv4 UDP when the system default route uses a VPN.
     #[serde(default)]
     pub lan_port_mapping: bool,
+}
+
+impl Default for Native {
+    fn default() -> Self {
+        Self {
+            upnp: true,
+            relay_url: None,
+            lan_port_mapping: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeChange {
+    Upnp(bool),
+    LanPortMapping(bool),
+    /// None restores automatic public relay selection.
+    RelayUrl(Option<String>),
 }
 
 #[derive(Debug, Deserialize)]

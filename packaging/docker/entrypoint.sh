@@ -2,8 +2,7 @@
 set -eu
 umask 077
 
-state_dir=$1
-shift
+state_dir=/var/lib/peerhatch
 config=$state_dir/node.toml
 key=$state_dir/device.key
 

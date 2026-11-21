@@ -15,6 +15,7 @@ use peerhatch_core::{
 use crate::EndpointTicket;
 mod addresses;
 mod connections;
+mod presence;
 mod lan_mapping;
 pub use lan_mapping::LanMapping;
 pub mod pairing;
@@ -40,6 +41,13 @@ impl Transport for NativeTransport {
     }
 }
 impl NativeTransport {
+    pub fn online_session(&self, peer: &str) -> Result<NativeSession> {
+        let peers = self.peers.read().expect("peer map");
+        let address = peers.get(peer).context("unknown peer")?;
+        self.connections.live(address.id)
+            .with_context(|| format!("{peer} is offline"))
+    }
+
     pub fn subscribe_peer_changes(&self) -> watch::Receiver<BTreeMap<String, i64>> {
         self.connections.changes.subscribe()
     }
@@ -168,7 +176,7 @@ pub async fn start(
     let mapping = config
         .native
         .lan_port_mapping
-        .then(|| LanMapping::start(endpoint.clone()));
+        .then(|| LanMapping::start(endpoint.clone(), config.native.upnp));
     let (config, settings) = watch::channel(config);
     let connections = Arc::new(connections::Connections::new(
         endpoint.clone(),

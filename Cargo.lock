@@ -7919,6 +7919,7 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "serde",
+ "serde_json",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
  "toml_edit 0.25.19+spec-1.1.0",
@@ -7940,6 +7941,7 @@ dependencies = [
  "peerhatch-files",
  "peerhatch-terminal",
  "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -37,8 +37,6 @@ def main():
                 bundle.write(binaries / name, name)
             bundle.write(ROOT / "README.md", "README.md")
             bundle.write(ROOT / "docs/installation.md", "installation.md")
-            launcher = Path(__file__).with_name("start-gateway.cmd")
-            bundle.writestr(launcher.name, launcher.read_text(encoding="ascii").replace("\n", "\r\n"))
         staged.replace(archive)
     finally:
         staged.unlink(missing_ok=True)

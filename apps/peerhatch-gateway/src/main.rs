@@ -93,6 +93,7 @@ impl Listener {
 }
 
 struct Gateway {
+    active_native: peerhatch_config::Native,
     user_managed: bool,
     pairing: pairing::Pairings,
     config: Arc<Config>,
@@ -299,11 +300,17 @@ impl Gateway {
         let ticket = self.transport.current_ticket().to_string();
         let config = &self.config;
         let local = peerhatch_config::file::read_local(&self.file.path).ok();
+        let native = local.as_ref().map_or(&config.native, |p| &p.native);
         Status {
+            peer_presence: true,
+            network_restart_required: native != &self.active_native,
+            native: Some(native.clone()),
             startup: local
                 .as_ref()
                 .map_or(config.gateway.startup, |p| p.gateway.startup),
             user_managed: self.user_managed,
+            executable: std::env::current_exe().ok(),
+            ipc_path: None,
             config_path: Some(self.file.path.clone()),
             gui: local.map_or(config.gui, |p| p.gui),
             pairing: self.pairing.status(config.pairing_code.as_deref()),
@@ -410,6 +417,28 @@ async fn handle_client(
             let status = gateway.lock().await.status();
             peerhatch_control::respond(&mut socket, Ok(status)).await
         }
+        Command::WatchPeerConnections => {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let state = gateway.lock().await;
+            let mut changes = state.transport.subscribe_peer_changes();
+            let subscription = state.streams.clone().try_acquire_owned();
+            drop(state);
+            let Ok(_subscription) = subscription else {
+                return peerhatch_control::respond::<()>(&mut socket, Err(anyhow::anyhow!("gateway stream limit reached"))).await;
+            };
+            drop(management_slot);
+            peerhatch_control::respond(&mut socket, Ok(())).await?;
+            let (mut reader, mut writer) = tokio::io::split(socket);
+            tokio::select! {
+                _ = reader.read_u8() => Ok(()),
+                result = async {
+                    loop {
+                        writer.write_all(&[1]).await?;
+                        if changes.changed().await.is_err() { return Ok(()); }
+                    }
+                } => result,
+            }
+        }
         Command::CheckPeer { peer } => {
             let transport = gateway.lock().await.transport.clone();
             let result = match tokio::time::timeout(
@@ -422,6 +451,13 @@ async fn handle_client(
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(anyhow::anyhow!("Checking connection to {peer} timed out")),
             };
+            peerhatch_control::respond(&mut socket, result).await
+        }
+        Command::SetNative { change } => {
+            let mut state = gateway.lock().await;
+            let result = peerhatch_config::file::set_native(&state.file.path, change, false)
+                .map(|_| state.status());
+            drop(state);
             peerhatch_control::respond(&mut socket, result).await
         }
         Command::SetGui { change } => {
@@ -514,13 +550,13 @@ async fn handle_client(
             let opened = async {
                 match open {
                     Command::OpenTerminal { peer, size } => {
-                        terminal::open_pty(&*transport, &peer, size, None).await
+                        terminal::open_pty(transport.online_session(&peer)?, size, None).await
                     }
                     Command::Exec {
                         peer,
                         size,
                         invocation,
-                    } => terminal::open_pty(&*transport, &peer, size, Some(invocation)).await,
+                    } => terminal::open_pty(transport.online_session(&peer)?, size, Some(invocation)).await,
                     Command::OpenFiles { peer } => {
                         use peerhatch_core::{StreamKind, Transport};
                         transport.open(&peer, StreamKind::Files).await
@@ -609,6 +645,7 @@ async fn run(
     let mut peer_changes = transport.subscribe_peer_changes();
     peer_changes.mark_changed();
     let mut gateway = Gateway {
+        active_native: config.native.clone(),
         user_managed: options.user_managed,
         pairing: Default::default(),
         config: config.clone(),
@@ -629,12 +666,19 @@ async fn run(
     for name in config.forwards.keys() {
         gateway.set_forward(name, true, None).await?;
     }
+    if options.user_managed
+        && let Err(error) =
+            peerhatch_config::file::record_gateway_address(&gateway.file.path, &path)
+    {
+        eprintln!("Could not record local gateway address: {error:#}");
+    }
     ready()?;
     eprintln!(
         "gateway {} ready at {}",
         gateway.transport.id(),
         path.display()
     );
+    clients.spawn(gateway.transport.clone().announce_presence());
     let gateway = Arc::new(Mutex::new(gateway));
     let management = Arc::new(Semaphore::new(32));
     clients.spawn(platforms::fill_missing(gateway.clone()));

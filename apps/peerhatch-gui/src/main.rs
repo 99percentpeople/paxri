@@ -8,12 +8,14 @@ use std::{
     time::Duration,
 };
 use peerhatch_cli::gateway::{self, Action as GatewayAction};
-use peerhatch_config::startup::Startup;
-use peerhatch_control::{Command, Status};
+use peerhatch_config::{Native, NativeChange, startup::Startup};
+use peerhatch_control::{Command, GuiChange, Status};
 mod chrome;
 mod components;
+#[cfg(windows)]
+mod ime;
 mod pages;
-mod peer_check;
+mod presence;
 mod terminal;
 mod theme;
 mod workspace;
@@ -21,7 +23,10 @@ use components::Input;
 use workspace::Workspace;
 
 #[derive(Parser)]
-#[command(version, about = "Open the PeerHatch desktop app, or run a command in this terminal")]
+#[command(
+    version,
+    about = "Open the PeerHatch desktop app, or run a command in this terminal"
+)]
 struct Options {
     #[command(flatten)]
     gateway: peerhatch_cli::GatewayOptions,
@@ -46,24 +51,35 @@ struct GatewayRequest {
 }
 
 enum RequestResult {
-    Gateway(Box<Status>),
+    Gateway(Box<Status>, Option<Native>),
     OfflineGui(theme::GuiSettings),
-    Stopped(Startup),
+    OfflineNative(Native),
+    Stopped(Startup, Option<Native>),
 }
 
 struct Dashboard {
-    peer_checks: BTreeMap<String, peer_check::PeerCheck>,
+    presence_watch: Option<(PathBuf, Task<()>)>,
+    refresh_presence: bool,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
     name_field: Option<Entity<Input>>,
+    relay_field: Option<Entity<Input>>,
+    profile_native: Option<Native>,
+    gateway_details: bool,
     pairing_input: Entity<Input>,
     peer_search: Entity<Input>,
     peer_system: Option<peerhatch_control::DevicePlatform>,
     local_code: Entity<Input>,
     copied_feedback: Option<Task<()>>,
     saving: bool,
+    gateway_action: Option<GatewayAction>,
     address: Option<PathBuf>,
+    selected_config: Option<PathBuf>,
+    #[cfg(windows)]
+    startup_report: Vec<String>,
+    #[cfg(windows)]
+    startup_inspection: Option<Task<()>>,
     config_path: Option<PathBuf>,
     runtime: tokio::runtime::Handle,
     local_name: SharedString,
@@ -76,6 +92,34 @@ struct Dashboard {
 }
 
 impl Dashboard {
+    fn active_address(&self) -> Option<PathBuf> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.ipc_path.clone())
+            .or_else(|| self.address.clone())
+    }
+
+    #[cfg(windows)]
+    fn inspect_startup(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        let read = self
+            .runtime
+            .spawn_blocking(move || gateway::startup_report(&path));
+        self.startup_inspection = Some(cx.spawn(async move |this, cx| {
+            let lines = read
+                .await
+                .unwrap_or_else(|e| vec![format!("Could not read Windows startup: {e}")]);
+            let _ = this.update(cx, |view, cx| {
+                if view.startup_report != lines {
+                    view.startup_report = lines;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         self.request(
             GatewayRequest {
@@ -113,54 +157,96 @@ impl Dashboard {
             on_complete,
         } = request;
         let name_saved = matches!(command, Operation::Api(Command::SetDeviceName { .. }));
+        let relay_saved = matches!(
+            command,
+            Operation::Api(Command::SetNative {
+                change: NativeChange::RelayUrl(_)
+            })
+        );
         let joined = matches!(command, Operation::Api(Command::JoinPairing { .. }));
         self.busy = true;
         self.saving = changing || !self.pending.is_empty();
+        if let Operation::Manage(action) = command {
+            self.gateway_action = Some(action);
+        }
         cx.notify();
+        let selected = self.address.clone();
+        let selected_config = self.selected_config.clone();
         let path = self
-            .address
-            .clone()
+            .active_address()
             .unwrap_or_else(peerhatch_control::default_address);
+        #[cfg(windows)]
+        let startup_changed = matches!(command, Operation::Manage(GatewayAction::Startup { .. }));
         let offline_path = self.config_path.clone();
         let job = self.runtime.spawn(async move {
             let state = |status: Option<Status>| -> anyhow::Result<RequestResult> {
                 if let Some(s) = status {
-                    return Ok(RequestResult::Gateway(Box::new(s)));
+                    let legacy = if s.native.is_none() {
+                        s.config_path
+                            .as_deref()
+                            .and_then(|p| peerhatch_config::file::read_local(p).ok())
+                            .map(|settings| settings.native)
+                    } else {
+                        None
+                    };
+                    return Ok(RequestResult::Gateway(Box::new(s), legacy));
                 }
-                let config = offline_path
-                    .clone()
-                    .or_else(peerhatch_config::file::user_config);
-                let mode = config
+                let local = offline_path
                     .as_deref()
-                    .map(peerhatch_config::file::startup)
-                    .transpose()?
+                    .map(peerhatch_config::file::read_local)
+                    .transpose()?;
+                let startup = local
+                    .as_ref()
+                    .map(|s| s.gateway.startup)
                     .unwrap_or_default();
-                Ok(RequestResult::Stopped(mode))
+                Ok(RequestResult::Stopped(startup, local.map(|s| s.native)))
             };
             let command = match command {
-                Operation::Api(Command::Status) => return state(gateway::status(&path).await?),
+                Operation::Api(Command::Status) => {
+                    return state(
+                        gateway::discover(selected.as_deref(), selected_config.as_deref()).await?,
+                    );
+                }
                 Operation::Api(command) => command,
-                Operation::Open => return state(gateway::open(&path, offline_path.clone()).await?),
+                Operation::Open => {
+                    return state(gateway::open(selected.as_deref(), selected_config).await?);
+                }
                 Operation::Manage(action) => {
-                    return state(gateway::apply(action, &path, offline_path.clone()).await?);
+                    return state(
+                        gateway::apply(action, selected.as_deref(), offline_path.clone()).await?,
+                    );
                 }
             };
-            let change = match &command {
-                Command::SetGui { change } => Some(*change),
+            enum Edit {
+                Appearance(GuiChange),
+                Network(NativeChange),
+            }
+            let edit = match &command {
+                Command::SetGui { change } => Some(Edit::Appearance(*change)),
+                Command::SetNative { change } => Some(Edit::Network(change.clone())),
                 _ => None,
             };
-            match (peerhatch_control::request(&path, command).await, change) {
-                (Ok(status), _) => Ok(RequestResult::Gateway(Box::new(status))),
-                (Err(err), Some(change)) if peerhatch_control::is_offline(&err) => {
+            match peerhatch_control::request(&path, command).await {
+                Ok(status) => state(Some(status)),
+                Err(err)
+                    if peerhatch_control::is_offline(&err)
+                        && let Some(edit) = edit =>
+                {
                     let file = offline_path
                         .context("Use --config to select this offline gateway's node TOML")?;
-                    let gui = tokio::task::spawn_blocking(move || {
-                        peerhatch_config::file::set_gui(&file, change, true)
+                    tokio::task::spawn_blocking(move || {
+                        Ok(match edit {
+                            Edit::Appearance(change) => RequestResult::OfflineGui(
+                                peerhatch_config::file::set_gui(&file, change, true)?,
+                            ),
+                            Edit::Network(change) => RequestResult::OfflineNative(
+                                peerhatch_config::file::set_native(&file, change, true)?,
+                            ),
+                        })
                     })
-                    .await??;
-                    Ok(RequestResult::OfflineGui(gui))
+                    .await?
                 }
-                (Err(err), _) => Err(err),
+                Err(err) => Err(err),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -171,9 +257,15 @@ impl Dashboard {
             let _ = this.update(cx, |view, cx| {
                 view.busy = false;
                 view.saving = false;
+                view.gateway_action = None;
                 let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
+                if relay_saved && result.is_ok() {
+                    view.relay_field = None;
+                }
                 match result {
-                    Ok(RequestResult::Stopped(startup)) => {
+                    Ok(RequestResult::Stopped(startup, native)) => {
+                        view.presence_watch = None;
+                        view.profile_native = native;
                         view.status = None;
                         view.startup = startup;
                         view.error = Some("Gateway stopped.".into());
@@ -181,16 +273,31 @@ impl Dashboard {
                             view.action_error = None;
                         }
                     }
+                    Ok(RequestResult::OfflineNative(settings)) => {
+                        view.presence_watch = None;
+                        view.profile_native = Some(settings);
+                        view.status = None;
+                        view.action_error = None;
+                    }
                     Ok(RequestResult::OfflineGui(settings)) => {
                         theme::apply(settings, cx);
                         view.action_error = None;
                     }
-                    Ok(RequestResult::Gateway(status)) => {
+                    Ok(RequestResult::Gateway(status, legacy)) => {
+                        view.watch_presence(&status, cx);
+                        view.profile_native = legacy;
                         if view.local_name.as_ref() != status.display_name() {
                             view.local_name = status.display_name().to_owned().into();
                         }
-                        if let Some(path) = &status.config_path {
+                        if let Some(path) = &status.config_path
+                            && view.config_path.as_ref() != Some(path)
+                        {
                             view.config_path = Some(path.clone());
+                            #[cfg(windows)]
+                            {
+                                view.startup_report.clear();
+                                view.inspect_startup(cx);
+                            }
                         }
                         theme::apply(status.gui, cx);
                         if name_saved {
@@ -220,15 +327,22 @@ impl Dashboard {
                         }
                     }
                     Err(error) => {
+                        view.presence_watch = None;
                         view.status = None;
                         view.error = Some(error);
                     }
+                }
+                #[cfg(windows)]
+                if startup_changed {
+                    view.inspect_startup(cx);
                 }
                 if let Some(callback) = on_complete {
                     callback(outcome, cx);
                 }
                 if let Some(next) = view.pending.pop_front() {
                     view.request(next, cx);
+                } else if std::mem::take(&mut view.refresh_presence) {
+                    view.send(Command::Status, cx);
                 }
                 cx.notify();
             });
@@ -238,6 +352,7 @@ impl Dashboard {
 
     fn new(
         address: Option<PathBuf>,
+        selected_config: Option<PathBuf>,
         config_path: Option<PathBuf>,
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
@@ -245,18 +360,28 @@ impl Dashboard {
         let peer_search = Input::new("", "Search devices", cx);
         cx.observe(&peer_search, |_, _, cx| cx.notify()).detach();
         let mut view = Self {
-            peer_checks: BTreeMap::new(),
+            presence_watch: None,
+            refresh_presence: false,
             terminal_sessions: BTreeMap::new(),
             home_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
             name_field: None,
+            relay_field: None,
+            profile_native: None,
+            gateway_details: false,
             local_code: Input::read_only("", cx),
             copied_feedback: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),
             peer_search,
             peer_system: None,
             saving: false,
+            gateway_action: None,
             address,
+            selected_config,
+            #[cfg(windows)]
+            startup_report: Vec::new(),
+            #[cfg(windows)]
+            startup_inspection: None,
             config_path,
             runtime,
             local_name: gethostname::gethostname()
@@ -311,7 +436,7 @@ fn main() -> anyhow::Result<()> {
     release_launch_console();
     let ipc = options.gateway.ipc;
     let config = theme::offline_path(
-        options.config,
+        options.config.clone(),
         ipc.is_some() || std::env::var_os("PEERHATCH_IPC").is_some(),
     );
     let runtime = tokio::runtime::Runtime::new().expect("create IPC runtime");
@@ -326,7 +451,7 @@ fn main() -> anyhow::Result<()> {
         })
         .detach();
         theme::init(config.as_deref(), cx);
-        let dashboard = cx.new(|cx| Dashboard::new(ipc, config, handle, cx));
+        let dashboard = cx.new(|cx| Dashboard::new(ipc, options.config, config, handle, cx));
         Workspace::open_home(dashboard, cx).expect("open gateway window");
         cx.activate(true);
     });

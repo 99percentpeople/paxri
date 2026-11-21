@@ -101,29 +101,17 @@ impl Dashboard {
                 if self.peer_system.is_some_and(|system| system != platform) {
                     return None;
                 }
-                let state = status.connections_for(name).map(|paths| {
-                    if paths.is_empty() {
-                        "Idle"
-                    } else {
-                        "Connected"
-                    }
-                });
+                let state = status.peer_state(name);
                 if !terms.is_empty() {
-                    let searchable = format!(
-                        "{name} {id} {} {}",
-                        platform.label(),
-                        state.unwrap_or_default()
-                    )
-                    .to_lowercase();
+                    let searchable =
+                        format!("{name} {id} {} {}", platform.label(), state).to_lowercase();
                     if !terms.iter().all(|term| searchable.contains(*term)) {
                         return None;
                     }
                 }
                 let mut detail = platform.label().to_owned();
-                if let Some(state) = state {
-                    detail.push_str(" · ");
-                    detail.push_str(state);
-                }
+                detail.push_str(" · ");
+                detail.push_str(state);
                 if let Some(&changed) = status.peer_last_status_change_ms.get(name) {
                     detail.push_str(" · ");
                     detail.push_str(&change_age(now, changed));

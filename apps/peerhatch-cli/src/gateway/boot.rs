@@ -194,14 +194,14 @@ fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(Some(0)).collect()
 }
 
-pub(crate) fn start(client: &Path, config: &Path, ipc: &Path) -> Result<u32> {
+pub(crate) fn start(client: &Path, config: &Path, ipc: Option<&Path>) -> Result<u32> {
     run_client(user_token()?, client, ipc, "start", Some(config))
 }
 
 pub(super) fn run_client(
     token: Option<OwnedHandle>,
     client: &Path,
-    ipc: &Path,
+    ipc: Option<&Path>,
     action: &str,
     config: Option<&Path>,
 ) -> Result<u32> {
@@ -209,13 +209,11 @@ pub(super) fn run_client(
         client.is_absolute() && config.is_none_or(Path::is_absolute),
         "Gateway launcher paths must be absolute"
     );
-    let mut args = vec![
-        client,
-        Path::new("--ipc"),
-        ipc,
-        Path::new("gateway"),
-        Path::new(action),
-    ];
+    let mut args = vec![client];
+    if let Some(ipc) = ipc {
+        args.extend([Path::new("--ipc"), ipc]);
+    }
+    args.extend([Path::new("gateway"), Path::new(action)]);
     if let Some(path) = config {
         args.extend([Path::new("--config"), path]);
     }

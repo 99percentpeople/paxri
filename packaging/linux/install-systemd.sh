@@ -23,7 +23,9 @@ getent passwd peerhatch >/dev/null || useradd --system --gid peerhatch --no-crea
     --home-dir /var/lib/peerhatch --shell /bin/bash peerhatch
 install -d -m 0700 -o peerhatch -g peerhatch /etc/peerhatch
 install -D -m 0755 -t /usr/local/bin "$bin_dir/peerhatch" "$bin_dir/peerhatch-gateway"
-install -D -m 0755 "$here/start-gateway" /usr/local/libexec/peerhatch/start-gateway
+install -D -m 0644 /dev/stdin /usr/local/lib/tmpfiles.d/peerhatch.conf <<'EOF'
+f /etc/peerhatch/node.toml :0600 :peerhatch :peerhatch - version = 1\n
+EOF
 install -D -m 0644 "$here/peerhatch-gateway.service" /etc/systemd/system/peerhatch-gateway.service
 systemctl daemon-reload
 systemctl enable peerhatch-gateway.service

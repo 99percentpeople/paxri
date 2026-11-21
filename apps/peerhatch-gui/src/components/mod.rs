@@ -126,15 +126,6 @@ impl Ui {
     }
 }
 
-pub fn page(title: impl Into<SharedString>) -> Div {
-    div().flex().flex_col().gap(SPACE_4).child(
-        div()
-            .text_3xl()
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(title.into()),
-    )
-}
-
 pub fn heading(text: impl Into<SharedString>) -> Div {
     div()
         .text_lg()

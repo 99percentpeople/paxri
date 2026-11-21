@@ -16,7 +16,7 @@ impl RenderOnce for TerminalPreview {
         let palette = crate::theme::terminal_palette(appearance.scheme, ui);
         let sample = window.use_keyed_state("terminal-preview-screen", cx, |_, _| {
             let mut screen = Emulator::with_palette(GridSize { rows: 3, cols: 26 }, palette);
-            screen.process(b"\x1b[36m~\x1b[0m $ ls\r\n\x1b[1;34msrc/\x1b[0m  \x1b[32mpeerhatch\x1b[0m  Cargo.toml\r\n\x1b[36m~\x1b[0m $ ");
+            screen.process(b"\x1b[36m~\x1b[0m $ ls\r\n\x1b[1;34msrc/\x1b[0m  \x1b[32mapp\x1b[0m  Cargo.toml\r\n\x1b[36m~\x1b[0m $ ");
             screen
         });
         let cell = CursorCell::visible(sample.read(cx));

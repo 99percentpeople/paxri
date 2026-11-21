@@ -179,7 +179,7 @@ impl Command {
             Self::Shell { .. } | Self::Exec { .. } | Self::Connect { .. }
         );
         let runtime = tokio::runtime::Runtime::new()?;
-        let ipc = options.ipc.unwrap_or_else(peerhatch_control::default_address);
+        let ipc = options.ipc;
         let result = runtime.block_on(dispatch(self, ipc));
         if uses_stdio {
             // A canceled Tokio stdin read may still be blocking on the terminal.
@@ -193,13 +193,33 @@ impl Command {
     }
 }
 
-async fn dispatch(command: Command, ipc: PathBuf) -> Result<u32> {
+async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
+    if let Command::Gateway { action, config } = command {
+        gateway::cli(action, selected.as_deref(), config).await?;
+        return Ok(0);
+    }
+    #[cfg(windows)]
+    if let Command::BootGateway { client, node_file } = command {
+        return gateway::boot::start(&client, &node_file, selected.as_deref());
+    }
+    let discover = selected.is_none()
+        && std::env::var_os("PEERHATCH_IPC").is_none()
+        && !matches!(
+            command,
+            Command::Config { .. } | Command::Identity { .. } | Command::Probe { .. }
+        );
+    let mut active = if discover {
+        gateway::discover(None, None).await?
+    } else {
+        None
+    };
+    let ipc = selected
+        .or_else(|| active.as_ref()?.ipc_path.clone())
+        .unwrap_or_else(peerhatch_control::default_address);
     match command {
         #[cfg(windows)]
-        Command::BootGateway { client, node_file } => {
-            return gateway::boot::start(&client, &node_file, &ipc);
-        }
-        Command::Gateway { action, config } => gateway::cli(action, &ipc, config).await?,
+        Command::BootGateway { .. } => unreachable!(),
+        Command::Gateway { .. } => unreachable!(),
         Command::Cp(args) => return args.run(&ipc).await,
         Command::Shell { peer } => return shell::run(&ipc, peer, None).await,
         Command::Exec { peer, script, argv } => {
@@ -220,7 +240,12 @@ async fn dispatch(command: Command, ipc: PathBuf) -> Result<u32> {
             connect_stdio(&ipc, peer, service).await?;
         }
         Command::Status { peer, check, json } => {
-            let mut status = peerhatch_control::request(&ipc, peerhatch_control::Command::Status).await?;
+            let mut status = match active.take() {
+                Some(status) => status,
+                None => {
+                    peerhatch_control::request(&ipc, peerhatch_control::Command::Status).await?
+                }
+            };
             if let Some(selector) = peer {
                 let (name, _) = status.resolve_peer(&selector)?;
                 let peer = name.to_owned();

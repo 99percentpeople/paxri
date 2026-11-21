@@ -1,6 +1,7 @@
 pub(crate) mod device;
 mod device_list;
 mod home;
+mod network_settings;
 mod peer_settings;
 mod rules;
 mod settings;

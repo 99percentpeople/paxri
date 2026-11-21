@@ -9,8 +9,8 @@
 !compat/**
 !packaging/
 !packaging/distribution.toml
-!packaging/linux/
-!packaging/linux/start-gateway
+!packaging/docker/
+!packaging/docker/entrypoint.sh
 **/target/
 **/.env*
 **/*.key

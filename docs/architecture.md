@@ -41,14 +41,16 @@ A local forward accepts a local TCP socket and asks the peer to open a named ser
 
 ## Desktop workspace
 
-Home displays the local gateway and pairing code, incoming requests, and the searchable paired-device list. A device page owns terminal sessions and independent TCP access and forwarding settings. The page refreshes idle peer status automatically. All windows share one management controller.
+Home displays the local gateway and pairing code, incoming requests, and the searchable paired-device list. A device page owns terminal sessions and independent TCP access and forwarding settings. The GUI subscribes to peer connection changes on the local management socket. New session and reconnect actions are available while a peer has an authenticated shared connection. The gateway applies the same check to CLI shell and exec requests. All windows share one management controller.
 
 Each native window has a dock with horizontal or vertical tabs. The sidebar can collapse to icons or be resized. Tabs can be reordered, detached, joined to another window, or renamed inline. A terminal tab owns the PTY and emulator state across moves. Closing the tab releases the session. The terminal honors remote cursor and title changes, uses the configured ANSI palette, and supports mouse selection, scrollback, IME composition, and keyboard input.
+
+In a terminal, drag to select text and right-click to copy it and clear the selection. Right-click with no selection to paste. When a terminal program captures the mouse, hold Shift while selecting and right-clicking to use the local clipboard.
 
 The shared component library lives under `apps/peerhatch-gui/src/components`. Buttons, icon buttons, dropdown triggers and content, select, input, textarea, scrollbars, focus handling, and dock components use semantic colors and spacing from `src/theme`. Form controls and terminal views manage their own focus and scrolling.
 
 ## Windows development sync
 
-From a Linux checkout, `python3 scripts/sync-windows.py --host WINDOWS_SSH_HOST --watch --dev` synchronizes source to `~/peerhatch` on a Windows machine over SSH. Both hosts need Python and a working Rust toolchain. The updater builds both checkouts, installs successful builds, and restarts running development binaries. Gateway restart closes its active streams. The Windows desktop restarts in the signed-in user’s session.
+From a Linux checkout, `python3 scripts/sync-windows.py --host WINDOWS_SSH_HOST --watch --dev` synchronizes source to `~/peerhatch` on a Windows machine over SSH. Both hosts need Python and a working Rust toolchain. The updater builds both checkouts, installs successful builds, and restarts running development binaries. Gateway restart closes its active streams. The Windows desktop restarts in the signed-in user’s session. Set `PEERHATCH_DEV_BUILD_HOST=windows` to sync and build on Windows only.
 
 To run the development watcher as a user service, use a checkout at `~/peerhatch`, put `PEERHATCH_DEV_WINDOWS_HOST=your-host` in `~/.config/peerhatch/dev-watch.env`, then link and enable [peerhatch-dev-watch.service](../packaging/linux/peerhatch-dev-watch.service). The watcher matches running Linux application units named `peerhatch-gateway.service` and `peerhatch-gui.service`.
