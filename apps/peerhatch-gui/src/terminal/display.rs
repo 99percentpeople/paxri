@@ -1,5 +1,11 @@
-use super::{cursor::CursorCell, emulator::Emulator};
-use crate::theme::TerminalPalette;
+use super::{
+    cursor::{CursorCell, Preedit},
+    emulator::Emulator,
+};
+use crate::theme::{
+    TerminalPalette,
+    fonts::{FONT_SIZE, TerminalFont},
+};
 use alacritty_terminal::{
     grid::Dimensions,
     index::{Column, Point as GridPoint},
@@ -10,12 +16,8 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor},
 };
 use gpui::{
-    App, Bounds, FontStyle, FontWeight, Pixels, Point, TextRun, Window, fill, font, point, px, rgb,
-    size,
+    App, Bounds, FontStyle, FontWeight, Pixels, Point, TextRun, Window, fill, point, px, rgb, size,
 };
-
-pub const COL: f32 = 9.;
-pub const LINE: f32 = 20.;
 
 pub(super) fn color(value: Color, palette: &TerminalPalette, overrides: &Colors) -> u32 {
     let override_rgb = match value {
@@ -102,27 +104,25 @@ impl Style {
 fn paint_run(
     text: &str,
     cells: u16,
+    typography: &TerminalFont,
     style: Style,
     background: u32,
     at: Point<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let width = px(COL * f32::from(cells));
+    let width = px(typography.cell.width * f32::from(cells));
     if style.bg != background {
-        window.paint_quad(fill(Bounds::new(at, size(width, px(LINE))), rgb(style.bg)));
+        window.paint_quad(fill(
+            Bounds::new(at, size(width, px(typography.cell.height))),
+            rgb(style.bg),
+        ));
     }
     let visible = text.trim_end_matches(' ');
     if !visible.is_empty() {
         // ASCII padding has no glyph ink. Keep the original text for bidirectional shaping.
         let text = if visible.is_ascii() { visible } else { text };
-        let mut face = font(if cfg!(windows) {
-            "Consolas"
-        } else if cfg!(target_os = "macos") {
-            "Menlo"
-        } else {
-            "DejaVu Sans Mono"
-        });
+        let mut face = typography.face.clone();
         if style.bold {
             face.weight = FontWeight::BOLD;
         }
@@ -137,15 +137,20 @@ fn paint_run(
             underline: None,
             strikethrough: None,
         };
-        let shaped =
-            window
-                .text_system()
-                .shape_line(text.to_owned().into(), px(15.), &[run], Some(px(COL)));
-        let _ = shaped.paint(at, px(LINE), window, cx);
+        let shaped = window.text_system().shape_line(
+            text.to_owned().into(),
+            px(FONT_SIZE),
+            &[run],
+            Some(px(typography.cell.width)),
+        );
+        let _ = shaped.paint(at, px(typography.cell.height), window, cx);
     }
     if style.underline {
         window.paint_quad(fill(
-            Bounds::new(at + point(px(0.), px(LINE - 2.)), size(width, px(1.))),
+            Bounds::new(
+                at + point(px(0.), px(typography.cell.height - 2.)),
+                size(width, px(1.)),
+            ),
             rgb(style.fg),
         ));
     }
@@ -173,7 +178,7 @@ fn cursor_text_color(background: u32) -> u32 {
 pub fn paint(
     screen: &Emulator,
     bounds: Bounds<Pixels>,
-    marked: &str,
+    marked: Option<&Preedit>,
     cursor_shape: Option<CursorShape>,
     palette: &TerminalPalette,
     window: &mut Window,
@@ -187,10 +192,15 @@ pub fn paint(
     let selection = screen.selected_range();
     let cursor = CursorCell::visible(screen);
     let block = cursor
-        .filter(|_| marked.is_empty() && cursor_shape == Some(CursorShape::Block))
+        .filter(|_| marked.is_none() && cursor_shape == Some(CursorShape::Block))
         .map(|cell| (cell, cursor_text_color(cursor_color)));
-    let origin =
-        |r: u16, c: u16| bounds.origin + point(px(f32::from(c) * COL), px(f32::from(r) * LINE));
+    let origin = |r: u16, c: u16| {
+        bounds.origin
+            + point(
+                px(f32::from(c) * screen.font.cell.width),
+                px(f32::from(r) * screen.font.cell.height),
+            )
+    };
     for row in 0..grid.screen_lines() as u16 {
         let line = screen.view_line(usize::from(row));
         let coord = |col: u16| GridPoint::new(line, Column(usize::from(col)));
@@ -238,6 +248,7 @@ pub fn paint(
             paint_run(
                 &text,
                 col - first,
+                &screen.font,
                 style,
                 background,
                 origin(row, first),
@@ -246,12 +257,12 @@ pub fn paint(
             );
         }
     }
-    if let Some(cursor) = cursor {
-        let at = origin(cursor.point.line.0 as u16, cursor.point.column.0 as u16);
-        if !marked.is_empty() {
+    if let Some(marked) = marked {
+        if let Some(preedit) = marked.layout(screen, bounds.origin) {
             paint_run(
-                marked,
-                marked.chars().count().min(200) as u16,
+                preedit.text,
+                preedit.columns,
+                &screen.font,
                 Style {
                     fg: cursor_text_color(palette.composition),
                     bg: palette.composition,
@@ -260,11 +271,21 @@ pub fn paint(
                     underline: true,
                 },
                 background,
-                at,
+                preedit.at,
                 window,
                 cx,
             );
-        } else if let Some(bounds) = cursor_shape.and_then(|shape| cursor.stroke(shape, at)) {
+            let caret = marked.selection.end;
+            window.paint_quad(fill(
+                preedit.bounds_for_range(caret..caret),
+                rgb(cursor_text_color(palette.composition)),
+            ));
+        }
+    } else if let Some(cursor) = cursor {
+        let at = origin(cursor.point.line.0 as u16, cursor.point.column.0 as u16);
+        if let Some(bounds) =
+            cursor_shape.and_then(|shape| cursor.stroke(shape, at, screen.font.cell))
+        {
             window.paint_quad(fill(bounds, rgb(cursor_color)));
         }
     }

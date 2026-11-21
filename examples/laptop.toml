@@ -7,6 +7,9 @@ appearance = "system"
 scheme = "follow-app"
 cursor_shape = "underline"
 blink_cursor = false
+font_family = "" # Platform default
+line_height = 18
+letter_spacing = 0
 
 # [native]
 # relay_url = "https://relay.example.org"

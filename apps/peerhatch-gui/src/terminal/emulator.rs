@@ -1,4 +1,4 @@
-use super::display::{COL, LINE};
+use crate::theme::fonts::{CellSize, TerminalFont};
 use super::selection::Unit;
 use crate::theme::TerminalPalette;
 use alacritty_terminal::{
@@ -24,12 +24,12 @@ pub(super) struct GridSize {
 }
 
 impl GridSize {
-    pub fn pty(self) -> PtySize {
+    pub fn pty(self, cell: CellSize) -> PtySize {
         PtySize {
             rows: self.rows,
             cols: self.cols,
-            pixel_width: self.cols * COL as u16,
-            pixel_height: self.rows * LINE as u16,
+            pixel_width: self.cols * cell.width as u16,
+            pixel_height: self.rows * cell.height as u16,
         }
     }
 }
@@ -188,6 +188,7 @@ impl EventListener for TerminalEvents {
 pub(super) struct Emulator {
     pub term: Term<TerminalEvents>,
     pub palette: &'static TerminalPalette,
+    pub font: TerminalFont,
     default_cursor: CursorStyle,
     pub selection_unit: Unit,
     parser: Processor,
@@ -213,15 +214,17 @@ impl Emulator {
             size,
             &crate::theme::resolve(crate::theme::Appearance::Dark, gpui::WindowAppearance::Dark)
                 .terminal,
+            TerminalFont::test_font(),
         )
     }
 
-    pub fn with_palette(size: GridSize, palette: &'static TerminalPalette) -> Self {
+    pub fn with_palette(size: GridSize, palette: &'static TerminalPalette, font: TerminalFont) -> Self {
         let events = TerminalEvents::default();
-        let default_cursor = super::cursor::default_style(Default::default());
+        let default_cursor = super::cursor::default_style(&Default::default());
         Self {
             term: Term::new(Self::config(default_cursor), &size, events.clone()),
             palette,
+            font,
             default_cursor,
             selection_unit: Unit::Character,
             parser: Processor::new(),
@@ -328,8 +331,8 @@ impl Emulator {
                 Event::TextAreaSizeRequest(format) => format(WindowSize {
                     num_cols: self.term.columns() as u16,
                     num_lines: self.term.screen_lines() as u16,
-                    cell_width: COL as u16,
-                    cell_height: LINE as u16,
+                    cell_width: self.font.cell.width as u16,
+                    cell_height: self.font.cell.height as u16,
                 }),
                 _ => continue,
             };
@@ -592,6 +595,17 @@ mod tests {
             em.finish_batch(),
             b"\x1b[1;12R\x1b[0n\x1b[8;4;20t\x1b[4;80;180t"
         );
+    }
+
+    #[test]
+    fn text_area_reports_the_same_pixels_as_the_pty_after_a_spacing_change() {
+        let grid = grid(4, 20);
+        let mut em = Emulator::new(grid);
+        em.font.cell = CellSize { width: 11., height: 24. };
+        let pty = grid.pty(em.font.cell);
+        assert_eq!((pty.pixel_width, pty.pixel_height), (220, 96));
+        em.process(b"\x1b[14t");
+        assert_eq!(em.finish_batch(), b"\x1b[4;96;220t");
     }
 
     #[test]

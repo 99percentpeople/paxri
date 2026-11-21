@@ -12,28 +12,28 @@ pub(crate) use title::TabTitle;
 
 use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
 use crate::theme::SPACE_2;
+use crate::theme::fonts::{CellSize, MonospaceFonts};
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     term::{MIN_COLUMNS, TermMode},
 };
-use display::{COL, LINE};
 use emulator::{Emulator, GridSize};
 use gpui::{prelude::*, *};
 use session::{Output, Session};
 use std::{ops::Range, path::Path};
 
-fn dimensions(viewport: Size<Pixels>) -> GridSize {
+fn dimensions(viewport: Size<Pixels>, cell: CellSize) -> GridSize {
     GridSize {
-        cols: (f32::from(viewport.width) / COL).clamp(MIN_COLUMNS as f32, 500.) as u16,
-        rows: (f32::from(viewport.height) / LINE).clamp(1., 250.) as u16,
+        cols: (f32::from(viewport.width) / cell.width).clamp(MIN_COLUMNS as f32, 500.) as u16,
+        rows: (f32::from(viewport.height) / cell.height).clamp(1., 250.) as u16,
     }
 }
 
-fn layout_grid(available: Bounds<Pixels>) -> (GridSize, Bounds<Pixels>) {
-    let grid = dimensions(available.size);
+fn layout_grid(available: Bounds<Pixels>, cell: CellSize) -> (GridSize, Bounds<Pixels>) {
+    let grid = dimensions(available.size, cell);
     let cells = size(
-        px(f32::from(grid.cols) * COL).min(available.size.width),
-        px(f32::from(grid.rows) * LINE).min(available.size.height),
+        px(f32::from(grid.cols) * cell.width).min(available.size.width),
+        px(f32::from(grid.rows) * cell.height).min(available.size.height),
     );
     (grid, Bounds::centered_at(available.center(), cells))
 }
@@ -45,7 +45,7 @@ pub struct Terminal {
     session: Option<Session>,
     error: Option<String>,
     peer_online: bool,
-    marked: String,
+    marked: cursor::Preedit,
     viewport: Bounds<Pixels>,
     selecting: bool,
     mouse: mouse::Mouse,
@@ -96,8 +96,9 @@ impl Terminal {
         window: &Window,
         cx: &mut App,
     ) -> Entity<Self> {
-        let grid = dimensions(window.viewport_size());
         let appearance = crate::theme::current(cx).terminal;
+        let font = cx.global::<MonospaceFonts>().resolve(&appearance);
+        let grid = dimensions(window.viewport_size(), font.cell);
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
         let (session, events) = Session::start(peer, ipc, runtime);
@@ -107,9 +108,12 @@ impl Terminal {
                 let online = dashboard.read(cx).peer_online(&peer);
                 if view.peer_online != online {
                     view.peer_online = online;
-                    if !view.is_running() { cx.notify(); }
+                    if !view.is_running() {
+                        cx.notify();
+                    }
                 }
-            }).detach();
+            })
+            .detach();
             let focus = cx.focus_handle();
             cx.spawn(async move |this, cx| {
                 while let Ok(event) = events.recv().await {
@@ -142,8 +146,8 @@ impl Terminal {
                 }
             })
             .detach();
-            let mut emulator = Emulator::with_palette(grid, palette);
-            emulator.set_default_cursor(cursor::default_style(appearance));
+            let mut emulator = Emulator::with_palette(grid, palette, font);
+            emulator.set_default_cursor(cursor::default_style(&appearance));
             Terminal {
                 focus,
                 title: cx.new(|_| title),
@@ -151,7 +155,7 @@ impl Terminal {
                 session: Some(session),
                 error: None,
                 peer_online: true,
-                marked: String::new(),
+                marked: cursor::Preedit::default(),
                 viewport: Bounds::default(),
                 selecting: false,
                 mouse: mouse::Mouse::default(),
@@ -171,11 +175,11 @@ impl Terminal {
     }
 
     fn resize(&mut self, available: Bounds<Pixels>, cx: &mut Context<Self>) -> Bounds<Pixels> {
-        let (grid, bounds) = layout_grid(available);
+        let (grid, bounds) = layout_grid(available, self.emulator.font.cell);
         self.viewport = bounds;
         if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
             if let Some(session) = &mut self.session {
-                session.resize(grid.pty());
+                session.resize(grid.pty(self.emulator.font.cell));
             }
             if self.emulator.resize(grid) {
                 cx.notify();
@@ -206,8 +210,11 @@ impl Terminal {
     fn cell_at(&self, position: Point<Pixels>) -> (usize, f32) {
         let local = position - self.viewport.origin;
         let last = self.emulator.term.screen_lines() - 1;
-        let row = (f32::from(local.y) / LINE).floor().clamp(0., last as f32) as usize;
-        (row, f32::from(local.x) / COL)
+        let cell = self.emulator.font.cell;
+        let row = (f32::from(local.y) / cell.height)
+            .floor()
+            .clamp(0., last as f32) as usize;
+        (row, f32::from(local.x) / cell.width)
     }
 
     fn start_selection(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
@@ -240,7 +247,7 @@ impl Terminal {
             self.focused = focused;
             if !focused {
                 #[cfg(windows)]
-                if !self.marked.is_empty() {
+                if !self.marked.text.is_empty() {
                     crate::ime::blur(window);
                 }
                 self.marked.clear();
@@ -319,7 +326,8 @@ impl Terminal {
         } else {
             key.modifiers.control && key.modifiers.shift
         };
-        if self.peer_online && !self.is_running() && key.key == "enter" && !key.modifiers.modified() {
+        if self.peer_online && !self.is_running() && key.key == "enter" && !key.modifiers.modified()
+        {
             window.dispatch_action(Box::new(super::workspace::ReconnectTerminal), cx);
         } else if shortcut && key.key.eq_ignore_ascii_case("v") {
             self.paste(window, cx);
@@ -352,6 +360,7 @@ impl Render for Terminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::new(window, cx);
         let appearance = crate::theme::current(cx).terminal;
+        self.emulator.font = cx.global::<MonospaceFonts>().resolve(&appearance);
         let palette = crate::theme::terminal_palette(appearance.scheme, ui.colors);
         self.emulator.palette = palette;
         let background = display::color(
@@ -369,9 +378,10 @@ impl Render for Terminal {
         }
         let hide_pointer = self.hidden_pointer_at.is_some();
         self.emulator
-            .set_default_cursor(cursor::default_style(appearance));
+            .set_default_cursor(cursor::default_style(&appearance));
         let style = self.emulator.term.cursor_style();
-        let blink = style.blinking && self.focused && self.marked.is_empty() && self.is_running();
+        let blink =
+            style.blinking && self.focused && self.marked.text.is_empty() && self.is_running();
         let cursor_on = cursor::blink_visible(
             blink,
             cursor::CursorCell::visible(&self.emulator),
@@ -392,7 +402,7 @@ impl Render for Terminal {
                     display::paint(
                         &view.emulator,
                         bounds,
-                        &view.marked,
+                        (!view.marked.text.is_empty()).then_some(&view.marked),
                         cursor_on.then_some(style.shape),
                         palette,
                         window,
@@ -482,7 +492,7 @@ impl EntityInputHandler for Terminal {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let utf16: Vec<_> = self.marked.encode_utf16().collect();
+        let utf16: Vec<_> = self.marked.text.encode_utf16().collect();
         let selected = utf16.get(range.clone())?;
         *actual = Some(range);
         Some(String::from_utf16_lossy(selected))
@@ -493,14 +503,13 @@ impl EntityInputHandler for Terminal {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let end = self.marked.encode_utf16().count();
         Some(UTF16Selection {
-            range: end..end,
+            range: self.marked.selection.clone(),
             reversed: false,
         })
     }
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        (!self.marked.is_empty()).then(|| 0..self.marked.encode_utf16().count())
+        (!self.marked.text.is_empty()).then(|| 0..self.marked.text.encode_utf16().count())
     }
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.marked.clear();
@@ -524,9 +533,9 @@ impl EntityInputHandler for Terminal {
     }
     fn replace_and_mark_text_in_range(
         &mut self,
-        _: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         text: &str,
-        _: Option<Range<usize>>,
+        selection: Option<Range<usize>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -535,26 +544,23 @@ impl EntityInputHandler for Terminal {
         }
         if !text.is_empty() {
             self.hidden_pointer_at = self.typing_pointer_position(window);
+            self.emulator.scroll(Scroll::Bottom);
         }
-        self.marked = text.into();
+        self.marked.replace(range, text, selection);
         cx.notify();
     }
     fn bounds_for_range(
         &mut self,
-        _: Range<usize>,
+        range: Range<usize>,
         bounds: Bounds<Pixels>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let cursor = self.emulator.term.grid().cursor.point;
-        Some(Bounds::new(
-            bounds.origin
-                + point(
-                    px(cursor.column.0 as f32 * COL),
-                    px(cursor.line.0 as f32 * LINE),
-                ),
-            size(px(COL), px(LINE)),
-        ))
+        Some(
+            self.marked
+                .layout(&self.emulator, bounds.origin)?
+                .bounds_for_range(range),
+        )
     }
     fn character_index_for_point(
         &mut self,
@@ -568,21 +574,25 @@ impl EntityInputHandler for Terminal {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{COL, LINE, layout_grid};
+    use super::{CellSize, layout_grid};
+    const CELL: CellSize = CellSize {
+        width: 9.,
+        height: 20.,
+    };
     use gpui::{Bounds, point, px, size};
 
     #[test]
     fn whole_cells_leave_equal_space_on_opposite_edges() {
         for height in [20., 39.5, 40., 691., 700., 719.5, 720., 730.] {
             let available = Bounds::new(point(px(8.), px(48.)), size(px(951.5), px(height)));
-            let (grid, bounds) = layout_grid(available);
-            assert_eq!(grid.pty().rows, (height / LINE).floor() as u16);
+            let (grid, bounds) = layout_grid(available, CELL);
+            assert_eq!(grid.pty(CELL).rows, (height / CELL.height).floor() as u16);
             assert_eq!(grid.cols, 105);
             assert_eq!(
                 bounds.size,
                 size(
-                    px(f32::from(grid.cols) * COL),
-                    px(f32::from(grid.rows) * LINE)
+                    px(f32::from(grid.cols) * CELL.width),
+                    px(f32::from(grid.rows) * CELL.height)
                 )
             );
             assert_eq!(bounds.center(), available.center());
@@ -593,7 +603,7 @@ mod layout_tests {
     fn a_pane_shorter_than_one_row_keeps_its_input_bounds_inside_the_pane() {
         for height in [0., 7.5] {
             let available = Bounds::new(point(px(5.), px(40.)), size(px(90.), px(height)));
-            let (grid, bounds) = layout_grid(available);
+            let (grid, bounds) = layout_grid(available, CELL);
             assert_eq!(grid.rows, 1);
             assert_eq!(bounds, available);
         }

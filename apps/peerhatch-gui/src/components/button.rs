@@ -16,6 +16,7 @@ enum ButtonLayout {
     Icon,
     Row,
     Field,
+    Card(Pixels),
 }
 
 #[derive(IntoElement)]
@@ -60,6 +61,34 @@ impl Ui {
         button.layout = ButtonLayout::Icon;
         button.tooltip(super::tooltip(tooltip.into()))
     }
+
+    pub fn choice_card(
+        self,
+        id: impl Into<ElementId>,
+        width: Pixels,
+        label: impl IntoElement,
+        preview: impl IntoElement,
+        selected: bool,
+    ) -> Button {
+        let caption = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(label)
+            .when(selected, |row| row.child(Icon::Check.draw(14.)));
+        let content = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(SPACE_2)
+            .child(preview)
+            .child(caption);
+        let mut button = self
+            .button(ButtonVariant::Outline, id, content)
+            .pressed(selected);
+        button.layout = ButtonLayout::Card(width);
+        button
+    }
 }
 
 impl Button {
@@ -78,7 +107,7 @@ impl Button {
         self
     }
 
-    pub(super) fn field(mut self) -> Self {
+    pub(crate) fn field(mut self) -> Self {
         self.layout = ButtonLayout::Field;
         self
     }
@@ -143,6 +172,7 @@ impl RenderOnce for Button {
                 .justify_start()
                 .overflow_hidden(),
             ButtonLayout::Field => root.w_full().h(px(36.)).px(SPACE_3).justify_between(),
+            ButtonLayout::Card(width) => root.w(width).max_w_full().h_auto().p(SPACE_2),
         };
         root.rounded(CONTROL_RADIUS)
             .border_1()
@@ -150,6 +180,10 @@ impl RenderOnce for Button {
             .when(matches!(self.variant, ButtonVariant::Outline), |button| {
                 button.border_color(rgb(colors.input_border))
             })
+            .when(
+                matches!(self.layout, ButtonLayout::Card(_)) && self.pressed,
+                |button| button.border_color(rgb(colors.canvas.foreground)),
+            )
             .cursor_pointer()
             .whitespace_nowrap()
             .text_sm()

@@ -20,6 +20,31 @@ STAGE = TARGET / "dev-watch" / "debug"
 LIVE = TARGET / "debug"
 WINDOWS = os.name == "nt"
 NAMES = [n + (".exe" if WINDOWS else "") for n in ("peerhatch", "peerhatch-gateway", "peerhatch-gui")]
+if WINDOWS:
+    import windows_conpty
+    NAMES.extend(windows_conpty.FILES)
+
+
+def install_targets():
+    yield LIVE, NAMES
+    if WINDOWS:
+        config = STAGE.parent / "gui-directory.txt"
+        if config.is_file():
+            directory = Path(config.read_text(encoding="utf-8-sig").strip())
+            if not directory.is_absolute() or not directory.is_dir():
+                raise ValueError(f"{config} must name an existing absolute directory")
+            directory = directory.resolve()
+            if directory == STAGE.resolve():
+                raise ValueError(f"{config} points to the Cargo build directory")
+            if directory != LIVE.resolve():
+                yield directory, [NAMES[2]]
+
+
+def changed_files(live, names):
+    for name in names:
+        if not (STAGE / name).is_file():
+            raise ValueError(f"Missing development build: {STAGE / name}")
+    return [name for name in names if digest(STAGE / name) != digest(live / name)]
 
 
 def build():
@@ -29,6 +54,9 @@ def build():
     subprocess.run(["cargo", "build", "--locked", "--target-dir", str(STAGE.parent),
                     "-p", "peerhatch-cli", "-p", "peerhatch-gateway", "-p", "peerhatch-gui"],
                    cwd=ROOT, env=env, check=True)
+    if WINDOWS:
+        for name, data in windows_conpty.runtime_files(STAGE / NAMES[1], TARGET / "conpty").items():
+            (STAGE / name).write_bytes(data)
 
 
 def digest(path):
@@ -84,7 +112,8 @@ def gateway_status(app):
 def start(app):
     if WINDOWS:
         import dev_windows
-        app["pid"] = dev_windows.start(app, ROOT)
+        directory = Path(app["exe"]).parent
+        app["pid"] = dev_windows.start(app, ROOT if directory == LIVE else directory)
     else:
         systemctl("restart", app["unit"])
         app["pid"] = int(systemctl("show", app["unit"], "-p", "MainPID", "--value"))
@@ -120,29 +149,28 @@ def install():
         else:
             import fcntl
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        activate()
+        for live, names in install_targets():
+            activate(live, names)
 
 
-def activate():
+def activate(live, names):
     if WINDOWS:
         import dev_windows
-    changed = [name for name in NAMES if digest(STAGE / name) != digest(LIVE / name)]
-    if any(not (STAGE / n).is_file() for n in NAMES):
-        raise ValueError("Build the development binaries before installing")
-    apps = dev_windows.apps(LIVE) if WINDOWS else linux_apps()
-    apps = [a for a in apps if a["name"] in changed or
-            (not WINDOWS and not Path(f"/proc/{a['pid']}/exe").samefile(LIVE / a["name"]))]
+    changed = changed_files(live, names)
+    apps = dev_windows.apps(live) if WINDOWS else linux_apps()
+    apps = [a for a in apps if needs_restart(a["name"], changed) or
+            (not WINDOWS and not Path(f"/proc/{a['pid']}/exe").samefile(live / a["name"]))]
     if not changed and not apps:
         print("Development binaries are current.", flush=True)
         return
     for app in apps:
         if app["name"] == NAMES[1]:
             app["id"] = gateway_status(app)
-    LIVE.mkdir(parents=True, exist_ok=True)
+    live.mkdir(parents=True, exist_ok=True)
     if WINDOWS:
         # mkdtemp uses a protected owner-only ACL on Windows. Executables moved
         # from there can become inaccessible to the user's non-elevated desktop.
-        work = LIVE / (".dev-update-" + uuid.uuid4().hex)
+        work = live / (".dev-update-" + uuid.uuid4().hex)
         work.mkdir()
     else:
         work = Path(tempfile.mkdtemp(prefix="activate-", dir=STAGE.parent))
@@ -151,19 +179,19 @@ def activate():
     try:
         for name in changed:
             shutil.copy2(STAGE / name, work / name)
-            if (LIVE / name).exists():
+            if (live / name).exists():
                 if WINDOWS:
                     # Preserve any per-file DACL on both the new image and the rollback image.
-                    dev_windows.copy_dacl(LIVE / name, work / name)
-                    os.link(LIVE / name, work / (name + ".old"))
+                    dev_windows.copy_dacl(live / name, work / name)
+                    os.link(live / name, work / (name + ".old"))
                 else:
-                    shutil.copy2(LIVE / name, work / (name + ".old"))
+                    shutil.copy2(live / name, work / (name + ".old"))
         if WINDOWS:
             for app in apps:
                 dev_windows.stop(app)
                 stopped.append(app)
         for name in changed:
-            dest = LIVE / name
+            dest = live / name
             try:
                 os.replace(work / name, dest)
             except PermissionError:
@@ -181,7 +209,7 @@ def activate():
             start(app)
             started.append(app)
             verify(app)
-        print("Updated:", ", ".join(changed) or "running images",
+        print(f"Updated {live}:", ", ".join(changed) or "running images",
               "| Restarted:", ", ".join(a["name"] for a in apps) or "none", flush=True)
     except Exception:
         cleanup = False
@@ -191,9 +219,9 @@ def activate():
         for name in reversed(installed):
             old = work / (name + ".old")
             if old.exists():
-                os.replace(old, LIVE / name)
+                os.replace(old, live / name)
             else:
-                (LIVE / name).unlink()
+                (live / name).unlink()
         for app in (stopped if WINDOWS else (apps if installed or started else [])):
             start(app)
             verify(app)
@@ -206,10 +234,15 @@ def activate():
         else:
             print(f"Recovery copies are in {work}", file=sys.stderr, flush=True)
         if WINDOWS:
-            for old in LIVE.glob(".dev-update-*/*.mapped"):
+            for old in live.glob(".dev-update-*/*.mapped"):
                 with contextlib.suppress(OSError):
                     old.unlink()
                     old.parent.rmdir()
+
+
+def needs_restart(name, changed):
+    return name in changed or (WINDOWS and name == NAMES[1] and
+                               any(file in changed for file in windows_conpty.FILES))
 
 
 def main():
@@ -221,10 +254,12 @@ def main():
         build()
     elif WINDOWS and options.action == "apply":
         import dev_windows
-        changed = [n for n in NAMES if not (STAGE / n).is_file() or digest(STAGE / n) != digest(LIVE / n)]
-        if not changed:
+        pending = [(live, changed) for live, names in install_targets()
+                   if (changed := changed_files(live, names))]
+        if not pending:
             print("Windows development binaries are current.", flush=True)
-        elif any(app["name"] in changed for app in dev_windows.apps(LIVE, all_sessions=True)):
+        elif any(needs_restart(app["name"], changed) for live, changed in pending
+                 for app in dev_windows.apps(live, all_sessions=True)):
             dev_windows.interactive(Path(__file__).resolve(), STAGE.parent)
         else:
             install()

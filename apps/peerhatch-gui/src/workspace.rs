@@ -321,10 +321,8 @@ impl Workspace {
             return;
         }
         if page == Page::Settings {
-            self.dashboard.update(cx, |d, _| {
-                d.name_field = None;
-                d.relay_field = None;
-                d.settings_scroll = ScrollHandle::new();
+            self.dashboard.update(cx, |d, cx| {
+                d.settings_editor.reset(cx);
             });
         }
         self.append_tab(page, w, cx);
@@ -417,13 +415,6 @@ impl Workspace {
 
     fn close_tab(&mut self, page: &Page, w: &mut Window, cx: &mut Context<Self>) {
         self.forget_terminal(page, cx);
-        if *page == Page::Settings {
-            self.dashboard.update(cx, |d, cx| {
-                d.name_field = None;
-                d.relay_field = None;
-                cx.notify()
-            });
-        }
         // If the user already closed the separate Home window, keep Home reachable.
         if self.tabs.len() == 1
             && self
@@ -574,7 +565,7 @@ impl Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::release_tab))
     }
 
-    fn active_panel(&self, ui: Ui, cx: &mut Context<Self>) -> DockPanel {
+    fn active_panel(&self, ui: Ui, viewport: Pixels, cx: &mut Context<Self>) -> DockPanel {
         let workspace = cx.weak_entity();
         match &self.active {
             Page::Home => DockPanel::scroll(
@@ -582,11 +573,10 @@ impl Workspace {
                 self.dashboard.read(cx).home_scroll.clone(),
                 self.dashboard.update(cx, |d, cx| d.home(ui, workspace, cx)),
             ),
-            Page::Settings => DockPanel::scroll(
-                "settings-scroll",
-                self.dashboard.read(cx).settings_scroll.clone(),
-                self.dashboard.update(cx, |d, cx| d.settings(ui, cx)),
-            ),
+            Page::Settings => {
+                let width = self.dock.read(cx).settings().panel_width(viewport);
+                DockPanel::fill(self.dashboard.update(cx, |d, cx| d.settings(ui, width, cx)))
+            }
             Page::Device { view, .. } => DockPanel::scroll(
                 ("device-scroll", view.entity_id()),
                 view.read(cx).scroll.clone(),
@@ -616,8 +606,27 @@ impl Render for Workspace {
         let ui = Ui::new(window, cx);
         let error = self.dashboard.read(cx).action_error.clone();
         let tabs = self.tab_bar(ui, window, cx);
-        let panel = self.active_panel(ui, cx);
+        let panel = self.active_panel(ui, window.viewport_size().width, cx);
         DockLayout::new(tabs, panel, self.workspace_menu(ui, cx))
+            .when(self.active == Page::Settings, |dock| {
+                let search = self.dashboard.read(cx).settings_editor.search.clone();
+                dock.capture_key_down(move |event, window, cx| {
+                    let key = &event.keystroke;
+                    let shortcut = Modifiers::secondary_key();
+                    if key.modifiers == shortcut && key.key.eq_ignore_ascii_case("f") {
+                        search.read(cx).focus_handle(cx).focus(window);
+                    } else if key.key == "escape" && !key.modifiers.modified()
+                        && search.read(cx).focus_handle(cx).is_focused(window)
+                        && !search.read(cx).is_composing() && !search.read(cx).text().is_empty()
+                    {
+                        search.update(cx, |field, cx| field.set_text("", cx));
+                    } else {
+                        return;
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+            })
             .when_some(error, |dock, message| dock.banner(ui.alert(message)))
             .when_some(self.dragged_tab.as_ref(), |dock, drag| {
                 dock.dragging(

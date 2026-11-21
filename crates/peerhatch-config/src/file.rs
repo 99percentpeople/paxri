@@ -22,7 +22,11 @@ pub struct LocalSettings {
 
 pub fn read_local(path: &Path) -> Result<LocalSettings> {
     match fs::read_to_string(path) {
-        Ok(text) => Ok(toml::from_str(&text)?),
+        Ok(text) => {
+            let settings: LocalSettings = toml::from_str(&text)?;
+            settings.gui.terminal.validate().map_err(anyhow::Error::msg)?;
+            Ok(settings)
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings {
             native: Default::default(),
             gui: Default::default(),
@@ -164,6 +168,9 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
                 "cursor_shape",
                 v.serialize(ser)?,
             ),
+            GuiChange::FontFamily(v) => (subtable(gui, "terminal")?, "font_family", v.serialize(ser)?),
+            GuiChange::LineHeight(v) => (subtable(gui, "terminal")?, "line_height", v.serialize(ser)?),
+            GuiChange::LetterSpacing(v) => (subtable(gui, "terminal")?, "letter_spacing", v.serialize(ser)?),
             GuiChange::BlinkCursor(v) => (
                 subtable(gui, "terminal")?,
                 "blink_cursor",

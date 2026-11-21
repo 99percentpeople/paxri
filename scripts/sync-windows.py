@@ -165,7 +165,8 @@ def receive():
 def build_inputs(hashes):
     return {name: value for name, value in hashes.items()
             if name.startswith(("apps/", "crates/", "compat/")) or name in {
-                "Cargo.toml", "Cargo.lock", "scripts/dev-update.py", "scripts/dev_windows.py"}}
+                "Cargo.toml", "Cargo.lock", "scripts/dev-update.py", "scripts/dev_windows.py",
+                "scripts/windows_conpty.py"}}
 
 
 def dev_command(host, action):

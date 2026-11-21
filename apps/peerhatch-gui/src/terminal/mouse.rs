@@ -1,11 +1,11 @@
-use super::{LINE, Terminal};
+use super::Terminal;
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     term::TermMode,
 };
 use gpui::{
     ClipboardItem, Context, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollWheelEvent, Window, px,
+    Pixels, Point, ScrollWheelEvent, Window,
 };
 
 // xterm pointer coordinates are one-based character cells, including in SGR mode.
@@ -273,7 +273,11 @@ impl Terminal {
         } else {
             WheelTarget::History
         };
-        let delta = e.delta.pixel_delta(px(LINE)).map(|v| f32::from(v) / LINE);
+        let cell = self.emulator.font.cell;
+        let delta = match e.delta {
+            gpui::ScrollDelta::Pixels(p) => gpui::point(f32::from(p.x) / cell.width, f32::from(p.y) / cell.height),
+            gpui::ScrollDelta::Lines(p) => p,
+        };
         let (x, y) = self.mouse.wheel_steps(target, delta);
         match target {
             WheelTarget::Mouse => {

@@ -10,7 +10,7 @@ pub(super) struct TextBuffer<const MULTILINE: bool> {
     before_composition: Option<(String, usize, usize)>,
 }
 
-pub(super) fn byte_at_utf16(text: &str, offset: usize) -> usize {
+pub(crate) fn byte_at_utf16(text: &str, offset: usize) -> usize {
     let mut units = 0;
     for (byte, c) in text.char_indices() {
         if units + c.len_utf16() > offset {

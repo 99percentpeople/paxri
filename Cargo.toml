@@ -8,6 +8,16 @@ version = "0.0.0-dev"
 edition = "2024"
 publish = false
 
+# Keep GUI edits incremental while optimizing rendering and layout during development.
+[profile.dev.package.peerhatch-gui]
+opt-level = 1
+
+[profile.dev.package.gpui]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
+
 [patch.crates-io]
 # GPUI 0.2.2 pulls zed-async-tar, whose xattr 0.2 uses a removed Linux libc alias.
 xattr = { path = "compat/xattr" }

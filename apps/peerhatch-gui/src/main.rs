@@ -19,7 +19,7 @@ mod presence;
 mod terminal;
 mod theme;
 mod workspace;
-use components::Input;
+use components::{Input, TextSetting};
 use workspace::Workspace;
 
 #[derive(Parser)]
@@ -62,9 +62,9 @@ struct Dashboard {
     refresh_presence: bool,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
-    settings_scroll: ScrollHandle,
-    name_field: Option<Entity<Input>>,
-    relay_field: Option<Entity<Input>>,
+    settings_editor: pages::SettingsEditor,
+    name_field: TextSetting,
+    relay_field: TextSetting,
     profile_native: Option<Native>,
     gateway_details: bool,
     pairing_input: Entity<Input>,
@@ -131,15 +131,18 @@ impl Dashboard {
     }
 
     fn manage(&mut self, action: GatewayAction, cx: &mut Context<Self>) {
-        if !self.saving {
-            self.request(
-                GatewayRequest {
-                    command: Operation::Manage(action),
-                    on_complete: None,
-                },
-                cx,
-            );
+        if self.gateway_action.is_some()
+            || self.pending.iter().any(|r| matches!(r.command, Operation::Manage(_)))
+        {
+            return;
         }
+        self.request(
+            GatewayRequest {
+                command: Operation::Manage(action),
+                on_complete: None,
+            },
+            cx,
+        );
     }
 
     fn request(&mut self, request: GatewayRequest, cx: &mut Context<Self>) {
@@ -222,7 +225,7 @@ impl Dashboard {
                 Network(NativeChange),
             }
             let edit = match &command {
-                Command::SetGui { change } => Some(Edit::Appearance(*change)),
+                Command::SetGui { change } => Some(Edit::Appearance(change.clone())),
                 Command::SetNative { change } => Some(Edit::Network(change.clone())),
                 _ => None,
             };
@@ -259,9 +262,6 @@ impl Dashboard {
                 view.saving = false;
                 view.gateway_action = None;
                 let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
-                if relay_saved && result.is_ok() {
-                    view.relay_field = None;
-                }
                 match result {
                     Ok(RequestResult::Stopped(startup, native)) => {
                         view.presence_watch = None;
@@ -299,10 +299,10 @@ impl Dashboard {
                                 view.inspect_startup(cx);
                             }
                         }
-                        theme::apply(status.gui, cx);
-                        if name_saved {
-                            view.name_field = None;
-                        }
+                        theme::apply(status.gui.clone(), cx);
+                        view.name_field.set_placeholder(&status.computer_name, cx);
+                        view.name_field
+                            .sync(status.device_name.as_deref().unwrap_or_default(), cx);
                         if joined {
                             view.pairing_input =
                                 Input::new("", "Paste the other device’s code", cx);
@@ -322,7 +322,7 @@ impl Dashboard {
                         }
                     }
                     Err(error) if changing => {
-                        if on_complete.is_none() {
+                        if on_complete.is_none() && !name_saved && !relay_saved {
                             view.action_error = Some(error);
                         }
                     }
@@ -331,6 +331,18 @@ impl Dashboard {
                         view.status = None;
                         view.error = Some(error);
                     }
+                }
+                if let Some(native) = view.status.as_ref()
+                    .and_then(|s| s.native.as_ref())
+                    .or(view.profile_native.as_ref())
+                {
+                    view.relay_field
+                        .sync(native.relay_url.as_ref().map_or("", |url| url.as_str()), cx);
+                }
+                if name_saved {
+                    view.name_field.finish(&outcome, cx);
+                } else if relay_saved {
+                    view.relay_field.finish(&outcome, cx);
                 }
                 #[cfg(windows)]
                 if startup_changed {
@@ -364,9 +376,9 @@ impl Dashboard {
             refresh_presence: false,
             terminal_sessions: BTreeMap::new(),
             home_scroll: ScrollHandle::new(),
-            settings_scroll: ScrollHandle::new(),
-            name_field: None,
-            relay_field: None,
+            settings_editor: pages::SettingsEditor::new(cx),
+            name_field: TextSetting::new("", Self::commit_device_name, cx),
+            relay_field: TextSetting::new("Automatic public relay", Self::commit_relay_url, cx),
             profile_native: None,
             gateway_details: false,
             local_code: Input::read_only("", cx),

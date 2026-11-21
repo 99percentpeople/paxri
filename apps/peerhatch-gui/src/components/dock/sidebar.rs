@@ -57,6 +57,13 @@ impl DockSettings {
         origin + grab.clamp(&Point::default(), &point(tab_width, self.tab_height()))
     }
 
+    pub(crate) fn panel_width(self, viewport: Pixels) -> Pixels {
+        match self.placement {
+            DockPlacement::Top => viewport,
+            DockPlacement::Left => viewport - self.width(viewport),
+        }
+    }
+
     fn max_width(viewport: Pixels) -> Pixels {
         (viewport / 2.).clamp(px(0.), MAX_WIDTH)
     }

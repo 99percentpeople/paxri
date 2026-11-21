@@ -5,6 +5,9 @@ mod network_settings;
 mod peer_settings;
 mod rules;
 mod settings;
+mod settings_catalog;
+mod settings_editor;
+pub(crate) use settings_editor::SettingsEditor;
 mod terminal_settings;
 
 use crate::{

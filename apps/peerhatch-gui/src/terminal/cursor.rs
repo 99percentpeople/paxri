@@ -1,18 +1,18 @@
-use super::{
-    display::{COL, LINE},
-    emulator::Emulator,
-};
-use crate::theme::{self, TerminalAppearance};
+use super::emulator::Emulator;
+use crate::components::byte_at_utf16;
+use crate::theme::{self, TerminalAppearance, fonts::CellSize};
 use alacritty_terminal::{
     grid::Dimensions,
     index::Point as GridPoint,
     term::{TermMode, cell::Flags},
     vte::ansi::{CursorShape, CursorStyle},
 };
-use gpui::{App, Bounds, Pixels, Point, Task, Window, point, px, size};
-use std::time::Duration;
+use gpui::{App, Bounds, Pixels, Point, Window, point, px, size};
+use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-pub(super) fn default_style(appearance: TerminalAppearance) -> CursorStyle {
+pub(super) fn default_style(appearance: &TerminalAppearance) -> CursorStyle {
     CursorStyle {
         shape: match appearance.cursor_shape {
             theme::CursorShape::Block => CursorShape::Block,
@@ -31,8 +31,24 @@ pub(super) struct CursorCell {
 
 impl CursorCell {
     pub(super) fn visible(screen: &Emulator) -> Option<Self> {
+        if !screen.term.mode().contains(TermMode::SHOW_CURSOR) {
+            return None;
+        }
+        Self::at_input(screen)
+    }
+
+    pub(super) fn composition(screen: &Emulator, text: &str) -> Option<Self> {
+        let mut cell = Self::at_input(screen)?;
+        let columns = screen.term.columns();
+        let width = text.width().clamp(1, columns);
+        cell.point.column.0 = cell.point.column.0.min(columns - width);
+        cell.width = width as u16;
+        Some(cell)
+    }
+
+    fn at_input(screen: &Emulator) -> Option<Self> {
         let grid = screen.term.grid();
-        if grid.display_offset() != 0 || !screen.term.mode().contains(TermMode::SHOW_CURSOR) {
+        if grid.display_offset() != 0 {
             return None;
         }
         let mut point = grid.cursor.point;
@@ -53,60 +69,129 @@ impl CursorCell {
                 .contains(&point.column.0)
     }
 
-    pub(super) fn stroke(self, shape: CursorShape, at: Point<Pixels>) -> Option<Bounds<Pixels>> {
+    pub(super) fn stroke(
+        self,
+        shape: CursorShape,
+        at: Point<Pixels>,
+        cell: CellSize,
+    ) -> Option<Bounds<Pixels>> {
         match shape {
             CursorShape::Underline => Some(Bounds::new(
-                at + point(px(0.), px(LINE - 2.)),
-                size(px(COL * f32::from(self.width)), px(2.)),
+                at + point(px(0.), px(cell.height - 2.)),
+                size(px(cell.width * f32::from(self.width)), px(2.)),
             )),
-            CursorShape::Beam => Some(Bounds::new(at, size(px(2.), px(LINE)))),
+            CursorShape::Beam => Some(Bounds::new(at, size(px(2.), px(cell.height)))),
             _ => None,
         }
     }
 }
 
-struct Blink {
-    point: GridPoint,
-    hidden: bool,
-    next: Option<Task<()>>,
+#[derive(Default)]
+pub(super) struct Preedit {
+    pub text: String,
+    pub selection: Range<usize>,
 }
 
-// Element state is dropped when the terminal is hidden or leaves this window.
-// A steady cursor needs no scheduled work.
+impl Preedit {
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.selection = 0..0;
+    }
+
+    pub fn replace(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selection: Option<Range<usize>>,
+    ) {
+        let bytes = range.map_or(0..self.text.len(), |r| {
+            byte_at_utf16(&self.text, r.start)..byte_at_utf16(&self.text, r.end.max(r.start))
+        });
+        let base = self.text[..bytes.start].encode_utf16().count();
+        self.text.replace_range(bytes, text);
+        let len = text.encode_utf16().count();
+        let selected = selection.unwrap_or(len..len);
+        self.selection = base + selected.start.min(len)..base + selected.end.min(len);
+    }
+
+    pub fn layout(&self, screen: &Emulator, origin: Point<Pixels>) -> Option<PreeditLayout<'_>> {
+        let span = CursorCell::composition(screen, &self.text)?;
+        let cell = screen.font.cell;
+        let mut start = 0;
+        let mut end = self.text.len();
+        if self.text.width() > usize::from(span.width) {
+            // Show the portion around the IME caret without splitting wide glyphs or emoji.
+            let caret = byte_at_utf16(&self.text, self.selection.end);
+            let mut width = self.text[..caret].width();
+            for (byte, glyph) in self.text.grapheme_indices(true) {
+                if width <= usize::from(span.width) {
+                    break;
+                }
+                width = width.saturating_sub(glyph.width());
+                start = byte + glyph.len();
+            }
+            let mut width = 0;
+            for (byte, glyph) in self.text[start..].grapheme_indices(true) {
+                width += glyph.width();
+                if width > usize::from(span.width) {
+                    end = start + byte;
+                    break;
+                }
+            }
+        }
+        Some(PreeditLayout {
+            text: &self.text[start..end],
+            first_utf16: self.text[..start].encode_utf16().count(),
+            at: origin
+                + point(
+                    px(span.point.column.0 as f32 * cell.width),
+                    px(span.point.line.0 as f32 * cell.height),
+                ),
+            columns: span.width,
+            cell,
+        })
+    }
+}
+
+pub(super) struct PreeditLayout<'a> {
+    pub text: &'a str,
+    pub at: Point<Pixels>,
+    pub columns: u16,
+    first_utf16: usize,
+    cell: CellSize,
+}
+
+impl PreeditLayout<'_> {
+    pub fn bounds_for_range(&self, range: Range<usize>) -> Bounds<Pixels> {
+        let x = |offset: usize| {
+            let byte = byte_at_utf16(self.text, offset.saturating_sub(self.first_utf16));
+            px(self.text[..byte].width() as f32 * self.cell.width)
+        };
+        let right = px(f32::from(self.columns) * self.cell.width);
+        let stroke = px(1.5).min(right);
+        let left = x(range.start).min(right - stroke);
+        Bounds::new(
+            self.at + point(left, px(0.)),
+            size(
+                (x(range.end).min(right) - left).max(stroke),
+                px(self.cell.height),
+            ),
+        )
+    }
+}
+
 pub(super) fn blink_visible(
     enabled: bool,
     cell: Option<CursorCell>,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    let Some(cell) = cell.filter(|_| enabled && window.is_window_active()) else {
-        return true;
-    };
-    let blink = window.use_keyed_state("terminal-cursor-blink", cx, |_, _| Blink {
-        point: cell.point,
-        hidden: false,
-        next: None,
-    });
-    blink.update(cx, |blink, cx| {
-        if blink.point != cell.point {
-            blink.point = cell.point;
-            blink.hidden = false;
-            blink.next = None;
-        }
-        if blink.next.is_none() {
-            blink.next = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(550))
-                    .await;
-                let _ = this.update(cx, |blink, cx| {
-                    blink.next = None;
-                    blink.hidden = !blink.hidden;
-                    cx.notify();
-                });
-            }));
-        }
-        !blink.hidden
-    })
+    crate::components::caret::blink_visible(
+        cell.filter(|_| enabled).map(|c| c.point),
+        false,
+        window,
+        cx,
+    )
 }
 
 #[cfg(test)]
@@ -172,6 +257,36 @@ mod tests {
     }
 
     #[test]
+    fn preedit_caret_follows_the_ime_selection_with_the_remote_cursor_hidden() {
+        let mut screen = Emulator::new(GridSize { rows: 3, cols: 8 });
+        screen.process(b"\x1b[?25l\x1b[3;8H");
+        let origin = point(px(6.), px(4.));
+        let mut marked = Preedit::default();
+        marked.replace(None, "a😀中", Some(3..3));
+        let layout = marked.layout(&screen, origin).unwrap();
+        assert_eq!(layout.text, "a😀中");
+        assert_eq!(
+            layout.bounds_for_range(3..3).origin,
+            point(px(60.), px(44.))
+        );
+
+        marked.replace(Some(1..3), "ni", None);
+        assert_eq!(marked.text, "ani中");
+        assert_eq!(marked.selection, 3..3);
+
+        marked.replace(None, "12345678901", None);
+        let layout = marked.layout(&screen, origin).unwrap();
+        assert_eq!(layout.text, "45678901");
+        assert_eq!(
+            layout.bounds_for_range(marked.selection.clone()),
+            Bounds::new(point(px(76.5), px(44.)), size(px(1.5), px(20.)))
+        );
+        marked.clear();
+        assert!(marked.text.is_empty());
+        assert_eq!(marked.selection, 0..0);
+    }
+
+    #[test]
     fn all_cursor_shapes_align_to_the_whole_wide_character() {
         let mut screen = Emulator::new(GridSize { rows: 3, cols: 8 });
         screen.process("a界b\x1b[1;3H".as_bytes());
@@ -181,16 +296,23 @@ mod tests {
         assert!(!cell.covers(GridPoint::new(Line(0), Column(3))));
         let at = point(px(30.), px(40.));
         assert_eq!(
-            cell.stroke(CursorShape::Underline, at),
+            cell.stroke(CursorShape::Underline, at, screen.font.cell),
             Some(Bounds::new(point(px(30.), px(58.)), size(px(18.), px(2.))))
         );
         assert_eq!(
-            cell.stroke(CursorShape::Beam, at),
+            cell.stroke(CursorShape::Beam, at, screen.font.cell),
             Some(Bounds::new(at, size(px(2.), px(20.))))
         );
-        assert!(cell.stroke(CursorShape::Block, at).is_none());
+        assert!(
+            cell.stroke(CursorShape::Block, at, screen.font.cell)
+                .is_none()
+        );
         screen.process(b"\x1b[?25l");
         assert!(CursorCell::visible(&screen).is_none());
+        screen.process(b"\x1b[3;8H");
+        let preedit = CursorCell::composition(&screen, "ni好").unwrap();
+        assert_eq!(preedit.point, GridPoint::new(Line(2), Column(4)));
+        assert_eq!(preedit.width, 4);
         screen.process(b"\x1b[?25h\r\n1\r\n2\r\n3");
         screen.scroll(Scroll::Top);
         assert!(CursorCell::visible(&screen).is_none());

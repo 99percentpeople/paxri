@@ -22,6 +22,9 @@ fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {
     for change in [
         GuiChange::Scheme(TerminalScheme::Midnight),
         GuiChange::CursorShape(CursorShape::Bar),
+        GuiChange::FontFamily("Cascadia Mono".to_owned()),
+        GuiChange::LineHeight(24),
+        GuiChange::LetterSpacing(-1),
         GuiChange::BlinkCursor(true),
     ] {
         set_gui(&file, change, false).unwrap();
@@ -34,6 +37,13 @@ fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {
     assert_eq!(gui.terminal.scheme, TerminalScheme::Midnight);
     assert_eq!(gui.terminal.cursor_shape, CursorShape::Bar);
     assert!(gui.terminal.blink_cursor);
+    assert_eq!(gui.terminal.font_family, "Cascadia Mono");
+    assert_eq!(gui.terminal.line_height, 24);
+    assert_eq!(gui.terminal.letter_spacing, -1);
+    for invalid in [GuiChange::LineHeight(0), GuiChange::LetterSpacing(5)] {
+        assert!(set_gui(&file, invalid, false).is_err());
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
     assert!(parse(&text.replace("midnight", "typo")).is_err());
     assert!(parse(&text.replace("blink_cursor", "blink_curser")).is_err());
 }

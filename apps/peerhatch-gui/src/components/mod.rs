@@ -1,5 +1,6 @@
 //! Reusable GPUI controls, layouts and icons for workspace pages.
 mod button;
+pub(crate) mod caret;
 mod controls;
 pub mod dock;
 mod dropdown;
@@ -9,6 +10,7 @@ mod input;
 mod list_item;
 mod scrollbar;
 mod select;
+mod settings;
 mod tooltip;
 use crate::theme::{
     self, CONTROL_RADIUS, PANEL_RADIUS, Palette, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
@@ -18,10 +20,14 @@ pub use dropdown::{Dropdown, DropdownContent, DropdownState, DropdownTrigger};
 pub(crate) use focus::observe_window_focus;
 use gpui::{prelude::*, *};
 pub use icons::Icon;
+pub(crate) use input::byte_at_utf16;
 pub use input::{Input, Textarea};
 pub use list_item::ListItem;
 pub use scrollbar::{ScrollMetrics, ScrollSource, Scrollbar};
 pub use select::Select;
+pub(crate) use settings::{
+    SettingSpec, SettingsGroup, SettingsSection, SettingsTable, TextSetting, setting_field,
+};
 pub use tooltip::tooltip;
 
 #[derive(Clone, Copy)]

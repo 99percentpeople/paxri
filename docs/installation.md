@@ -11,6 +11,8 @@ Download your system's archive and `SHA256SUMS` from the **PeerHatch prototype**
 | Apple Silicon | `peerhatch-macos-arm64.tar.gz` |
 | Intel Mac | `peerhatch-macos-amd64.tar.gz` |
 
+On Windows, extract the whole ZIP into one directory. Keep `conpty.dll` and `OpenConsole.exe` beside the gateway to support mouse input and screen switching in remote terminal applications. Restart the gateway after updating those files.
+
 Every Linux archive includes `bin/peerhatch`, `bin/peerhatch-gateway`, and `bin/peerhatch-gui`. The glibc builds target Debian 12 (glibc 2.36). The musl build targets Alpine 3.23. Opening the GUI requires a graphical session, a Vulkan driver, and the desktop runtime libraries, including Fontconfig and XKB.
 
 ## Headless ARM64 musl installation
@@ -32,7 +34,7 @@ Extract the complete archive. On Windows double-click `peerhatch-gui.exe`. On ma
 
 For a headless per-user installation, run `peerhatch gateway start`. Use `gateway status`, `stop`, or `restart` to manage it. Commands below assume the directory containing the binaries is on PATH. In PowerShell you can use `.\peerhatch.exe` in the extracted directory. In a Unix archive you can use `./bin/peerhatch`.
 
-The CLI and GUI share `node.toml` and a sibling `device.key`. The default directory is `$XDG_CONFIG_HOME/peerhatch` (usually `~/.config/peerhatch`) on Linux, `~/Library/Application Support/peerhatch` on macOS, and `%LOCALAPPDATA%\PeerHatch` on Windows. An existing development node can continue to use its previous configuration directory and identity. To inspect or change startup policy use **Settings → Gateway** or the CLI:
+The CLI and GUI share `node.toml` and a sibling `device.key`. The default directory is `$XDG_CONFIG_HOME/peerhatch` (usually `~/.config/peerhatch`) on Linux, `~/Library/Application Support/peerhatch` on macOS, and `%LOCALAPPDATA%\PeerHatch` on Windows. An existing development node can continue to use its previous configuration directory and identity. To inspect or change startup policy use **Settings → Gateway → Startup behavior** or the CLI:
 
 ```sh
 peerhatch gateway startup
@@ -46,9 +48,11 @@ peerhatch gateway startup gui
 | `login` | Start when the current user signs in |
 | `system` | Start at boot with the configured user identity and OS registration privileges |
 
-In **Settings → Network**, choose whether to allow UPnP, try a physical LAN router, or use a custom relay. Clearing the relay URL restores automatic selection. Network edits are saved immediately and applied at the next gateway start. Restarting disconnects active sessions. **Open config file** opens the selected node’s full TOML in an editor, including when its gateway is stopped.
+In desktop settings, switches and selections save as soon as you change them. The device name and relay URL save when you press Enter or leave the field. Clear the device name to use the computer name, or clear the relay URL to restore automatic relay selection.
 
-Windows supports the ordinary-user installation without an administrator account. Boot-time registration requires elevation, uses Task Scheduler and stores the startup helper under Program Files. A Windows S4U task has limited access to user-encrypted files and authenticated network shares. On Windows, `peerhatch gateway status` and **Settings → Gateway** show the running executable and check the actual Task Scheduler registration, even when the gateway is stopped. The report identifies disabled or missing tasks and startup paths pointing to another installation. A client opened from a new folder reuses the running gateway for the same profile. To switch the running executable, use `peerhatch gateway restart` from the desired folder. To update the login or boot task, select the startup mode again or run `peerhatch gateway startup login` or `peerhatch gateway startup system` there. On Linux the app uses desktop autostart or systemd, and on macOS it uses LaunchAgents or LaunchDaemons. A gateway running as root or an elevated administrator rejects remote PTY and file operations.
+In **Settings → Network**, choose whether to allow UPnP, try a physical LAN router, or use a custom relay. Network changes take effect at the next gateway start. Restarting disconnects active sessions. **Open config file** opens the selected node’s TOML with the system default application for that file type, including when its gateway is stopped.
+
+Windows supports the ordinary-user installation without an administrator account. Boot-time registration requires elevation, uses Task Scheduler and stores the startup helper under Program Files. A Windows S4U task has limited access to user-encrypted files and authenticated network shares. On Windows, `peerhatch gateway status` and **Settings → Runtime → Gateway details** show the running executable and check the actual Task Scheduler registration, even when the gateway is stopped. The report identifies disabled or missing tasks and startup paths pointing to another installation. A client opened from a new folder reuses the running gateway for the same profile. To switch the running executable, use `peerhatch gateway restart` from the desired folder. To update the login or boot task, select the startup mode again or run `peerhatch gateway startup login` or `peerhatch gateway startup system` there. On Linux the app uses desktop autostart or systemd, and on macOS it uses LaunchAgents or LaunchDaemons. A gateway running as root or an elevated administrator rejects remote PTY and file operations.
 
 ## Docker on Linux
 

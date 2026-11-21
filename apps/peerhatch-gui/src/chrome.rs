@@ -12,6 +12,7 @@ pub fn window_options(title: &str, dimensions: Size<Pixels>, cx: &App) -> Window
             ..Default::default()
         }),
         window_decorations: Some(WindowDecorations::Client),
+        window_min_size: Some(size(px(640.), px(420.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None, dimensions, cx,
         ))),

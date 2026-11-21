@@ -236,6 +236,7 @@ pub fn tcp_target(input: &str) -> Result<String, String> {
 
 pub fn parse(input: &str) -> Result<Config, String> {
     let mut config: Config = toml::from_str(input).map_err(|e| format!("{e}"))?;
+    config.gui.terminal.validate()?;
     if config.version != 1 {
         return Err(format!(
             "unsupported configuration version {}",

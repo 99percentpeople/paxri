@@ -1,5 +1,8 @@
 //! The trigger owns the focus target. The content owns the selectable rows and popup.
-use super::*;
+use super::{
+    controls::{MENU_PADDING, MENU_ROW_HEIGHT},
+    *,
+};
 use std::rc::Rc;
 
 type SelectAction = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -8,7 +11,9 @@ pub struct DropdownState {
     focus: FocusHandle,
     highlighted: Option<usize>,
     scroll: ScrollHandle,
-    trigger_width: Pixels,
+    trigger_bounds: Option<Bounds<Pixels>>,
+    opening_index: usize,
+    expansion: Pixels,
 }
 
 impl DropdownState {
@@ -36,7 +41,9 @@ impl DropdownState {
             focus,
             highlighted: None,
             scroll: ScrollHandle::new(),
-            trigger_width: px(0.),
+            trigger_bounds: None,
+            opening_index: 0,
+            expansion: px(0.),
         }
     }
 
@@ -51,6 +58,65 @@ impl DropdownState {
     fn highlight(&mut self, item: Option<usize>, cx: &mut Context<Self>) {
         if self.highlighted != item {
             self.highlighted = item;
+            cx.notify();
+        }
+    }
+
+    fn focus_item(&mut self, index: usize, count: usize, window: &Window, cx: &mut Context<Self>) {
+        let opening = !self.is_open();
+        if opening {
+            self.opening_index = index;
+            self.expansion = px(0.);
+        }
+        if let Some(trigger) = self.trigger_bounds {
+            let placement = self.field_placement(trigger, count, window);
+            if opening {
+                self.scroll
+                    .set_offset(point(px(0.), -placement.opening_scroll));
+            } else {
+                let offset = -self.scroll.offset().y;
+                let start = MENU_ROW_HEIGHT * index as f32;
+                let end = start + MENU_ROW_HEIGHT + select_inset() * 2.;
+                let distance = if start < offset {
+                    start - offset
+                } else {
+                    (end - offset - placement.height).max(px(0.))
+                };
+                self.scroll_field(&placement, distance, cx);
+            }
+        } else {
+            self.scroll.scroll_to_item(index);
+        }
+        self.highlight(Some(index), cx);
+    }
+
+    fn field_placement(
+        &self,
+        trigger: Bounds<Pixels>,
+        count: usize,
+        window: &Window,
+    ) -> SelectPlacement {
+        SelectPlacement::new(
+            trigger.center().y,
+            self.opening_index,
+            count,
+            window.viewport_size().height,
+            popup_margin(window),
+        )
+        .expanded(self.expansion)
+    }
+
+    fn scroll_field(
+        &mut self,
+        placement: &SelectPlacement,
+        distance: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = -self.scroll.offset().y;
+        let (growth, next_offset) = placement.scroll_by(offset, distance);
+        if growth > px(0.) || next_offset != offset {
+            self.expansion += growth;
+            self.scroll.set_offset(point(px(0.), -next_offset));
             cx.notify();
         }
     }
@@ -77,8 +143,7 @@ impl DropdownState {
         let mut activate = None;
         match action {
             MenuAction::Highlight(index) => {
-                self.highlight(Some(index), cx);
-                self.scroll.scroll_to_item(index);
+                self.focus_item(index, count, window, cx);
             }
             MenuAction::Dismiss => self.dismiss(cx),
             MenuAction::Activate(index) => {
@@ -158,6 +223,7 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
         if actions.is_empty() {
             return self.0.tab_stop(false);
         }
+        let count = actions.len();
         let key_state = state.clone();
         self.0
             .track_focus(&state.read(cx).focus)
@@ -172,10 +238,10 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 state.update(cx, |menu, cx| {
                     // Outside dismissal may already have run on this same press.
-                    let index = (!open).then_some(checked.unwrap_or(0));
-                    menu.highlight(index, cx);
-                    if let Some(i) = index {
-                        menu.scroll.scroll_to_item(i);
+                    if open {
+                        menu.dismiss(cx);
+                    } else {
+                        menu.focus_item(checked.unwrap_or(0), count, window, cx);
                     }
                     menu.focus.focus(window);
                 });
@@ -187,6 +253,27 @@ struct MenuItem {
     id: ElementId,
     label: AnyElement,
     on_select: SelectAction,
+}
+
+// The collapsed field only needs its selected label. Construct the other option
+// elements when the popup actually lays them out.
+#[derive(IntoElement)]
+struct CheckedLabel {
+    content: Box<dyn Fn() -> Div>,
+    checked: bool,
+}
+
+impl RenderOnce for CheckedLabel {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(SPACE_2)
+            .child((self.content)())
+            .when(self.checked, |row| row.child(Icon::Check.draw(14.)))
+    }
 }
 
 #[derive(Default)]
@@ -218,22 +305,14 @@ impl DropdownContent {
     pub fn checked_item(
         mut self,
         id: impl Into<ElementId>,
-        label: impl IntoElement,
+        content: Box<dyn Fn() -> Div>,
         checked: bool,
         on_select: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         if checked {
             self.checked = Some(self.items.len());
         }
-        let row = div()
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(SPACE_2)
-            .child(label)
-            .when(checked, |row| row.child(Icon::Check.draw(14.)));
-        self.item(id, row, on_select)
+        self.item(id, CheckedLabel { content, checked }, on_select)
     }
 
     fn popup(
@@ -247,17 +326,42 @@ impl DropdownContent {
         let ui = Ui::new(window, cx);
         let viewport = window.viewport_size();
         let outside = state.clone();
-        let width = if layout == DropdownLayout::Field {
-            state.read(cx).trigger_width
-        } else {
-            px(234.)
-        };
+        let menu = state.read(cx);
+        let count = self.items.len();
+        let mut width = px(234.);
+        let mut height = (viewport.height - px(48.)).max(px(32.));
+        let mut offset = SPACE_1;
+        if layout == DropdownLayout::Field
+            && let Some(trigger) = menu.trigger_bounds
+        {
+            let placement = menu.field_placement(trigger, count, window);
+            width = trigger.size.width;
+            height = placement.height;
+            offset = placement.top - trigger.bottom();
+        }
         let mut list = ui
             .popover("content")
-            .track_scroll(&state.read(cx).scroll)
+            .track_scroll(&menu.scroll)
             .w(width.min(viewport.width - px(12.)).max(px(1.)))
-            .max_h((viewport.height - px(48.)).max(px(32.)))
+            .max_h(height)
             .on_mouse_down_out(move |_, _, cx| outside.update(cx, DropdownState::dismiss));
+        if layout == DropdownLayout::Field {
+            let state = state.clone();
+            // A wheel delta is shared between revealing more rows and scrolling the list.
+            // Clip and position rows with the handle, without GPUI also applying that delta.
+            list = list
+                .overflow_hidden()
+                .on_scroll_wheel(move |event, window, cx| {
+                    state.update(cx, |menu, cx| {
+                        if let Some(trigger) = menu.trigger_bounds {
+                            let placement = menu.field_placement(trigger, count, window);
+                            let distance = -event.delta.pixel_delta(window.line_height()).y;
+                            menu.scroll_field(&placement, distance, cx);
+                        }
+                    });
+                    cx.stop_propagation();
+                });
+        }
         for (index, item) in self.items.into_iter().enumerate() {
             let hover = state.clone();
             let select = state.clone();
@@ -285,10 +389,78 @@ impl DropdownContent {
                 } else {
                     Corner::TopLeft
                 })
-                .offset(point(px(0.), SPACE_1))
+                .offset(point(px(0.), offset))
                 .snap_to_window_with_margin(px(6.))
                 .child(list),
         )
+    }
+}
+
+fn popup_margin(window: &Window) -> Pixels {
+    px(6.) + window.client_inset().unwrap_or_default()
+}
+
+fn select_inset() -> Pixels {
+    MENU_PADDING + px(1.)
+}
+
+struct SelectPlacement {
+    top: Pixels,
+    height: Pixels,
+    opening_scroll: Pixels,
+    content_height: Pixels,
+    growth_left: Pixels,
+}
+
+impl SelectPlacement {
+    fn new(center: Pixels, index: usize, count: usize, viewport: Pixels, margin: Pixels) -> Self {
+        // The outer border and padding surround a list of equal-height menu items.
+        let total = select_inset() * 2. + MENU_ROW_HEIGHT * count as f32;
+        let max_height = total
+            .min(select_inset() * 2. + MENU_ROW_HEIGHT * 9.)
+            .min((viewport - margin * 2.).max(px(1.)));
+        let row_center =
+            select_inset() + MENU_ROW_HEIGHT * (index.min(count.saturating_sub(1)) as f32 + 0.5);
+        let below = (viewport - margin - center).max(px(0.));
+        // Keep the checked row over the field. Near the bottom, open with only the
+        // rows that fit around it. At the end of the list its short tail already fits.
+        let height = if total - row_center <= below {
+            max_height
+        } else {
+            (below + below.min(row_center))
+                .max(MENU_ROW_HEIGHT + select_inset() * 2.)
+                .min(max_height)
+        };
+        let half_row = (select_inset() + MENU_ROW_HEIGHT * 0.5).min(height * 0.5);
+        let center = center.clamp(
+            margin + half_row,
+            (viewport - margin - half_row).max(margin + half_row),
+        );
+        let overflow = total - height;
+        let centered_scroll = (row_center - height * 0.5).clamp(px(0.), overflow);
+        let top = (center - row_center + centered_scroll)
+            .clamp(margin, (viewport - margin - height).max(margin));
+        Self {
+            top,
+            height,
+            opening_scroll: (top + row_center - center).clamp(px(0.), overflow),
+            content_height: total,
+            growth_left: (max_height - height).min(top - margin),
+        }
+    }
+
+    fn expanded(mut self, amount: Pixels) -> Self {
+        let growth = amount.min(self.growth_left);
+        self.top -= growth;
+        self.height += growth;
+        self.growth_left -= growth;
+        self
+    }
+
+    fn scroll_by(&self, offset: Pixels, distance: Pixels) -> (Pixels, Pixels) {
+        let target = (offset + distance).clamp(px(0.), self.content_height - self.height);
+        let growth = (target - offset).clamp(px(0.), self.growth_left);
+        (growth, target - growth)
     }
 }
 
@@ -358,8 +530,8 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
                 root.on_children_prepainted(move |children, _, cx| {
                     if let Some(trigger) = children.first() {
                         measured.update(cx, |menu, cx| {
-                            if menu.trigger_width != trigger.size.width {
-                                menu.trigger_width = trigger.size.width;
+                            if menu.trigger_bounds != Some(*trigger) {
+                                menu.trigger_bounds = Some(*trigger);
                                 if menu.is_open() {
                                     cx.notify();
                                 }
@@ -392,7 +564,56 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
 
 #[cfg(test)]
 mod form_controls {
-    use super::{MenuAction::*, navigation};
+    use super::{MenuAction::*, SelectPlacement, navigation};
+    use gpui::px;
+
+    #[test]
+    fn selected_row_aligns_with_the_trigger_and_scrolls_into_view_on_open() {
+        // Three choices fit without scrolling. Changing the selection moves the popup.
+        for (i, top) in [(0, 277.), (1, 243.), (2, 209.)] {
+            let p = SelectPlacement::new(px(300.), i, 3, px(600.), px(6.));
+            assert_eq!(
+                (p.top, p.opening_scroll, p.height),
+                (px(top), px(0.), px(114.))
+            );
+        }
+        // A long list can align the current row even when the window constrains its top.
+        for center in [40., 180., 560.] {
+            let p = SelectPlacement::new(px(center), 24, 60, px(600.), px(6.));
+            assert_eq!(p.top + px(6. + 24.5 * 34.) - p.opening_scroll, px(center));
+            assert!(p.top >= px(6.) && p.top + p.height <= px(594.));
+        }
+        let p = SelectPlacement::new(px(585.), 0, 3, px(600.), px(6.));
+        assert_eq!(
+            (p.top, p.height, p.opening_scroll),
+            (px(548.), px(46.), px(0.))
+        );
+    }
+
+    #[test]
+    fn bottom_constrained_select_grows_by_the_downward_scroll_before_moving_its_contents() {
+        let open = || SelectPlacement::new(px(550.), 24, 60, px(600.), px(6.));
+        let initial = open();
+        let offset = initial.opening_scroll;
+        assert_eq!((initial.top, initial.height), (px(506.), px(88.)));
+        assert_eq!(
+            initial.scroll_by(offset, px(-8.)),
+            (px(0.), offset - px(8.))
+        );
+        let (first, scroll) = initial.scroll_by(offset, px(12.5));
+        assert_eq!((first, scroll), (px(12.5), offset));
+        let next = open().expanded(first);
+        assert_eq!((next.top, next.height), (px(493.5), px(100.5)));
+        let (rest, scroll) = next.scroll_by(scroll, px(240.));
+        let full = open().expanded(first + rest);
+        assert_eq!((full.height, full.top + full.height), (px(318.), px(594.)));
+        assert_eq!(scroll - offset, px(22.5));
+        assert_eq!(full.scroll_by(scroll, px(34.)), (px(0.), scroll + px(34.)));
+        assert_eq!(
+            full.scroll_by(scroll, px(9999.)).1,
+            full.content_height - full.height
+        );
+    }
 
     #[test]
     fn select_opens_at_the_committed_value_and_only_activates_on_confirmation() {

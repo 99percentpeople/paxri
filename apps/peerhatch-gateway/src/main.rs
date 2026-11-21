@@ -312,7 +312,7 @@ impl Gateway {
             executable: std::env::current_exe().ok(),
             ipc_path: None,
             config_path: Some(self.file.path.clone()),
-            gui: local.map_or(config.gui, |p| p.gui),
+            gui: local.map_or_else(|| config.gui.clone(), |p| p.gui),
             pairing: self.pairing.status(config.pairing_code.as_deref()),
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),

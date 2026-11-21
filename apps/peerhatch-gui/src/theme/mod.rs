@@ -1,5 +1,7 @@
 //! Appearance shared by every workspace connected to this node.
 mod palette;
+pub(crate) mod fonts;
+pub(crate) use palette::{DARK, LIGHT};
 pub use palette::{Palette, TerminalPalette};
 pub use peerhatch_config::gui::{
     Appearance, CursorShape, GuiSettings, TerminalAppearance, TerminalScheme,
@@ -21,7 +23,7 @@ struct Preferences(GuiSettings);
 impl Global for Preferences {}
 
 pub fn current(cx: &App) -> GuiSettings {
-    cx.global::<Preferences>().0
+    cx.global::<Preferences>().0.clone()
 }
 
 pub fn init(path: Option<&Path>, cx: &mut App) {
@@ -33,6 +35,7 @@ pub fn init(path: Option<&Path>, cx: &mut App) {
         })
         .unwrap_or_default();
     cx.set_global(Preferences(settings));
+    fonts::init(cx);
 }
 
 pub fn apply(settings: GuiSettings, cx: &mut App) {
@@ -73,7 +76,7 @@ pub(crate) fn terminal_palette(scheme: TerminalScheme, app: &Palette) -> &Termin
 }
 
 pub fn palette(window: &Window, cx: &App) -> &'static Palette {
-    resolve(current(cx).appearance, window.appearance())
+    resolve(cx.global::<Preferences>().0.appearance, window.appearance())
 }
 
 pub fn observe(window: &Window) {

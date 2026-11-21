@@ -3,11 +3,14 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from windows_conpty import runtime_files
 TARGET = "x86_64-pc-windows-msvc"
 
 
@@ -35,6 +38,9 @@ def main():
         with temp, zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
             for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
                 bundle.write(binaries / name, name)
+            for name, data in runtime_files(binaries / "peerhatch-gateway.exe", ROOT / "target/conpty").items():
+                bundle.writestr(name, data)
+            bundle.write(ROOT / "packaging/windows/ConPTY-LICENSE.txt", "ConPTY-LICENSE.txt")
             bundle.write(ROOT / "README.md", "README.md")
             bundle.write(ROOT / "docs/installation.md", "installation.md")
         staged.replace(archive)

@@ -1,10 +1,11 @@
 //! Native text inputs share the clipboard, selection, IME and cursor implementation.
 mod buffer;
 mod layout;
-use buffer::{TextBuffer, byte_at_utf16};
+use buffer::TextBuffer;
+pub(crate) use buffer::byte_at_utf16;
 use layout::{CARET_SPACE, InputLayout};
 
-use super::Ui;
+use super::{ButtonVariant::Ghost, Icon, Ui};
 use crate::theme;
 use gpui::{prelude::*, *};
 use std::{
@@ -16,6 +17,9 @@ use unicode_segmentation::UnicodeSegmentation;
 pub type Input = TextInput<false>;
 pub type Textarea = TextInput<true>;
 
+pub(super) struct EditingFinished;
+impl<const MULTILINE: bool> EventEmitter<EditingFinished> for TextInput<MULTILINE> {}
+
 struct SelectionDrag {
     pointer: Point<Pixels>,
     last_frame: Option<Instant>,
@@ -26,6 +30,8 @@ pub struct TextInput<const MULTILINE: bool> {
     focus: FocusHandle,
     blur_subscription: Option<(WindowId, Subscription)>,
     placeholder: String,
+    search: bool,
+    commit_on_finish: bool,
     inline: bool,
     layout: Option<InputLayout>,
     bounds: Option<Bounds<Pixels>>,
@@ -43,6 +49,18 @@ impl<const MULTILINE: bool> Focusable for TextInput<MULTILINE> {
 }
 
 impl TextInput<false> {
+    pub(super) fn setting(placeholder: &str, cx: &mut App) -> Entity<Self> {
+        let input = Self::new("", placeholder, cx);
+        input.update(cx, |field, _| field.commit_on_finish = true);
+        input
+    }
+
+    pub fn search(placeholder: &str, cx: &mut App) -> Entity<Self> {
+        let field = Self::new("", placeholder, cx);
+        field.update(cx, |field, _| field.search = true);
+        field
+    }
+
     pub fn inline(text: &str, cx: &mut App) -> Entity<Self> {
         let mut buffer = TextBuffer::new(text);
         buffer.anchor = 0;
@@ -71,6 +89,8 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
     ) -> Entity<Self> {
         cx.new(|cx| Self {
             placeholder: placeholder.into(),
+            search: false,
+            commit_on_finish: false,
             inline,
             focus: cx.focus_handle().tab_stop(true),
             blur_subscription: None,
@@ -87,6 +107,13 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
 
     pub fn text(&self) -> &str {
         &self.buffer.text
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder.to_owned();
+            cx.notify();
+        }
     }
 
     fn is_focused(&self, window: &Window) -> bool {
@@ -109,6 +136,9 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
                 crate::ime::blur(_window);
                 field.after_edit();
                 cx.notify();
+            }
+            if field.commit_on_finish {
+                cx.emit(EditingFinished);
             }
         });
         self.blur_subscription = Some((id, subscription));
@@ -172,6 +202,7 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         match key.key.as_str() {
             "backspace" | "delete" | "enter" if self.buffer.read_only => {}
             "x" | "v" if shortcut && self.buffer.read_only => {}
+            "enter" if self.commit_on_finish => cx.emit(EditingFinished),
             "enter" if MULTILINE => {
                 self.replace(None, "\n");
             }
@@ -351,7 +382,7 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         Some(InputLayout::new(lines.into_vec(), bounds, height))
     }
 
-    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn paint(&mut self, bounds: Bounds<Pixels>, caret_on: bool, window: &mut Window, cx: &mut App) {
         let Some(mut layout) = self.shape(bounds, window, cx) else {
             return;
         };
@@ -402,7 +433,7 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
             layout.paint_range(selection.clone(), false, colors.selection, window);
         }
         layout.paint_text(window, cx);
-        if focused && selection.is_empty() {
+        if focused && caret_on && selection.is_empty() {
             let row = layout.row_at(self.buffer.cursor, self.row_hint);
             let x = layout.x(row, self.buffer.cursor);
             window.paint_quad(fill(
@@ -425,11 +456,35 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
         self.observe_blur(window, cx);
         let field = cx.entity();
         let editable = !self.buffer.read_only;
+        let blink = editable
+            && self.is_focused(window)
+            && self.buffer.selection().is_empty()
+            && self.buffer.marked.is_none();
+        let caret_on = super::caret::blink_visible(
+            blink.then_some(self.buffer.cursor),
+            self.reveal_cursor,
+            window,
+            cx,
+        );
         let focus = self.focus.clone();
         let move_selection = cx.listener(Self::move_selection);
         let end_selection = cx.listener(Self::end_selection);
-        Ui::new(window, cx)
-            .input_frame("input", &focus)
+        let ui = Ui::new(window, cx);
+        ui.input_frame("input", &focus)
+            .when(self.search, |field| {
+                field
+                    .flex()
+                    .items_center()
+                    .gap(theme::SPACE_2)
+                    .pr(px(2.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .text_color(rgb(ui.colors.muted_foreground))
+                            .child(Icon::Search.draw(15.)),
+                    )
+            })
             .when(self.inline, |field| {
                 field.h(px(24.)).px(theme::SPACE_1).py_0()
             })
@@ -468,34 +523,52 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
                 }),
             )
             .child(
-                div().size_full().overflow_hidden().child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, w, cx| {
-                            if editable && field.read(cx).is_focused(w) {
-                                w.handle_input(
-                                    &focus,
-                                    ElementInputHandler::new(bounds, field.clone()),
-                                    cx,
-                                );
-                            }
-                            field.update(cx, |v, cx| v.paint(bounds, w, cx));
-                            // Keep the drag that began in this input when the pointer leaves its bounds.
-                            w.on_mouse_event(move |event, phase, w, cx| {
-                                if phase == DispatchPhase::Capture {
-                                    move_selection(event, w, cx);
+                div()
+                    .size_full()
+                    .when(self.search, |d| d.min_w_0().flex_1())
+                    .overflow_hidden()
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, w, cx| {
+                                if editable && field.read(cx).is_focused(w) {
+                                    w.handle_input(
+                                        &focus,
+                                        ElementInputHandler::new(bounds, field.clone()),
+                                        cx,
+                                    );
                                 }
-                            });
-                            w.on_mouse_event(move |event, phase, w, cx| {
-                                if phase == DispatchPhase::Capture {
-                                    end_selection(event, w, cx);
-                                }
-                            });
-                        },
-                    )
-                    .size_full(),
-                ),
+                                field.update(cx, |v, cx| v.paint(bounds, caret_on, w, cx));
+                                // Keep the drag that began in this input when the pointer leaves its bounds.
+                                w.on_mouse_event(move |event, phase, w, cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        move_selection(event, w, cx);
+                                    }
+                                });
+                                w.on_mouse_event(move |event, phase, w, cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        end_selection(event, w, cx);
+                                    }
+                                });
+                            },
+                        )
+                        .size_full(),
+                    ),
             )
+            .when(self.search, |frame| {
+                frame.child(div().flex_none().w(theme::BUTTON_HEIGHT).when(
+                    !self.text().is_empty(),
+                    |slot| {
+                        slot.child(
+                            ui.icon_button(Ghost, "clear-search", Icon::Close, "Clear search")
+                                .on_click(cx.listener(|field, _, w, cx| {
+                                    field.set_text("", cx);
+                                    field.focus.focus(w);
+                                })),
+                        )
+                    },
+                ))
+            })
     }
 }
 

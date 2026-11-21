@@ -1,5 +1,8 @@
 use super::*;
 
+pub(super) const MENU_ROW_HEIGHT: Pixels = px(34.);
+pub(super) const MENU_PADDING: Pixels = px(5.);
+
 impl Ui {
     pub fn form_actions(
         self,
@@ -49,7 +52,7 @@ impl Ui {
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .p(px(5.))
+            .p(MENU_PADDING)
             .rounded(PANEL_RADIUS)
             .border_1()
             .border_color(rgb(self.colors.border))
@@ -71,7 +74,7 @@ impl Ui {
             .flex_none()
             .items_center()
             .w_full()
-            .h(px(34.))
+            .h(MENU_ROW_HEIGHT)
             .px(SPACE_2)
             .rounded(CONTROL_RADIUS)
             .cursor_pointer()
