@@ -75,6 +75,25 @@ async fn notify_error(stream: &mut impl Duplex, err: &anyhow::Error) {
     .await;
 }
 
+async fn begin(stream: &mut impl Duplex, request: Message) -> Result<()> {
+    wire::write(stream, &request).await?;
+    let ready = tokio::time::timeout(Duration::from_secs(30), wire::read(stream))
+        .await
+        .context("Timed out starting file transfer")?
+        .map_err(|err| {
+            if err.is::<std::io::Error>() {
+                err.context("Open file transfer (both gateways must support file copy)")
+            } else {
+                err
+            }
+        })?;
+    ensure!(
+        matches!(ready, Message::Ready),
+        "Invalid file transfer handshake"
+    );
+    Ok(())
+}
+
 pub async fn copy(
     mut stream: impl AsyncRead + AsyncWrite + Unpin + Send,
     copy: Copy<'_>,
@@ -82,46 +101,41 @@ pub async fn copy(
     require_directory: bool,
     report: &mut Report<'_>,
 ) -> Result<()> {
-    let request = match copy {
-        Copy::Upload { destination, .. } => Message::Put {
-            path: destination.into(),
-            options,
-            require_directory,
-        },
-        Copy::Download { source, .. } => Message::Get {
-            path: source.into(),
-            options,
-        },
-    };
-    wire::write(&mut stream, &request).await?;
-    let ready = tokio::time::timeout(Duration::from_secs(30), wire::read(&mut stream))
-        .await
-        .context("Timed out starting file transfer")?
-        .context("Open file transfer (both gateways must support file copy)")?;
-    ensure!(
-        matches!(ready, Message::Ready),
-        "Invalid file transfer handshake"
-    );
     let result = match copy {
-        Copy::Upload { source, .. } => send::tree(&mut stream, source, options, report).await,
+        Copy::Upload {
+            source,
+            destination,
+        } => {
+            begin(
+                &mut stream,
+                Message::Put {
+                    path: destination.into(),
+                    options,
+                    require_directory,
+                },
+            )
+            .await?;
+            send::tree(&mut stream, source, options, report).await
+        }
         Copy::Download {
             source,
             destination,
         } => {
+            let destination = paths::Destination::new(destination, require_directory).await?;
+            begin(
+                &mut stream,
+                Message::Get {
+                    path: source.into(),
+                    options,
+                },
+            )
+            .await?;
             let expected = source
                 .trim_end_matches(['/', '\\'])
                 .rsplit(['/', '\\'])
                 .next()
                 .filter(|n| !matches!(*n, "" | "." | ".." | "~") && !n.ends_with(':'));
-            receive::tree(
-                &mut stream,
-                destination,
-                require_directory,
-                expected,
-                options,
-                report,
-            )
-            .await
+            receive::tree(&mut stream, destination, expected, options, report).await
         }
     };
     if let Err(e) = &result {
@@ -141,7 +155,6 @@ pub async fn serve(
             host_allowed,
             "The remote gateway must run as a non-elevated user to host file transfers"
         );
-        wire::write(&mut stream, &Message::Ready).await?;
         match req {
             Message::Put {
                 path,
@@ -149,18 +162,16 @@ pub async fn serve(
                 require_directory,
             } => {
                 let require_directory = require_directory || paths::trailing_separator(&path);
-                receive::tree(
-                    &mut stream,
-                    &paths::host_path(&path)?,
-                    require_directory,
-                    None,
-                    options,
-                    &mut |_| {},
-                )
-                .await
+                let dest =
+                    paths::Destination::new(&paths::host_path(&path)?, require_directory).await?;
+                // After Ready the sender may immediately fill the pipe with file bytes.
+                wire::write(&mut stream, &Message::Ready).await?;
+                receive::tree(&mut stream, dest, None, options, &mut |_| {}).await
             }
             Message::Get { path, options } => {
-                send::tree(&mut stream, &paths::host_path(&path)?, options, &mut |_| {}).await
+                let path = paths::host_path(&path)?;
+                wire::write(&mut stream, &Message::Ready).await?;
+                send::tree(&mut stream, &path, options, &mut |_| {}).await
             }
             _ => bail!("Expected a file transfer request"),
         }

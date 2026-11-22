@@ -2,7 +2,7 @@
 use crate::StreamKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn unix_time_ms() -> i64 {
     SystemTime::now()
@@ -19,6 +19,52 @@ pub struct PeerConnection {
     pub path: PathKind,
     pub address: Option<String>,
     pub rtt_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<ConnectionTraffic>,
+}
+
+/// Transport bytes from the local gateway's perspective since the shared connection opened.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ConnectionTraffic {
+    pub connected_at_ms: i64,
+    pub sent_bytes: u64,
+    pub received_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct TrafficRates {
+    pub upload_bytes_per_second: u64,
+    pub download_bytes_per_second: u64,
+}
+
+impl ConnectionTraffic {
+    pub fn rates_since(self, previous: Self, elapsed: Duration) -> Option<TrafficRates> {
+        if self.connected_at_ms != previous.connected_at_ms || elapsed.is_zero() {
+            return None;
+        }
+        let rate = |bytes: u64| (bytes as f64 / elapsed.as_secs_f64()).round() as u64;
+        Some(TrafficRates {
+            upload_bytes_per_second: rate(self.sent_bytes.checked_sub(previous.sent_bytes)?),
+            download_bytes_per_second: rate(
+                self.received_bytes.checked_sub(previous.received_bytes)?,
+            ),
+        })
+    }
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    let mut value = bytes as f64;
+    for unit in ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"] {
+        if value < 1024. || unit == "EiB" {
+            return if unit == "B" {
+                format!("{bytes} B")
+            } else {
+                format!("{value:.1} {unit}")
+            };
+        }
+        value /= 1024.;
+    }
+    unreachable!()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -791,6 +791,8 @@ async fn signal() -> Result<()> {
 mod windows;
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    terminal::launch_if_requested()?;
     let options = Options::parse();
     #[cfg(windows)]
     if options.windows_service {

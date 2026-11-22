@@ -1,8 +1,9 @@
 //! Human-readable reports for the management commands.
 mod table;
 
+use crate::status::MeasuredConnection;
 use table::Report;
-use peerhatch_control::{Direction, PairingStatus, PeerConnection, Status};
+use peerhatch_control::{Direction, PairingStatus, PeerConnection, Status, format_bytes};
 
 fn connection_row(link: &PeerConnection) -> [String; 4] {
     let path = link.path.label();
@@ -78,9 +79,8 @@ pub(super) fn status(status: &Status) -> String {
     report.text
 }
 
-pub(super) fn peer(status: &Status, name: &str, id: &str) -> String {
+pub(super) fn peer(status: &Status, name: &str, id: &str, paths: &[MeasuredConnection]) -> String {
     let mut report = Report::new();
-    let paths = status.connections_for(name);
     report.heading("Paired device");
     report.fields(&[
         ("Name", name),
@@ -88,11 +88,21 @@ pub(super) fn peer(status: &Status, name: &str, id: &str) -> String {
         ("Device ID", id),
         ("State", status.peer_state(name)),
     ]);
-    if let Some(paths) = paths.filter(|p| !p.is_empty()) {
+    if !paths.is_empty() {
         report.table(
             "Connections",
-            ["PATH", "ADDRESS", "RTT", "STREAMS"],
-            paths.iter().map(connection_row).collect(),
+            ["PATH", "ADDRESS", "UPLOAD", "DOWNLOAD", "RTT", "STREAMS"],
+            paths.iter().map(|measured| {
+                let [path, address, rtt, streams] = connection_row(measured.link);
+                let (upload, download) = match measured.rates {
+                    Some(rates) => (
+                        format!("{}/s", format_bytes(rates.upload_bytes_per_second)),
+                        format!("{}/s", format_bytes(rates.download_bytes_per_second)),
+                    ),
+                    None => ("-".into(), "-".into()),
+                };
+                [path, address, upload, download, rtt, streams]
+            }).collect(),
         );
     }
     report.text

@@ -13,6 +13,7 @@ pub mod gateway;
 mod management;
 mod output;
 mod shell;
+mod status;
 mod stdio;
 use management::{ForwardAction, PairAction};
 
@@ -47,6 +48,7 @@ pub enum Command {
         action: gateway::Action,
     },
     /// Show the running gateway, peers and bound ports
+    #[command(after_help = "For a connected device, upload and download rates are sampled at the local gateway over about one second.")]
     Status {
         /// Paired device name, full ID or unique ID prefix (at least 4 hex digits)
         peer: Option<String>,
@@ -210,7 +212,7 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
             command,
             Command::Config { .. } | Command::Identity { .. } | Command::Probe { .. }
         );
-    let mut active = if discover {
+    let active = if discover {
         gateway::discover(None, None).await?
     } else {
         None
@@ -245,37 +247,14 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
             connect_stdio(&ipc, peer, target).await?;
         }
         Command::Status { peer, check, json } => {
-            let mut status = match active.take() {
+            let status = match active {
                 Some(status) => status,
                 None => {
                     peerhatch_control::request(&ipc, peerhatch_control::Command::Status).await?
                 }
             };
             if let Some(selector) = peer {
-                let (name, _) = status.resolve_peer(&selector)?;
-                let peer = name.to_owned();
-                if check {
-                    status = peerhatch_control::request(
-                        &ipc,
-                        peerhatch_control::Command::CheckPeer { peer: peer.clone() },
-                    )
-                    .await?;
-                }
-                let id = status
-                    .peers
-                    .get(&peer)
-                    .with_context(|| format!("Unknown paired device {peer}"))?;
-                if json {
-                    let paths = status.connections_for(&peer);
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "peer": peer, "device_id": id, "platform": status.peer_platform(&peer), "connections": paths,
-                        }))?
-                    );
-                } else {
-                    print!("{}", output::peer(&status, &peer, id));
-                }
+                status::show_peer(&ipc, status, &selector, check, json).await?;
             } else if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {

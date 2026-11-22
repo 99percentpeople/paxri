@@ -6,6 +6,10 @@ PeerHatch authenticates a device by its public key. An endpoint ticket provides 
 
 Select a peer in the Devices sidebar or run `peerhatch status PEER`. **Direct** shows the peer address used by the connection. **Relay** identifies the relay carrying traffic. **Selecting path** means path selection is in progress. The displayed RTT is the QUIC estimate. `--json` includes per-connection details and counts of active streams. Gateways announce themselves to paired peers and keep the shared connection available between sessions. The desktop receives connection changes from its local gateway. Use `peerhatch status PEER --check` to explicitly contact a peer for diagnostics.
 
+The device page samples **Upload**, **Download**, and **Latency** about every three seconds and plots up to one minute of history. Rates use the local gateway’s QUIC byte counters, including control traffic and retransmissions. Hover over either rate to see the total sent or received on the current connection.
+
+`peerhatch status PEER` samples the same counters over about one second and prints upload rate, download rate, and RTT for each connection. With `--json`, each connection has `rates.upload_bytes_per_second`, `rates.download_bytes_per_second`, and `rtt_ms`. A measurable idle connection reports zero. If counters are unavailable or the connection changes during sampling, the rate columns show `-` and `rates` is `null`.
+
 To measure application echo time between two nodes, use `peerhatch probe listen` and `peerhatch probe connect`. Pass `--relay-only` when measuring relay performance. Use `--no-relay` to test an IP-only route with a known peer ticket. Set `RUST_LOG=iroh::net_report=debug,iroh::socket::remote_map=debug` for detailed native diagnostics.
 
 ## Public relay and UDP discovery

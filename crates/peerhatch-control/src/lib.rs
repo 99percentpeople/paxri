@@ -216,7 +216,7 @@ pub struct Status {
 
 pub use peerhatch_core::{
     StreamKind,
-    connection::{PathKind, PeerConnection, unix_time_ms},
+    connection::{ConnectionTraffic, PathKind, PeerConnection, TrafficRates, format_bytes, unix_time_ms},
 };
 
 impl Status {

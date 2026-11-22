@@ -11,7 +11,7 @@ use iroh::{
 use peerhatch_config::Config;
 use peerhatch_core::{
     PeerSession, StreamKind,
-    connection::{PathKind, PeerConnection, unix_time_ms},
+    connection::{ConnectionTraffic, PathKind, PeerConnection, unix_time_ms},
     session::{IncomingStream, PROTOCOL},
 };
 use std::{
@@ -31,6 +31,7 @@ use tokio::{
 pub struct NativeSession {
     conn: Connection,
     token: [u8; 16],
+    connected_at_ms: i64,
     activity: Arc<Mutex<BTreeMap<StreamKind, usize>>>,
 }
 
@@ -124,11 +125,17 @@ impl NativeSession {
             }
             None => (PathKind::Selecting, None, None),
         };
+        let stats = self.conn.stats();
         PeerConnection {
             protocol: "Shared connection".into(),
             path,
             address,
             rtt_ms,
+            traffic: Some(ConnectionTraffic {
+                connected_at_ms: self.connected_at_ms,
+                sent_bytes: stats.udp_tx.bytes,
+                received_bytes: stats.udp_rx.bytes,
+            }),
             streams: self.activity.lock().expect("session activity").clone(),
         }
     }
@@ -379,6 +386,7 @@ impl Connections {
         let session = NativeSession {
             conn,
             token,
+            connected_at_ms: unix_time_ms(),
             activity: Default::default(),
         };
         let old = slot.selected.send_replace(Some(session.clone()));

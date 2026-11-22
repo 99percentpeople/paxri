@@ -56,6 +56,8 @@ Windows supports the ordinary-user installation without an administrator account
 
 ## Remote terminal tools
 
+On Windows, the default PowerShell opened by PeerHatch uses UTF-8 for console input, console output and text sent to native programs. This applies to interactive shells and `exec -c`, including `--pipe`. A program started explicitly with `exec -- PROGRAM` uses its own encoding. Binary pipe output passes through unchanged.
+
 GUI terminals, `peerhatch shell`, and both forms of `peerhatch exec` share the host gateway’s session environment. The gateway adds the directory containing its companion CLI and then the profile’s `tools/bin/` directory to the child’s command search path. The system PATH and shell configuration files stay untouched. A gateway-only installation can still host shells and use tools already on its PATH.
 
 - `PEERHATCH_IPC` identifies the host gateway’s Unix socket or Windows pipe, including when multiple gateways run on the same computer.

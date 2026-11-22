@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use peerhatch_terminal::pty::CommandBuilder;
 use tokio::{fs, process::Command, time::timeout};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
@@ -82,11 +83,84 @@ async fn find_seven(paths: &[PathBuf]) -> Option<&Path> {
     None
 }
 
-pub(super) async fn default_shell() -> Result<PathBuf> {
+const LAUNCH_POWERSHELL: &str = "--launch-powershell";
+const UTF8_PIPELINE: &str = "$global:OutputEncoding = [Text.UTF8Encoding]::new($false)";
+
+pub(crate) fn launch_if_requested() -> Result<()> {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCP, SetConsoleCtrlHandler, SetConsoleOutputCP,
+    };
+    let mut args = env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCH_POWERSHELL)) {
+        return Ok(());
+    }
+    let exe = args.next().context("Missing PowerShell executable")?;
+    // Ctrl+C belongs to the shell. Registering a handler (rather than ignoring
+    // Ctrl+C via a null handler) leaves the child's own signal handling intact.
+    unsafe extern "system" fn handle(event: u32) -> i32 {
+        i32::from(event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)
+    }
+    // This process owns the session's ConPTY or CREATE_NO_WINDOW console. Set
+    // its code pages before PowerShell starts: it may decode $input at startup.
+    unsafe {
+        if SetConsoleCP(65001) == 0
+            || SetConsoleOutputCP(65001) == 0
+            || SetConsoleCtrlHandler(Some(handle), 1) == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    let status = std::process::Command::new(exe).args(args).status()?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+pub(super) async fn shell_command(script: Option<&str>) -> Result<CommandBuilder> {
     let paths = candidates();
+    let mut cmd = CommandBuilder::new(env::current_exe()?);
+    cmd.arg(LAUNCH_POWERSHELL);
     if let Ok(Some(pwsh)) = timeout(Duration::from_secs(9), find_seven(&paths)).await {
-        return Ok(pwsh.to_path_buf());
+        cmd.arg(pwsh);
+        if let Some(script) = script {
+            cmd.args(["-NoLogo", "-NoProfile", "-Command", script]);
+        }
+        return Ok(cmd);
     }
     let root = env::var_os("SystemRoot").context("Windows system directory is unavailable")?;
-    Ok(PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+    let exe = PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    cmd.arg(&exe);
+    // Windows PowerShell 5.1 also defaults to ASCII for text piped to native
+    // programs. Set that session variable while preserving the script prologue.
+    if let Some(script) = script {
+        let mut prepare = Command::new(exe);
+        if let Some(home) = env::var_os("USERPROFILE") {
+            prepare.current_dir(home);
+        }
+        let output = timeout(
+            Duration::from_secs(4),
+            prepare
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    include_str!("prepare-command.ps1"),
+                ])
+                .env("PEERHATCH_PS_SOURCE", script)
+                .env("PEERHATCH_PS_SETUP", UTF8_PIPELINE)
+                .stdin(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        anyhow::ensure!(
+            output.status.success(),
+            "Could not prepare Windows PowerShell command"
+        );
+        cmd.args(["-NoLogo", "-NoProfile", "-Command"]);
+        cmd.arg(String::from_utf8(output.stdout)?);
+    } else {
+        cmd.args(["-NoExit", "-Command", UTF8_PIPELINE]);
+    }
+    Ok(cmd)
 }

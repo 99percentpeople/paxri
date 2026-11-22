@@ -14,7 +14,7 @@ mod chrome;
 mod components;
 #[cfg(windows)]
 mod ime;
-mod latency;
+mod connection_metrics;
 mod pages;
 mod presence;
 mod terminal;
@@ -61,7 +61,7 @@ enum RequestResult {
 struct Dashboard {
     presence_watch: Option<(PathBuf, Task<()>)>,
     refresh_presence: bool,
-    latency: latency::LatencyHistory,
+    connection_history: connection_metrics::ConnectionHistory,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
     devices_pane: Option<pages::DevicesPane>,
@@ -338,9 +338,9 @@ impl Dashboard {
                         if view.status.as_ref().is_none_or(|old| {
                             old.device_id != status.device_id || old.ipc_path != status.ipc_path
                         }) {
-                            view.latency = Default::default();
+                            view.connection_history = Default::default();
                         }
-                        view.latency.record(&status);
+                        view.connection_history.record(&status);
                         view.watch_presence(&status, cx);
                         if let Some(peer) = saved_peer && view.forward_filters.device.is_some() {
                             view.forward_filters.device = Some(peer);
@@ -435,7 +435,7 @@ impl Dashboard {
         let mut view = Self {
             presence_watch: None,
             refresh_presence: false,
-            latency: Default::default(),
+            connection_history: Default::default(),
             terminal_sessions: BTreeMap::new(),
             home_scroll: ScrollHandle::new(),
             devices_pane: None,

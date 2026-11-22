@@ -229,6 +229,19 @@ sys.exit(37)
                          input=payload, capture_output=True, timeout=30)
     assert (run.returncode, run.stdout == payload, run.stderr == errors) == (37, True, True), (
         run.returncode, len(run.stdout), len(run.stderr), run.stderr[:160])
+    if os.name == "nt":
+        text = "中文测试，繁體"
+        script = """using namespace System.Text
+param($prefix='ok')
+$line = @($input) -join '|'
+if ($OutputEncoding.CodePage -ne 65001 -or $OutputEncoding.GetPreamble().Length) { exit 24 }
+[Console]::Out.Write($prefix + $line)
+[Console]::Error.Write('中文')
+exit 23"""
+        result = subprocess.run([*cmd, "-c", script], input=text.encode() + b"\r\n",
+                                capture_output=True, timeout=20)
+        assert (result.returncode, result.stdout, result.stderr) == (
+            23, ("ok" + text).encode(), "中文".encode()), result
     script = ("[Console]::Out.Write('out'); [Console]::Error.Write('err'); exit 7"
               if os.name == "nt" else "printf out; printf err >&2; exit 7")
     # A program which ignores stdin must finish even while the calling pipe is open.
@@ -475,7 +488,13 @@ def check_file_copy(root, cli, ipc, host_short):
     cp("--", src / ".hidden", item, peer(remote))
     assert (remote / item.name).read_bytes() == data
     missing = remote / "missing"
-    cp(item, src / ".hidden", peer(missing), ok=False)
+    for separator in (("/", "\\") if os.name == "nt" else ("/",)):
+        err = cp(item, peer(missing) + separator, ok=False)
+        assert b"Destination directory does not exist" in err and b"missing" in err, err
+    err = cp(item, src / ".hidden", peer(missing), ok=False)
+    assert b"Destination directory does not exist" in err, err
+    err = cp(peer(tree / "nested" / item.name), str(local / "missing") + "/", ok=False)
+    assert b"Destination directory does not exist" in err and b"missing" in err, err
     assert not missing.exists()
     assert cp("-q", peer(missing), copied, ok=False) and copied.read_bytes() == b"keep me"
     print("File copy passed: binary upload/download, recursive trees, metadata, no-clobber and multiple sources.")

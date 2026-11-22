@@ -18,13 +18,11 @@ fn entry_name(msg: &Message) -> Result<&str> {
 
 pub async fn tree(
     stream: &mut impl Duplex,
-    dest: &Path,
-    require_directory: bool,
+    dest: Destination,
     expected: Option<&str>,
     opts: Options,
     report: &mut Report<'_>,
 ) -> Result<()> {
-    let dest = Destination::new(dest, require_directory).await?;
     let msg = wire::read(stream).await?;
     let name = entry_name(&msg)?;
     ensure!(

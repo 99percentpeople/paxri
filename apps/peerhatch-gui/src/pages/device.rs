@@ -50,25 +50,14 @@ impl Dashboard {
                             .id(("path-address", i))
                             .tooltip(tooltip(address.clone().into())),
                     )
-                })
-                .when_some(path.rtt_label(), |r, latency| {
-                    r.child(
-                        div()
-                            .ml_auto()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .children(self.latency.sparkline(peer_id, path, ui))
-                            .child(ui.muted(latency).flex_none().whitespace_nowrap()),
-                    )
                 });
             let details = div()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap_2()
                 .child(route)
+                .child(self.connection_history.metrics(peer_id, path, ui))
                 .when(!streams.is_empty(), |d| {
                     d.child(ui.muted(streams).text_xs())
                 });

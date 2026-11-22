@@ -22,6 +22,33 @@ async fn start_upload(
 }
 
 #[tokio::test]
+async fn missing_upload_directory_is_reported_instead_of_ready() -> Result<()> {
+    let root = tempdir()?;
+    let path = format!("{}/", root.path().join("missing").display());
+    let (mut client, server) = duplex(512);
+    let task = tokio::spawn(serve(server, true));
+    wire::write(
+        &mut client,
+        &Put {
+            path: path.clone(),
+            options: Options::default(),
+            require_directory: false,
+        },
+    )
+    .await?;
+    let err = wire::read(&mut client).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Destination directory does not exist"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("missing"), "{err}");
+    assert!(task.await?.is_err());
+    assert!(!Path::new(&path).exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn interrupted_or_short_file_never_replaces_previous_contents() -> Result<()> {
     let dir = tempdir()?;
     let dest = dir.path().join("kept");

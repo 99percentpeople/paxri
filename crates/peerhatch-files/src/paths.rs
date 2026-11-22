@@ -104,18 +104,25 @@ pub struct Destination {
 impl Destination {
     pub async fn new(path: &Path, require_directory: bool) -> Result<Self> {
         let require_directory = require_directory || path.to_str().is_some_and(trailing_separator);
-        let meta = metadata(path).await?;
-        let directory = meta.as_ref().is_some_and(|m| m.is_dir() && !is_link(m));
-        ensure!(
-            !require_directory || directory,
-            "Destination must be an existing directory: {}",
-            path.display()
-        );
+        // Strip a trailing separator for lstat so it cannot hide a file or follow a link.
+        let inspect = if require_directory {
+            path.components().as_path()
+        } else {
+            path
+        };
+        let meta = metadata(inspect).await?;
         if meta.as_ref().is_some_and(is_link) {
             bail!(
                 "Destination is a symbolic link or junction: {}",
                 path.display()
             );
+        }
+        let directory = meta.as_ref().is_some_and(Metadata::is_dir);
+        if require_directory && !directory {
+            if meta.is_none() {
+                bail!("Destination directory does not exist: {}", path.display());
+            }
+            bail!("Destination is not a directory: {}", path.display());
         }
         Ok(Self {
             path: path.to_owned(),

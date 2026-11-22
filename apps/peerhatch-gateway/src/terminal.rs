@@ -4,6 +4,8 @@ mod tools;
 pub(crate) use tools::SessionTools;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub(crate) use windows::launch_if_requested;
 
 use crate::{STREAM_TIMEOUT, streams::is_paired};
 use anyhow::{Context, Result, bail};
@@ -78,19 +80,16 @@ async fn command_for(
             builder.args(args);
             builder
         }
+        #[cfg(windows)]
+        Some(Invocation::Shell { script }) => windows::shell_command(Some(&script)).await?,
+        #[cfg(windows)]
+        None => windows::shell_command(None).await?,
+        #[cfg(unix)]
         default_or_script => {
-            #[cfg(windows)]
-            let mut shell = CommandBuilder::new(windows::default_shell().await?);
-            #[cfg(unix)]
             let mut shell = CommandBuilder::new_default_prog();
             if let Some(Invocation::Shell { script }) = default_or_script {
-                #[cfg(unix)]
-                {
-                    shell = CommandBuilder::new(shell.get_shell());
-                    shell.arg("-c");
-                }
-                #[cfg(windows)]
-                shell.args(["-NoLogo", "-NoProfile", "-Command"]);
+                shell = CommandBuilder::new(shell.get_shell());
+                shell.arg("-c");
                 shell.arg(script);
             }
             shell
