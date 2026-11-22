@@ -142,6 +142,12 @@ pub(super) struct Workspace {
 }
 
 impl Workspace {
+    pub(super) fn shows_devices(dashboard: &Entity<Dashboard>, cx: &App) -> bool {
+        cx.windows().into_iter().filter_map(|window| window.downcast::<Self>()).any(|window| {
+            window.read(cx).is_ok_and(|w| w.active == Page::Home && &w.dashboard == dashboard)
+        })
+    }
+
     pub(super) fn open_home(
         dashboard: Entity<Dashboard>,
         cx: &mut App,

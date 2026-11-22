@@ -8,7 +8,8 @@ use std::{
 };
 
 const WINDOW: Duration = Duration::from_secs(60);
-const MIN_INTERVAL: Duration = Duration::from_secs(1);
+// Coalesce incidental status events while allowing normal IPC jitter between one-second ticks.
+const MIN_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Hash, PartialEq, Eq)]
 struct Route {
@@ -64,6 +65,15 @@ pub(crate) struct ConnectionHistory {
 }
 
 impl ConnectionHistory {
+    pub(crate) fn record_peer(&mut self, id: &str, paths: &[PeerConnection]) {
+        let now = Instant::now();
+        let routes: Vec<_> = paths.iter().map(|path| Route::new(id, path)).collect();
+        self.routes.retain(|route, _| route.peer_id != id || routes.contains(route));
+        for (route, path) in routes.into_iter().zip(paths) {
+            sample(self.routes.entry(route).or_default(), now, path);
+        }
+    }
+
     pub(crate) fn record(&mut self, status: &Status) {
         let now = Instant::now();
         let mut previous = std::mem::take(&mut self.routes);
@@ -276,13 +286,13 @@ mod tests {
         totals.sent_bytes += 3072;
         totals.received_bytes += 1536;
         sample(&mut samples, start + Duration::from_millis(150), &path);
-        sample(&mut samples, start + Duration::from_secs(3), &path);
+        sample(&mut samples, start + Duration::from_secs(1), &path);
         assert_eq!(samples.len(), 2);
         assert_eq!(
             (samples[1].upload, samples[1].download),
-            (Some(1024), Some(512))
+            (Some(3072), Some(1536))
         );
-        sample(&mut samples, start + Duration::from_secs(6), &path);
+        sample(&mut samples, start + Duration::from_millis(1990), &path);
         assert_eq!(samples[2].upload, Some(0));
         sample(&mut samples, start + Duration::from_secs(70), &path);
         assert_eq!(samples.len(), 1);

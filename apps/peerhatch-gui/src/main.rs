@@ -53,6 +53,7 @@ struct GatewayRequest {
 
 enum RequestResult {
     Gateway(Box<Status>, Option<Native>),
+    Peer(peerhatch_control::PeerStatus),
     OfflineGui(theme::GuiSettings),
     OfflineNative(Native),
     Stopped(Startup, Option<Native>),
@@ -174,7 +175,8 @@ impl Dashboard {
     }
 
     fn request(&mut self, request: GatewayRequest, cx: &mut Context<Self>) {
-        let changing = !matches!(request.command, Operation::Api(Command::Status));
+        let metrics = matches!(request.command, Operation::Api(Command::PeerStatus { .. }));
+        let changing = !metrics && !matches!(request.command, Operation::Api(Command::Status));
         if self.busy {
             if changing {
                 self.saving = true;
@@ -204,7 +206,9 @@ impl Dashboard {
         if let Operation::Manage(action) = command {
             self.gateway_action = Some(action);
         }
-        cx.notify();
+        if !metrics {
+            cx.notify();
+        }
         let selected = self.address.clone();
         let selected_config = self.selected_config.clone();
         let path = self
@@ -238,6 +242,9 @@ impl Dashboard {
                 Ok(RequestResult::Stopped(startup, local.map(|s| s.native)))
             };
             let command = match command {
+                Operation::Api(Command::PeerStatus { peer, check }) => {
+                    return peerhatch_control::peer_status(&path, &peer, check).await.map(RequestResult::Peer);
+                }
                 Operation::Api(Command::Status) => {
                     let mut status = gateway::discover(selected.as_deref(), selected_config.as_deref()).await?;
                     if show_forwards && let Some(current) = &mut status {
@@ -306,6 +313,17 @@ impl Dashboard {
                 view.gateway_action = None;
                 let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 match result {
+                    Ok(RequestResult::Peer(peer)) => {
+                        if let Some(status) = &mut view.status
+                            && status.peers.get(&peer.peer) == Some(&peer.device_id)
+                            && let Some(links) = status.peer_connections.as_mut().and_then(|all| all.get_mut(&peer.peer))
+                            && let Some(paths) = peer.connections
+                        {
+                            view.connection_history.record_peer(&peer.device_id, &paths);
+                            *links = paths;
+                        }
+                    }
+                    Err(_) if metrics => {}
                     Ok(RequestResult::Stopped(startup, native)) => {
                         view.presence_watch = None;
                         view.profile_native = native;
@@ -481,10 +499,25 @@ impl Dashboard {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
+            // Every third tick already supplies connection metrics for all peers.
+            for tick in (1..=3).cycle() {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 if this
-                    .update(cx, |view, cx| view.send(Command::Status, cx))
+                    .update(cx, |view, cx| {
+                        if tick == 3 {
+                            if view.busy {
+                                view.refresh_presence = true;
+                            } else {
+                                view.send(Command::Status, cx);
+                            }
+                        } else if !view.busy
+                            && let Some(pages::DevicesPane::Peer(peer)) = &view.devices_pane
+                            && view.peer_online(peer)
+                            && Workspace::shows_devices(&cx.entity(), cx)
+                        {
+                            view.send(Command::PeerStatus { peer: peer.clone(), check: false }, cx);
+                        }
+                    })
                     .is_err()
                 {
                     break;
