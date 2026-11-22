@@ -19,3 +19,34 @@ jobs:
       - run: cargo build --locked -p peerhatch-cli -p peerhatch-gateway
       - run: python3 scripts/check-gateway.py --file-copy
       - run: python3 scripts/check-gateway.py --pipe-exec
+
+  android:
+    name: Android APK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_INCREMENTAL: '0'
+      NDK_VERSION: 26.1.10909125
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.98.1 --profile minimal --target aarch64-linux-android
+      - name: Build and verify the development APK
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;$NDK_VERSION"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          ndk_bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android29-clang"
+          export CXX_aarch64_linux_android="$ndk_bin/aarch64-linux-android29-clang++"
+          export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
+          export RANLIB_aarch64_linux_android="$ndk_bin/llvm-ranlib"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          python3 mobile/android/build.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: peerhatch-android-arm64
+          path: target/android/PeerHatch.apk
+          if-no-files-found: error
+          compression-level: 0

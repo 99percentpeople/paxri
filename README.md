@@ -81,6 +81,8 @@ Open `http://127.0.0.1:8080` on this computer to reach port 3000 on `home`. Both
 
 The ARM64 Android client uses GPUI for the device list and terminal, the Android input method for typing, and the desktop gateway's pairing and PTY protocols. It requires Android 10 or later and a Vulkan-capable GPU.
 
+Pushes to `main` and pull requests build `PeerHatch.apk`. Download the `peerhatch-android-arm64` artifact from the CI run. Each run uses a fresh development signing key. [Android CI builds](https://github.com/99percentpeople/peerhatch/actions/workflows/ci.yml)
+
 To build the development APK, install JDK 17, Python 3, Android SDK Platform 35, Build Tools 35.0.0 and the NDK (tested with r26b). Set `ANDROID_HOME` to the SDK directory and `ANDROID_NDK_HOME` to the NDK directory. From the repository root run:
 
 ```sh
