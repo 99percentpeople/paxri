@@ -88,6 +88,16 @@ impl PathKind {
     }
 }
 
+/// Label for the current local observation of a peer's authenticated connections.
+pub fn peer_state(connections: Option<&[PeerConnection]>, presence: bool) -> &'static str {
+    match connections {
+        None => "Unavailable",
+        Some([]) if presence => "Offline",
+        Some([]) => "Disconnected",
+        Some(_) => "Connected",
+    }
+}
+
 impl PeerConnection {
     pub fn rtt_label(&self) -> Option<String> {
         self.rtt_ms.map(|ms| {

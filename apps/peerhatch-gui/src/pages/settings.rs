@@ -5,9 +5,10 @@ use crate::{
         Button, ButtonVariant::Secondary, Icon, Select, SettingsGroup, SettingsSection, SettingsTable,
         Ui, actions, setting_field,
     },
-    theme::{self, Appearance, SPACE_1, SPACE_2, SPACE_3},
+    theme::{self, Appearance, SPACE_2, SPACE_3},
 };
 use anyhow::Context as _;
+use peerhatch_ui::settings::controls::theme_cards;
 use gpui::{prelude::*, *};
 use peerhatch_config::gui::TabPlacement;
 use peerhatch_cli::gateway::Action;
@@ -19,75 +20,12 @@ fn copy_button(ui: Ui, id: &'static str, label: &'static str, text: String) -> B
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
 }
 
-fn appearance_preview(mode: Appearance) -> Div {
-    let (sidebar, page) = match mode {
-        Appearance::System => (&theme::LIGHT, &theme::DARK),
-        Appearance::Light => (&theme::LIGHT, &theme::LIGHT),
-        Appearance::Dark => (&theme::DARK, &theme::DARK),
-    };
-    let line = |width, color| div().w(px(width)).h(px(3.)).rounded_full().bg(rgb(color));
-    div()
-        .w_full()
-        .h(px(48.))
-        .flex()
-        .overflow_hidden()
-        .rounded(SPACE_1)
-        .border_1()
-        .border_color(rgb(sidebar.input_border))
-        .child(
-            div()
-                .w(px(35.))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(SPACE_1)
-                .p(SPACE_1)
-                .py(SPACE_2)
-                .bg(rgb(sidebar.secondary.background))
-                .child(line(21., sidebar.muted_foreground))
-                .child(line(15., sidebar.input_border)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap(SPACE_1)
-                .p(SPACE_2)
-                .bg(rgb(page.canvas.background))
-                .child(line(24., page.canvas.foreground))
-                .child(line(36., page.input_border))
-                .child(line(28., page.input_border)),
-        )
-}
-
 impl Dashboard {
     fn appearance_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
         let settings = theme::current(cx);
-        let cards = actions()
-            .justify_end()
-            .children(Appearance::ALL.into_iter().map(|mode| {
-                let icon = match mode {
-                    Appearance::System => Icon::Monitor,
-                    Appearance::Light => Icon::Sun,
-                    Appearance::Dark => Icon::Moon,
-                };
-                ui.choice_card(
-                    ("theme", mode as usize),
-                    px(132.),
-                    icon.label(mode.label()),
-                    appearance_preview(mode),
-                    settings.appearance == mode,
-                )
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    view.send(
-                        Command::SetGui {
-                            change: GuiChange::Appearance(mode),
-                        },
-                        cx,
-                    );
-                }))
-            }));
+        let cards = theme_cards(*ui, settings.appearance, px(132.), cx.listener(|view, mode: &Appearance, _, cx| {
+            view.send(Command::SetGui { change: GuiChange::Appearance(*mode) }, cx);
+        }));
         let mut group = SettingsGroup::new(catalog::APPEARANCE);
         group.setting(catalog::THEME, cards);
         let position = Select::new(
@@ -359,8 +297,6 @@ impl Dashboard {
     }
 
     fn device_settings(&self, ui: Ui) -> SettingsGroup {
-        let mut group = SettingsGroup::new(catalog::DEVICE);
-        group.setting(catalog::DEVICE_NAME, self.name_field.render(ui));
-        group
+        SettingsGroup::device(self.name_field.render(ui))
     }
 }

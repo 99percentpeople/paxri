@@ -160,28 +160,33 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
         let mut doc: DocumentMut = current.parse()?;
         let gui = subtable(doc.as_table_mut(), "gui")?;
         let ser = ValueSerializer::new();
-        let (table, key, mut value) = match change {
-            GuiChange::Appearance(v) => (gui, "appearance", v.serialize(ser)?),
-            GuiChange::TabPlacement(v) => (gui, "tab_placement", v.serialize(ser)?),
-            GuiChange::Scheme(v) => (subtable(gui, "terminal")?, "scheme", v.serialize(ser)?),
+        let (table, key, value) = match change {
+            GuiChange::Appearance(v) => (gui, "appearance", Some(v.serialize(ser)?)),
+            GuiChange::TabPlacement(v) => (gui, "tab_placement", Some(v.serialize(ser)?)),
+            GuiChange::Scheme(v) => (subtable(gui, "terminal")?, "scheme", Some(v.serialize(ser)?)),
             GuiChange::CursorShape(v) => (
                 subtable(gui, "terminal")?,
                 "cursor_shape",
-                v.serialize(ser)?,
+                Some(v.serialize(ser)?),
             ),
-            GuiChange::FontFamily(v) => (subtable(gui, "terminal")?, "font_family", v.serialize(ser)?),
-            GuiChange::LineHeight(v) => (subtable(gui, "terminal")?, "line_height", v.serialize(ser)?),
-            GuiChange::LetterSpacing(v) => (subtable(gui, "terminal")?, "letter_spacing", v.serialize(ser)?),
+            GuiChange::FontFamily(v) => (subtable(gui, "terminal")?, "font_family", Some(v.serialize(ser)?)),
+            GuiChange::FontSize(v) => (subtable(gui, "terminal")?, "font_size", v.map(|v| v.serialize(ser)).transpose()?),
+            GuiChange::LineHeight(v) => (subtable(gui, "terminal")?, "line_height", v.map(|v| v.serialize(ser)).transpose()?),
+            GuiChange::LetterSpacing(v) => (subtable(gui, "terminal")?, "letter_spacing", Some(v.serialize(ser)?)),
             GuiChange::BlinkCursor(v) => (
                 subtable(gui, "terminal")?,
                 "blink_cursor",
-                v.serialize(ser)?,
+                Some(v.serialize(ser)?),
             ),
         };
-        if let Some(old) = table.get(key).and_then(Item::as_value) {
-            *value.decor_mut() = old.decor().clone();
+        if let Some(mut value) = value {
+            if let Some(old) = table.get(key).and_then(Item::as_value) {
+                *value.decor_mut() = old.decor().clone();
+            }
+            table.insert(key, Item::Value(value));
+        } else {
+            table.remove(key);
         }
-        table.insert(key, Item::Value(value));
         let text = doc.to_string();
         crate::parse(&text).map_err(anyhow::Error::msg)?;
         Ok(text)

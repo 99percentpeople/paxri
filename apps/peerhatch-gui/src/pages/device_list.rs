@@ -5,16 +5,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use peerhatch_control::{DevicePlatform, Status};
-
-fn change_age(now: i64, changed: i64) -> String {
-    let minutes = now.saturating_sub(changed).max(0) / 60_000;
-    match minutes {
-        0 => "just now".into(),
-        1..60 => format!("{minutes}m ago"),
-        60..1440 => format!("{}h ago", minutes / 60),
-        _ => format!("{}d ago", minutes / 1440),
-    }
-}
+use peerhatch_ui::connections::presence_detail;
 
 impl Dashboard {
     fn system_filter(&self, cx: &Context<Self>) -> Select<Option<DevicePlatform>> {
@@ -28,6 +19,7 @@ impl Dashboard {
         )
         .option_with_icon(None, "All systems", Icon::Filter);
         for system in [
+            DevicePlatform::Android,
             DevicePlatform::Windows,
             DevicePlatform::Linux,
             DevicePlatform::MacOs,
@@ -113,46 +105,26 @@ impl Dashboard {
                     return None;
                 }
                 let state = status.peer_state(name);
+                let display_name = status.peer_display_name(name);
                 if !terms.is_empty() {
                     let searchable =
-                        format!("{name} {id} {} {}", platform.label(), state).to_lowercase();
+                        format!("{display_name} {name} {id} {} {}", platform.label(), state).to_lowercase();
                     if !terms.iter().all(|term| searchable.contains(*term)) {
                         return None;
                     }
                 }
-                let mut detail = state.to_owned();
-                if let Some(&changed) = status.peer_last_status_change_ms.get(name) {
+                let mut detail = presence_detail(state, now, status.peer_last_status_change_ms.get(name).copied());
+                if platform != DevicePlatform::Android && display_name != name {
                     detail.push_str(" · ");
-                    detail.push_str(&change_age(now, changed));
+                    detail.push_str(name);
                 }
                 let peer = SharedString::from(name.clone());
                 let selected =
                     matches!(&self.devices_pane, Some(DevicesPane::Peer(p)) if p == name);
                 Some(
-                    ui.button(
-                        Ghost,
-                        SharedString::from(format!("device-{name}")),
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .py_1()
-                            .child(ui.icon_tile(Icon::device(platform), 30., 18.))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .child(div().truncate().child(peer.clone()))
-                                    .child(ui.muted(detail.clone()).text_xs().truncate()),
-                            ),
-                    )
-                    .row()
+                    ui.device_row(SharedString::from(format!("device-{name}")), platform, SharedString::from(display_name.to_owned()), detail.clone())
                     .tooltip(crate::components::tooltip(
-                        format!("{name} · {} · {detail}", platform.label()).into(),
+                        format!("{display_name} · {} · {detail}", platform.label()).into(),
                     ))
                     .pressed(selected)
                     .on_click(cx.listener(move |v, _, _, cx| {

@@ -25,7 +25,8 @@ fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {
         GuiChange::Scheme(TerminalScheme::Midnight),
         GuiChange::CursorShape(CursorShape::Bar),
         GuiChange::FontFamily("Cascadia Mono".to_owned()),
-        GuiChange::LineHeight(24),
+        GuiChange::FontSize(Some(12.5)),
+        GuiChange::LineHeight(Some(24)),
         GuiChange::LetterSpacing(-1),
         GuiChange::BlinkCursor(true),
     ] {
@@ -41,12 +42,19 @@ fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {
     assert_eq!(gui.terminal.cursor_shape, CursorShape::Bar);
     assert!(gui.terminal.blink_cursor);
     assert_eq!(gui.terminal.font_family, "Cascadia Mono");
-    assert_eq!(gui.terminal.line_height, 24);
+    assert_eq!(gui.terminal.font_size, Some(12.5));
+    assert_eq!(gui.terminal.line_height, Some(24));
     assert_eq!(gui.terminal.letter_spacing, -1);
-    for invalid in [GuiChange::LineHeight(0), GuiChange::LetterSpacing(5)] {
+    for invalid in [GuiChange::FontSize(Some(31.)), GuiChange::FontSize(Some(f32::NAN)), GuiChange::LineHeight(Some(0)), GuiChange::LetterSpacing(5)] {
         assert!(set_gui(&file, invalid, false).is_err());
     }
     assert_eq!(fs::read_to_string(&file).unwrap(), text);
+    let automatic = set_gui(&file, GuiChange::LineHeight(None), false).unwrap();
+    assert!((automatic.terminal.row_height(12.5) - 15.).abs() < 0.001);
+    let reset = set_gui(&file, GuiChange::FontSize(None), false).unwrap();
+    assert_eq!(reset.terminal.size(), 15.);
+    assert_eq!(reset.terminal.letter_spacing, -1);
+    assert!(!fs::read_to_string(&file).unwrap().contains("font_size"));
     assert!(parse(&text.replace("midnight", "typo")).is_err());
     assert!(parse(&text.replace("blink_cursor", "blink_curser")).is_err());
 }

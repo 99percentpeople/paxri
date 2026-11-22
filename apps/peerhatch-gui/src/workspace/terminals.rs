@@ -120,7 +120,7 @@ impl Workspace {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.dashboard.read(cx).peer_online(&peer) {
+        if !self.dashboard.read(cx).can_open_shell(&peer) {
             return;
         }
         let page = self.terminal_tab(peer, None, w, cx);
@@ -162,7 +162,7 @@ impl Workspace {
         else {
             return;
         };
-        if view.read(cx).is_running() || !self.dashboard.read(cx).peer_online(peer) {
+        if view.read(cx).is_running() || !self.dashboard.read(cx).can_open_shell(peer) {
             return;
         }
         if let Some(index) = self.tabs.iter().position(|p| p == &self.active) {

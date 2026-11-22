@@ -1,0 +1,55 @@
+[package]
+name = "peerhatch-android"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Mobile GPUI uses a separate snapshot from the desktop release.
+[workspace]
+resolver = "3"
+
+[lib]
+name = "peerhatch_android"
+crate-type = ["cdylib"]
+
+[profile.dev]
+debug = 0
+
+# The APK uses the dev profile on real devices. Optimize the per-frame UI and layout paths.
+[profile.dev.package.gpui-pre]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
+
+[profile.dev.package.peerhatch-ui]
+opt-level = 1
+
+[profile.dev.package.peerhatch-android]
+opt-level = 1
+
+[dependencies]
+peerhatch-ui = { path = "../../crates/peerhatch-ui" }
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+anyhow = "1"
+async-channel = "2"
+gpui = { package = "gpui-pre", version = "=0.3.6", default-features = false }
+gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", rev = "5fd54f4554263ae06753e90472c7f2e2ff5d7495", default-features = false }
+jni = "0.22"
+iroh = "=1.4.1"
+log = "0.4"
+peerhatch-config = { path = "../../crates/peerhatch-config" }
+peerhatch-core = { path = "../../crates/peerhatch-core" }
+peerhatch-native = { path = "../../crates/peerhatch-native" }
+peerhatch-terminal = { path = "../../crates/peerhatch-terminal" }
+rustls-platform-verifier = "=0.7.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "io-util", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+
+[patch.crates-io]
+iroh = { path = "../../compat/iroh" }

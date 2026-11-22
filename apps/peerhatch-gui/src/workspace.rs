@@ -474,8 +474,10 @@ impl Workspace {
             .downcast::<Self>()
             .expect("workspace root");
         let mut strip = DockTabs::new("workspace-tab-list", &self.dock)
-            .indent(self.tab_indent)
-            .trailing(self.new_session_menu(ui, cx));
+            .indent(self.tab_indent);
+        if let Some(menu) = self.new_session_menu(ui, cx) {
+            strip = strip.trailing(menu);
+        }
         let settings = self.dock.read(cx).settings();
         for page in &self.tabs {
             let editor = self.rename.as_ref().filter(|edit| edit.matches(page));

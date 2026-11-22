@@ -1,4 +1,5 @@
 /target/
+/mobile/android/target/
 *.key
 __pycache__/
 node.toml

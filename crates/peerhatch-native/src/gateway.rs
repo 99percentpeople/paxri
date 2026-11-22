@@ -6,14 +6,16 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::sync::{mpsc, watch};
-use peerhatch_config::Config;
+use peerhatch_config::{Config, DeviceCapabilities, DeviceInfo, DevicePlatform};
 use peerhatch_core::{
     Transport,
     session::{IncomingStream, PROTOCOL},
 };
 
 use crate::EndpointTicket;
+pub type PeerDeviceInfo = BTreeMap<String, DeviceInfo>;
 mod addresses;
+mod device_info;
 mod connections;
 mod presence;
 mod lan_mapping;
@@ -92,12 +94,52 @@ impl NativeTransport {
         crate::ticket(&self.endpoint, direct_only).await
     }
 
+    pub fn set_capabilities(&self, capabilities: DeviceCapabilities) {
+        self.connections.local_info.send_if_modified(|info| {
+            if info.capabilities == capabilities { return false; }
+            info.capabilities = capabilities;
+            true
+        });
+    }
+
+    pub fn set_device_name(&self, name: String) {
+        self.connections.local_info.send_if_modified(|info| {
+            if info.device_name.as_ref() == Some(&name) {
+                return false;
+            }
+            info.device_name = Some(name);
+            true
+        });
+    }
+
+    pub fn subscribe_device_info(&self) -> watch::Receiver<PeerDeviceInfo> {
+        self.connections.peer_info.subscribe()
+    }
+
+    pub fn remember_contact(&self, peer: &pairing::Contact) {
+        if let Some(capabilities) = peer.capabilities {
+            // An established session may already have supplied a newer snapshot.
+            self.connections.peer_info.send_if_modified(|known| {
+                let std::collections::btree_map::Entry::Vacant(entry) = known.entry(peer.id().to_string()) else {
+                    return false;
+                };
+                entry.insert(DeviceInfo {
+                    device_name: (peer.platform == Some(DevicePlatform::Android)).then(|| peer.name.clone()),
+                    platform: peer.platform.unwrap_or_default(),
+                    capabilities,
+                });
+                true
+            });
+        }
+    }
+
     pub fn contact(&self, name: String) -> pairing::Contact {
         pairing::Contact {
             name,
             ticket: EndpointTicket::new(self.endpoint.addr()),
             supports_unpair: true,
-            platform: Some(peerhatch_config::DevicePlatform::current()),
+            platform: Some(DevicePlatform::current()),
+            capabilities: Some(self.connections.local_info.borrow().capabilities),
         }
     }
 
@@ -119,6 +161,7 @@ pub async fn start(
     key: SecretKey,
     config: Arc<Config>,
     no_relay: bool,
+    capabilities: DeviceCapabilities,
     incoming: mpsc::Sender<pairing::Incoming>,
     streams: mpsc::Sender<IncomingStream<NativeSession>>,
     peer_addresses: mpsc::Sender<EndpointTicket>,
@@ -198,6 +241,7 @@ pub async fn start(
         settings,
         streams,
         peer_addresses,
+        DeviceInfo { platform: DevicePlatform::current(), capabilities, device_name: None },
     ));
     let router = Router::builder(endpoint.clone())
         .accept(pairing::PROTOCOL, pairing::PairingHandler::new(incoming))

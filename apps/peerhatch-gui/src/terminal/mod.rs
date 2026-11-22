@@ -1,36 +1,26 @@
-mod cursor;
-mod display;
-mod preview;
-pub(crate) use preview::TerminalPreview;
-mod emulator;
-mod keys;
+use peerhatch_ui::terminal::cursor;
+use peerhatch_ui::terminal::display;
+use peerhatch_ui::terminal::emulator;
+use peerhatch_ui::terminal::keys;
 mod mouse;
-mod selection;
 mod session;
-mod title;
-pub(crate) use title::TabTitle;
+pub(crate) use peerhatch_ui::terminal::title::TabTitle;
 
 use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
 use crate::theme::SPACE_2;
 use crate::theme::fonts::{CellSize, MonospaceFonts};
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
-    term::{MIN_COLUMNS, TermMode},
+    term::TermMode,
 };
 use emulator::{Emulator, GridSize};
 use gpui::{prelude::*, *};
 use session::{Output, Session};
 use std::{ops::Range, path::Path};
 
-fn dimensions(viewport: Size<Pixels>, cell: CellSize) -> GridSize {
-    GridSize {
-        cols: (f32::from(viewport.width) / cell.width).clamp(MIN_COLUMNS as f32, 500.) as u16,
-        rows: (f32::from(viewport.height) / cell.height).clamp(1., 250.) as u16,
-    }
-}
 
 fn layout_grid(available: Bounds<Pixels>, cell: CellSize) -> (GridSize, Bounds<Pixels>) {
-    let grid = dimensions(available.size, cell);
+    let grid = GridSize::from_viewport(available.size, cell);
     let cells = size(
         px(f32::from(grid.cols) * cell.width).min(available.size.width),
         px(f32::from(grid.rows) * cell.height).min(available.size.height),
@@ -44,7 +34,7 @@ pub struct Terminal {
     emulator: Emulator,
     session: Option<Session>,
     error: Option<String>,
-    peer_online: bool,
+    can_open_shell: bool,
     marked: cursor::Preedit,
     viewport: Bounds<Pixels>,
     selecting: bool,
@@ -98,16 +88,16 @@ impl Terminal {
     ) -> Entity<Self> {
         let appearance = crate::theme::current(cx).terminal;
         let font = cx.global::<MonospaceFonts>().resolve(&appearance);
-        let grid = dimensions(window.viewport_size(), font.cell);
+        let grid = GridSize::from_viewport(window.viewport_size(), font.cell);
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
         let (session, events) = Session::start(peer, ipc, runtime);
         let peer = peer.to_owned();
         cx.new(|cx| {
             cx.observe(dashboard, move |view: &mut Self, dashboard, cx| {
-                let online = dashboard.read(cx).peer_online(&peer);
-                if view.peer_online != online {
-                    view.peer_online = online;
+                let online = dashboard.read(cx).can_open_shell(&peer);
+                if view.can_open_shell != online {
+                    view.can_open_shell = online;
                     if !view.is_running() {
                         cx.notify();
                     }
@@ -154,7 +144,7 @@ impl Terminal {
                 emulator,
                 session: Some(session),
                 error: None,
-                peer_online: true,
+                can_open_shell: true,
                 marked: cursor::Preedit::default(),
                 viewport: Bounds::default(),
                 selecting: false,
@@ -326,7 +316,7 @@ impl Terminal {
         } else {
             key.modifiers.control && key.modifiers.shift
         };
-        if self.peer_online && !self.is_running() && key.key == "enter" && !key.modifiers.modified()
+        if self.can_open_shell && !self.is_running() && key.key == "enter" && !key.modifiers.modified()
         {
             window.dispatch_action(Box::new(super::workspace::ReconnectTerminal), cx);
         } else if shortcut && key.key.eq_ignore_ascii_case("v") {
@@ -452,7 +442,7 @@ impl Render for Terminal {
                         .bg(rgb(ui.colors.canvas.background))
                         .text_color(rgb(ui.colors.canvas.foreground))
                         .child(div().flex_1().text_sm().child(error))
-                        .when(self.peer_online && !self.is_running(), |bar| {
+                        .when(self.can_open_shell && !self.is_running(), |bar| {
                             bar.child(ui.button(Primary, "reconnect", "Reconnect").on_click(
                                 |_, w, cx| {
                                     w.dispatch_action(

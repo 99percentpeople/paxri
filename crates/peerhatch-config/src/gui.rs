@@ -43,24 +43,58 @@ pub enum CursorShape {
     Block,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TerminalAppearance {
     pub scheme: TerminalScheme,
     pub cursor_shape: CursorShape,
     pub blink_cursor: bool,
     pub font_family: String,
-    pub line_height: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<u8>,
     pub letter_spacing: i8,
 }
 
 impl TerminalAppearance {
-    pub const LINE_HEIGHTS: std::ops::RangeInclusive<u8> = 16..=32;
+    pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=30.0;
+    pub const DEFAULT_FONT_SIZE: f32 = if cfg!(target_os = "android") {
+        12.
+    } else {
+        15.
+    };
+
+    pub fn size(&self) -> f32 {
+        self.font_size.unwrap_or(Self::DEFAULT_FONT_SIZE)
+    }
+
+    pub fn row_height(&self, size: f32) -> f32 {
+        self.line_height.map(f32::from).unwrap_or_else(|| {
+            let ratio = if cfg!(target_os = "android") {
+                4. / 3.
+            } else {
+                1.2
+            };
+            size * ratio
+        })
+    }
+
+    pub const LINE_HEIGHTS: std::ops::RangeInclusive<u8> = 8..=40;
     pub const LETTER_SPACINGS: std::ops::RangeInclusive<i8> = -1..=4;
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if !Self::LINE_HEIGHTS.contains(&self.line_height) {
-            return Err("gui.terminal.line_height must be between 16 and 32 px".into());
+        if self
+            .font_size
+            .is_some_and(|v| !Self::FONT_SIZES.contains(&v))
+        {
+            return Err("gui.terminal.font_size must be between 8 and 30 px".into());
+        }
+        if self
+            .line_height
+            .is_some_and(|v| !Self::LINE_HEIGHTS.contains(&v))
+        {
+            return Err("gui.terminal.line_height must be between 8 and 40 px".into());
         }
         if !Self::LETTER_SPACINGS.contains(&self.letter_spacing) {
             return Err("gui.terminal.letter_spacing must be between -1 and 4 px".into());
@@ -79,13 +113,14 @@ impl Default for TerminalAppearance {
             cursor_shape: CursorShape::default(),
             blink_cursor: false,
             font_family: String::new(),
-            line_height: 18,
+            font_size: None,
+            line_height: None,
             letter_spacing: 0,
         }
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GuiSettings {
     pub appearance: Appearance,
@@ -94,7 +129,7 @@ pub struct GuiSettings {
     pub terminal: TerminalAppearance,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuiChange {
     Appearance(Appearance),
@@ -103,7 +138,8 @@ pub enum GuiChange {
     CursorShape(CursorShape),
     BlinkCursor(bool),
     FontFamily(String),
-    LineHeight(u8),
+    FontSize(Option<f32>),
+    LineHeight(Option<u8>),
     LetterSpacing(i8),
 }
 

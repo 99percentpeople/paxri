@@ -8,20 +8,19 @@ mod network_settings;
 mod port_actions;
 mod rules;
 mod settings;
-mod settings_catalog;
+use peerhatch_ui::settings::catalog as settings_catalog;
 mod settings_editor;
 pub(crate) use settings_editor::SettingsEditor;
 mod terminal_settings;
 
 use crate::{
     Dashboard,
-    components::{ButtonVariant::Secondary, Icon, Ui, actions, heading, row, single_line, tooltip},
-    theme::{SPACE_2, SPACE_3, SPACE_4},
+    components::{ButtonVariant::Secondary, Ui, actions, heading, row},
+    theme::SPACE_4,
 };
 use gpui::{prelude::*, *};
 use peerhatch_cli::gateway::Action;
 use peerhatch_control::Command;
-use peerhatch_control::DevicePlatform;
 
 fn short_id(id: &str) -> String {
     if id.len() > 20 && id.is_ascii() {
@@ -46,54 +45,6 @@ fn overview() -> Div {
         .gap(SPACE_4)
 }
 
-fn device_heading(
-    ui: Ui,
-    badge: Div,
-    name: SharedString,
-    platform: DevicePlatform,
-    id: Option<(&str, String)>,
-) -> Div {
-    let detail = match id {
-        Some((id, display_id)) => {
-            single_line(ui.muted(format!("{} · {display_id}", platform.label())))
-                .w_full()
-                .id("device-identity")
-                .tooltip(tooltip(id.to_owned().into()))
-                .into_any_element()
-        }
-        None => ui.muted(platform.label()).into_any_element(),
-    };
-    div()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(SPACE_3)
-        .child(ui.icon_tile(Icon::device(platform), 48., 25.))
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(SPACE_2)
-                        .child(
-                            single_line(div())
-                                .text_2xl()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .id("device-heading")
-                                .tooltip(tooltip(name.clone()))
-                                .child(name),
-                        )
-                        .child(badge),
-                )
-                .child(detail),
-        )
-}
 
 impl Dashboard {
     fn gateway_notice(&self, ui: Ui, cx: &mut Context<Self>) -> Div {

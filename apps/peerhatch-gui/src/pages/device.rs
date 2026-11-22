@@ -1,75 +1,19 @@
-use super::{device_heading, home::DevicesPane, overview};
+use super::{home::DevicesPane, overview};
 use crate::{
     Dashboard, Workspace,
     components::{
         Button,
-        ButtonVariant::{Destructive, Ghost, Primary},
-        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Ui, heading, row, single_line,
-        tooltip,
+        ButtonVariant::{Destructive, Ghost},
+        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Ui,
     },
 };
 use gpui::{prelude::*, *};
-use peerhatch_control::{Command, PeerConnection, Status, StreamKind};
-
-fn connection_host(address: &str) -> String {
-    let Ok(url) = http_client::Url::parse(address) else {
-        return address.to_owned();
-    };
-    let host = url.host_str().unwrap_or(address);
-    match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
-    }
-}
+use peerhatch_control::{Command, Status};
 
 impl Dashboard {
-    fn connection_paths(&self, peer_id: &str, paths: &[PeerConnection], ui: Ui) -> Div {
-        let mut list = ui.section().child(heading("Connection"));
-        for (i, path) in paths.iter().enumerate() {
-            let streams = path
-                .stream_labels_matching(|kind| kind != StreamKind::Terminal)
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let route = div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(path.path.label()),
-                )
-                .when_some(path.address.as_ref(), |r, address| {
-                    r.child(
-                        single_line(ui.muted(connection_host(address)))
-                            .flex_1()
-                            .id(("path-address", i))
-                            .tooltip(tooltip(address.clone().into())),
-                    )
-                });
-            let details = div()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(route)
-                .child(self.connection_history.metrics(peer_id, path, ui))
-                .when(!streams.is_empty(), |d| {
-                    d.child(ui.muted(streams).text_xs())
-                });
-            list = list.when(i > 0, |d| d.child(ui.separator())).child(details);
-        }
-        list
-    }
-
     fn new_session(&self, peer: &str, ui: Ui) -> Button {
         let peer = SharedString::from(peer.to_owned());
-        ui.button(Primary, "new-terminal-session", "New session")
-            .icon(Icon::Terminal)
+        ui.new_session_button()
             .on_click(move |_, w, cx| {
                 if let Some(workspace) = w.root::<Workspace>().flatten() {
                     workspace.update(cx, |v, cx| v.new_terminal(peer.clone(), w, cx));
@@ -77,37 +21,18 @@ impl Dashboard {
             })
     }
 
-    fn sessions(&self, peer: &str, online: bool, ui: Ui, cx: &Context<Self>) -> Div {
+    fn sessions(&self, peer: &str, ui: Ui, cx: &Context<Self>) -> Div {
         let peer = SharedString::from(peer.to_owned());
-        let mut sessions = self.open_sessions(&peer, cx).peekable();
-        let section = ui.section().child(
-            row()
-                .child(heading("Terminal sessions"))
-                .when(online, |r| r.child(self.new_session(&peer, ui))),
-        );
-        if sessions.peek().is_none() {
-            return section.child(ui.muted("No open sessions."));
-        }
-        section.child(
-            div()
-                .flex()
-                .flex_col()
-                .children(sessions.map(|(number, title)| {
-                    let peer = peer.clone();
-                    ui.navigation_row(
-                        ("show-terminal", number),
-                        Icon::Terminal.draw(18.),
-                        title,
-                        format!("Session {number}"),
-                    )
-                    .on_click(move |_, w, cx| {
-                        if let Some(workspace) = w.root::<Workspace>().flatten() {
-                            workspace
-                                .update(cx, |v, cx| v.show_terminal(peer.clone(), number, w, cx));
-                        }
-                    })
-                })),
-        )
+        let rows = self.open_sessions(&peer, cx).map(|(number, title)| {
+            let peer = peer.clone();
+            ui.session_row(number, title, format!("Session {number}"))
+                .on_click(move |_, w, cx| {
+                    if let Some(workspace) = w.root::<Workspace>().flatten() {
+                        workspace.update(cx, |v, cx| v.show_terminal(peer.clone(), number, w, cx));
+                    }
+                })
+        });
+        ui.terminal_sessions(Some(self.new_session(&peer, ui)), rows)
     }
 }
 
@@ -164,16 +89,9 @@ impl Dashboard {
                     .unwrap_or_else(|| id.clone()),
             )
         });
-        let online = status.peer_online(peer);
-        let dot = if online {
-            ui.colors.success
-        } else {
-            ui.colors.muted_foreground
-        };
-        let header = device_heading(
-            ui,
-            ui.status_badge(status.peer_state(peer), dot),
-            peer.to_owned().into(),
+        let header = ui.device_heading(
+            ui.connection_badge(status.connections_for(peer), status.peer_presence),
+            status.peer_display_name(peer).to_owned().into(),
             status.peer_platform(peer),
             identity,
         );
@@ -209,12 +127,13 @@ impl Dashboard {
                     .filter(|paths| !paths.is_empty())
                     .zip(status.peers.get(peer)),
                 |page, (paths, id)| {
-                    page.child(self.connection_paths(id, paths, ui))
+                    page.child(self.connection_history.connection_paths(id, paths, *ui))
                         .child(ui.separator())
                 },
             )
-            .child(self.sessions(peer, online, ui, cx))
-            .child(ui.separator())
+            .when(status.can_open_shell(peer), |page| {
+                page.child(self.sessions(peer, ui, cx)).child(ui.separator())
+            })
             .child(forwards)
             .when_some(status.peers.get(peer), |page, id| {
                 let id = id.clone();

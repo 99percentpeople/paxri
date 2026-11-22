@@ -1,26 +1,13 @@
+use peerhatch_ui::components::focus::KeyboardFocus;
 use gpui::{prelude::*, *};
 
 const TEXT_FIELD: &str = "TextField";
 
-pub(super) fn text_field(element: Stateful<Div>, focus: &FocusHandle) -> Stateful<Div> {
-    let handle = focus.clone();
-    element
-        .track_focus(focus)
-        .key_context(TEXT_FIELD)
-        .on_mouse_down_out(move |_, window, _| {
-            if handle.is_focused(window) {
-                window.blur();
-            }
-        })
-}
-
-pub(crate) fn observe_window_focus<V: 'static>(
+pub fn observe_window_focus<V: 'static>(
     window: &mut Window,
     fallback: &FocusHandle,
     cx: &mut Context<V>,
 ) {
-    #[cfg(windows)]
-    crate::ime::observe(window);
     let tab = fallback.clone();
     cx.observe_window_activation(window, move |_, window, cx| {
         if !window.is_window_active() {
@@ -50,28 +37,7 @@ pub(crate) fn observe_window_focus<V: 'static>(
     .detach();
 }
 
-// Only show button focus rings in the window navigated with the keyboard.
-struct KeyboardFocus(Option<AnyWindowHandle>);
-impl Global for KeyboardFocus {}
-
-impl KeyboardFocus {
-    fn window(cx: &App) -> Option<AnyWindowHandle> {
-        cx.try_global::<Self>().and_then(|focus| focus.0)
-    }
-
-    fn set(window: Option<AnyWindowHandle>, cx: &mut App) {
-        if Self::window(cx) != window {
-            cx.set_global(Self(window));
-            cx.refresh_windows();
-        }
-    }
-}
-
-pub(super) fn keyboard_focus_visible(window: &Window, cx: &App) -> bool {
-    window.is_window_active() && KeyboardFocus::window(cx) == Some(window.window_handle())
-}
-
-pub(super) fn workspace_keyboard(root: Div) -> Div {
+pub fn workspace_keyboard(root: Div) -> Div {
     root.capture_key_down(|event, window, cx| {
         if matches!(
             event.keystroke.key.as_str(),

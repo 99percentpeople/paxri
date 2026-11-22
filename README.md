@@ -32,13 +32,14 @@ peerhatch gateway start
 | Where | Command | Result |
 | --- | --- | --- |
 | First computer | `peerhatch pair code` | Prints the current invitation |
+| First computer | `peerhatch pair qr` | Displays the current invitation as a QR code for Android |
 | Second computer | `peerhatch pair join "PAIRING_CODE"` | Sends an approval request |
 | First computer | `peerhatch pair status` | Lists the requesting device and its ID |
 | First computer | `peerhatch pair accept DEVICE_ID` | Saves the pairing on both devices |
 | Either computer | `peerhatch pair remove DEVICE` | Revokes local access immediately and requests confirmation from the other gateway |
 | Either computer | `peerhatch status` | Lists peers, short IDs, streams, and forwarding rules |
 
-The pairing code survives restarts. `peerhatch pair refresh` replaces it and dismisses requests made with the old code. Peer commands accept the displayed device name, the full public ID, or a unique hexadecimal prefix of at least four characters.
+For a small terminal, save the QR image with `peerhatch pair qr --svg > pairing.svg` and open it in a browser. The pairing code survives restarts. `peerhatch pair refresh` replaces it and dismisses requests made with the old code. Peer commands accept the displayed device name, the full public ID, or a unique hexadecimal prefix of at least four characters.
 
 To unpair in the desktop app, open **Devices**, select the device, and choose **Unpair device**. Unpairing works offline. It removes local aliases and forwarding rules for that identity and revokes its access to the gateway’s TCP targets and reverse listeners. An online peer removes the corresponding pairing and confirms. For an offline peer the gateway saves the notification and retries after reconnects or restarts. Both gateways need unpair support for automatic confirmation. `peerhatch pair status` shows pending confirmations. Pairing again requires a new approval.
 
@@ -75,6 +76,27 @@ peerhatch forward list
 Open `http://127.0.0.1:8080` on this computer to reach port 3000 on `home`. Both devices can edit, pause, resume or remove their shared rule. The creating gateway stores it. From the other device, use the owner in the list, for example `peerhatch forward pause web --owner laptop`. Locally stored rules remain visible when the peer goes offline. Rules stored on the peer appear while it is connected. To open a TCP stream directly on stdin/stdout, use `peerhatch connect home 3000`. [Example configuration](examples/laptop.toml)
 
 **Desktop.** Select a peer in the **Devices** sidebar to see its connection and terminal sessions. **Port forwarding** lists rules for all devices. Filter by device, add a rule, or open a row’s menu to edit, pause, resume, or remove it. Use **+** to open another terminal. Tabs can be renamed, reordered, and detached. Settings includes application appearance, terminal colors, cursor, and gateway startup. `peerhatch-gui` opens Devices without arguments and accepts the same commands as `peerhatch` when launched from a terminal.
+
+## Android client
+
+The ARM64 Android client uses GPUI for the device list and terminal, the Android input method for typing, and the desktop gateway's pairing and PTY protocols. It requires Android 10 or later and a Vulkan-capable GPU.
+
+To build the development APK, install JDK 17, Python 3, Android SDK Platform 35, Build Tools 35.0.0 and the NDK (tested with r26b). Set `ANDROID_HOME` to the SDK directory and `ANDROID_NDK_HOME` to the NDK directory. From the repository root run:
+
+```sh
+rustup target add aarch64-linux-android
+cargo install cargo-ndk --locked
+python3 mobile/android/build.py
+adb install -r target/android/PeerHatch.apk
+```
+
+On ARM64 Linux, the SDK tools must also run on the build host. If you already have an NDK cross toolchain, set `CC_aarch64_linux_android`, `CXX_aarch64_linux_android`, and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` to its compiler drivers. With an explicit linker the packaging script invokes Cargo directly.
+
+On the computer, open **Devices → Add Device** or run `peerhatch pair qr`. In the Android device list, tap the floating **+** button at the bottom right. Choose **Scan QR code**, allow camera access, and point the camera at the code. To scan a saved screenshot, tap **Choose QR image**. Choose **Enter pairing code** to paste a text invitation from `peerhatch pair code`. Approve the phone’s request on the computer to complete pairing.
+
+The device list shows connection state and the last observed change. Open a connected computer to see its direct or relay path, upload and download rates, and round-trip latency. Tap the floating terminal button at the bottom right to start a session, then tap the terminal to open the keyboard. Drag one finger to scroll or pinch with two fingers to change the terminal font size. The phone remembers your chosen size. The back arrow returns to the device’s session list and keeps the shell running. Reopen a session to continue, start another shell, or choose **End session** in the top bar to release it. Sessions last while the Android app process is running. Hold Ctrl, Alt or Shift while pressing another key, or tap a modifier to latch it for the next key. Tap a latched modifier again to cancel. Modifiers can be combined with each other, the software keyboard, and the terminal toolbar. The PTY resizes when the keyboard opens or closes. The app keeps the screen awake while it is in the foreground.
+
+The terminal header shows the active path. Public relays use Android's certificate verifier. The APK includes the verifier's network security resource so Android can retrieve signed revocation lists from the certificate authorities listed by the verifier.
 
 ## Build and develop
 

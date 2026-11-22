@@ -1,4 +1,4 @@
-use super::{device_heading, overview, peer_detail, short_id};
+use super::{overview, peer_detail, short_id};
 use crate::{
     Dashboard,
     components::dock::{DockNavigation, DockPanel},
@@ -177,8 +177,7 @@ impl Dashboard {
             }
             (Some(DevicesPane::Forwards), Some(status)) => self.forwarding(status, ui, width, cx),
             (_, Some(status)) => overview()
-                .child(device_heading(
-                    ui,
+                .child(ui.device_heading(
                     ui.muted("This device").text_xs().flex_none(),
                     self.local_name.clone(),
                     DevicePlatform::current(),
@@ -214,7 +213,7 @@ impl Dashboard {
             cx,
             DialogMode::Modeless,
             "Pair a device",
-            size(px(540.), px(370.)),
+            size(px(680.), px(420.)),
             model,
             focus,
             Self::pairing_dialog,
@@ -268,7 +267,18 @@ impl Dashboard {
                 .action(self.answer_pairing(ui, peer, false, cx))
                 .action(self.answer_pairing(ui, peer, true, cx));
         }
-        body = body.child(self.pairing_fields(ui, pairing, cx));
+        let fields = self.pairing_fields(ui, pairing, cx).flex_1().min_w_0();
+        let invitation = div()
+            .flex()
+            .flex_wrap()
+            .gap_4()
+            .when_some(self.pairing_qr.clone(), |row, qr| row.child(pairing_qr(qr)))
+            .child(
+                fields.when(pairing.code.is_some() && self.pairing_qr.is_none(), |d| {
+                    d.child(ui.muted("Invitation too large for a QR code. Copy the code to pair."))
+                }),
+            );
+        body = body.child(invitation);
         let dialog = DialogContent::new(body, "Done");
         if pairing.outgoing.is_some() {
             dialog.action(
@@ -362,4 +372,41 @@ impl Dashboard {
                     .text_xs(),
             )
     }
+}
+
+fn pairing_qr(qr: std::rc::Rc<qrcode::QrCode>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // Use whole physical pixels for modules, including on fractional-scale displays.
+            let scale = window.scale_factor();
+            let modules = qr.width();
+            let side = f32::from(bounds.size.width.min(bounds.size.height)) * scale;
+            let step = (side / (modules + 8) as f32).floor();
+            window.paint_quad(fill(bounds, rgb(0xffffff)));
+            let inset = (side - modules as f32 * step) / 2.;
+            let left = (f32::from(bounds.origin.x) * scale + inset).round();
+            let top = (f32::from(bounds.origin.y) * scale + inset).round();
+            for y in 0..modules {
+                let mut x = 0;
+                while x < modules {
+                    let start = x;
+                    while x < modules && qr[(x, y)] == qrcode::Color::Dark {
+                        x += 1;
+                    }
+                    if x > start {
+                        let origin = point(
+                            px((left + start as f32 * step) / scale),
+                            px((top + y as f32 * step) / scale),
+                        );
+                        let size = size(px((x - start) as f32 * step / scale), px(step / scale));
+                        window.paint_quad(fill(Bounds::new(origin, size), rgb(0)));
+                    }
+                    x += 1;
+                }
+            }
+        },
+    )
+    .size(px(250.))
+    .flex_none()
 }

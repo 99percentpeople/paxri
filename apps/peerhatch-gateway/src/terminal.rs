@@ -8,9 +8,9 @@ mod windows;
 pub(crate) use windows::launch_if_requested;
 
 use crate::{STREAM_TIMEOUT, streams::is_paired};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use peerhatch_config::Config;
-use peerhatch_core::{PeerSession, StreamKind};
+use peerhatch_core::StreamKind;
 use peerhatch_terminal::{
     self as wire, Frame, Size,
     exec::Invocation,
@@ -18,55 +18,29 @@ use peerhatch_terminal::{
 };
 use std::sync::Arc;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     sync::{Semaphore, watch},
     time::timeout,
 };
 
-pub async fn open<S: PeerSession>(
-    session: S,
-    size: Option<Size>,
-    invocation: Option<Invocation>,
-) -> Result<S::Stream> {
-    let kind = match (size, &invocation) {
-        (Some(_), Some(_)) => StreamKind::Command,
-        (Some(_), None) => StreamKind::Terminal,
-        (None, Some(_)) => StreamKind::Pipe,
-        (None, None) => bail!("missing piped command"),
-    };
-    timeout(STREAM_TIMEOUT, async {
-        let mut stream = session.open(kind).await?;
-        if let Some(size) = size {
-            size.write(&mut stream).await?;
+pub use peerhatch_terminal::open;
+
+pub(super) fn capabilities() -> peerhatch_config::DeviceCapabilities {
+    let exec = crate::account::is_standard_user().unwrap_or(false);
+    #[cfg(unix)]
+    let shell = exec && std::path::Path::new(&CommandBuilder::new_default_prog().get_shell()).is_file();
+    #[cfg(windows)]
+    let shell = exec && windows::has_shell();
+    peerhatch_config::DeviceCapabilities { shell, exec }
+}
+
+pub(super) async fn watch_capabilities(transport: Arc<peerhatch_native::gateway::NativeTransport>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        if let Ok(available) = tokio::task::spawn_blocking(capabilities).await {
+            transport.set_capabilities(available);
         }
-        if let Some(command) = &invocation {
-            command.write(&mut stream).await?;
-        }
-        match stream.read_u8().await? {
-            wire::READY => Ok(stream),
-            wire::DENIED => bail!(
-                "The remote gateway denied the terminal request. Check that the devices are paired."
-            ),
-            wire::BUSY => bail!("All native terminal sessions are in use"),
-            wire::PRIVILEGED => {
-                bail!("The remote gateway must run as a non-elevated user to host a terminal")
-            }
-            wire::UNAVAILABLE if invocation.is_some() => {
-                bail!("The remote gateway could not start the requested program")
-            }
-            wire::UNAVAILABLE => bail!("The remote gateway could not start its default shell"),
-            _ => bail!("Invalid terminal handshake"),
-        }
-    })
-    .await
-    .context("opening native terminal timed out")?
-    .with_context(|| {
-        if kind == StreamKind::Pipe {
-            "Opening piped command (the remote gateway must support --pipe)"
-        } else {
-            "Opening native terminal"
-        }
-    })
+    }
 }
 
 async fn command_for(

@@ -3,86 +3,19 @@ use crate::{
     Dashboard, Input,
     components::{
         ButtonVariant::Ghost,
-        Icon, SettingsGroup, SettingsSection, SettingsTable, Ui, actions,
+        Icon, SettingsSection, SettingsTable, Ui,
         dock::{DockNavigation, DockPanel},
-        single_line,
     },
     theme::{SPACE_1, SPACE_2, SPACE_3, SPACE_4},
 };
 use gpui::{prelude::*, *};
 
-use super::settings_catalog::{GATEWAY, page_for};
-
-struct SettingsPage {
-    section: SettingsSection,
-    groups: Vec<SettingsGroup>,
-}
-
-impl SettingsPage {
-    fn collect(groups: Vec<SettingsGroup>) -> Vec<Self> {
-        let mut pages: Vec<Self> = Vec::new();
-        for group in groups {
-            let section = page_for(group.section);
-            if let Some(page) = pages
-                .iter_mut()
-                .find(|page| page.section.table == section.table)
-            {
-                page.groups.push(group);
-            } else {
-                pages.push(Self {
-                    section,
-                    groups: vec![group],
-                });
-            }
-        }
-        pages
-    }
-
-    fn filter(&mut self, query: &str) {
-        let heading =
-            format!("{} {}", self.section.title, self.section.table.label()).to_lowercase();
-        let words: Vec<_> = query
-            .split_whitespace()
-            .filter(|w| !heading.contains(w))
-            .collect();
-        for group in &mut self.groups {
-            group.filter(&words);
-        }
-        self.groups.retain(|group| group.len() > 0);
-    }
-
-    fn count(&self) -> usize {
-        self.groups.iter().map(SettingsGroup::len).sum()
-    }
-
-    fn render(self, ui: Ui) -> Div {
-        let section = self.section;
-        let title = actions()
-            .child(
-                div()
-                    .text_2xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(section.title),
-            )
-            .when(section.table != SettingsTable::Runtime, |heading| {
-                heading.child(ui.muted(section.table.label()).text_xs())
-            });
-        div()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(SPACE_3)
-            .child(title)
-            .children(
-                self.groups
-                    .into_iter()
-                    .map(|group| group.render(ui, section)),
-            )
-    }
-}
+use super::settings_catalog::GATEWAY;
+use peerhatch_ui::settings::{SettingsLayout, SettingsPage};
 
 pub(crate) struct SettingsEditor {
     pub(crate) search: Entity<Input>,
+    pub(super) terminal: peerhatch_ui::settings::terminal::TerminalSettings,
     query: String,
     category: SettingsTable,
     search_category: Option<SettingsTable>,
@@ -104,6 +37,7 @@ impl SettingsEditor {
         })
         .detach();
         Self {
+            terminal: peerhatch_ui::settings::terminal::TerminalSettings::new(Dashboard::change_terminal_setting, cx),
             search,
             query: String::new(),
             category: GATEWAY.table,
@@ -131,28 +65,7 @@ impl Dashboard {
         cx: &Context<Self>,
     ) -> crate::components::Button {
         let category = item.map(|section| section.table);
-        let (label, icon) = item
-            .map(|s| (s.title, s.icon))
-            .unwrap_or(("All results", Icon::Search));
-        let id = (
-            ElementId::from("settings-category"),
-            category
-                .map(SettingsTable::label)
-                .unwrap_or_else(|| "all".into()),
-        );
-        let text = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_1()
-            .child(single_line(div()).child(label))
-            .when_some(count, |d, n| d.child(ui.muted(n.to_string()).text_xs()));
-        ui.button(Ghost, id, text)
-            .row()
-            .icon(icon)
-            .pressed(selected)
+        peerhatch_ui::settings::controls::category_button(*ui, item, selected, count, SettingsLayout::Desktop)
             .on_click(cx.listener(move |dashboard, _, _, cx| {
                 let editor = &mut dashboard.settings_editor;
                 if !editor.query.is_empty() {
@@ -242,7 +155,7 @@ impl Dashboard {
         }
         for page in pages {
             if selected.is_none_or(|c| c == page.section.table) {
-                content = content.child(page.render(ui));
+                content = content.child(page.render(*ui, SettingsLayout::Desktop));
             }
         }
 

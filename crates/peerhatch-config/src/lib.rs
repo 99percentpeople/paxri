@@ -106,6 +106,7 @@ pub struct Peer {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DevicePlatform {
+    Android,
     Windows,
     Linux,
     MacOs,
@@ -115,9 +116,31 @@ pub enum DevicePlatform {
     Unknown,
 }
 
+/// Services this endpoint hosts for an authenticated peer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DeviceCapabilities {
+    pub shell: bool,
+    pub exec: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DeviceInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    pub platform: DevicePlatform,
+    pub capabilities: DeviceCapabilities,
+}
+
 impl DevicePlatform {
+    /// Gateways predating capability exchange hosted terminals on these systems.
+    pub fn supports_shell(self, capabilities: Option<DeviceCapabilities>) -> bool {
+        capabilities.map_or(matches!(self, Self::Windows | Self::Linux | Self::MacOs), |c| c.shell)
+    }
+
     pub fn current() -> Self {
         match std::env::consts::OS {
+            "android" => Self::Android,
             "windows" => Self::Windows,
             "linux" => Self::Linux,
             "macos" => Self::MacOs,
@@ -128,6 +151,7 @@ impl DevicePlatform {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Android => "Android",
             Self::Windows => "Windows",
             Self::Linux => "Linux",
             Self::MacOs => "macOS",
@@ -138,6 +162,7 @@ impl DevicePlatform {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Android => "android",
             Self::Windows => "windows",
             Self::Linux => "linux",
             Self::MacOs => "macos",

@@ -242,6 +242,7 @@ impl Gateway {
         self.file.persist(text)?;
         self.transport.set_peer(alias.clone(), peer.ticket.clone());
         self.apply_config(config);
+        self.transport.remember_contact(peer);
         Ok(alias)
     }
 

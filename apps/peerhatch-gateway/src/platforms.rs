@@ -12,14 +12,14 @@ pub(super) async fn fill_missing(gateway: Arc<Mutex<Gateway>>) {
     let mut retry = Duration::from_secs(15);
     loop {
         let Ok(config) = settings
-            .wait_for(|cfg| cfg.peers.values().any(|p| p.platform.is_none()))
+            .wait_for(|cfg| cfg.peers.values().any(|p| p.platform.unwrap_or_default() == DevicePlatform::Unknown))
             .await
             .map(|snapshot| Arc::clone(&snapshot))
         else {
             return;
         };
         let mut queries = JoinSet::new();
-        for (name, peer) in config.peers.iter().filter(|(_, p)| p.platform.is_none()) {
+        for (name, peer) in config.peers.iter().filter(|(_, p)| p.platform.unwrap_or_default() == DevicePlatform::Unknown) {
             if queries.len() == 4 {
                 queries.join_next().await;
             }
@@ -44,7 +44,7 @@ pub(super) async fn fill_missing(gateway: Arc<Mutex<Gateway>>) {
             .borrow()
             .peers
             .values()
-            .any(|p| p.platform.is_none())
+            .any(|p| p.platform.unwrap_or_default() == DevicePlatform::Unknown)
         {
             tokio::time::sleep(retry).await;
             retry = (retry * 2).min(Duration::from_secs(600));
@@ -62,11 +62,11 @@ impl Gateway {
         platform: DevicePlatform,
     ) -> anyhow::Result<()> {
         // Pairing may have updated the alias or supplied fresher metadata while the query was in flight.
-        if self
+        if platform != DevicePlatform::Unknown && self
             .config
             .peers
             .get(name)
-            .is_some_and(|p| p.endpoint_id == id && p.platform.is_none())
+            .is_some_and(|p| p.endpoint_id == id && p.platform.unwrap_or_default() == DevicePlatform::Unknown)
         {
             let (text, config) = self.file.prepare_peer_platform(name, platform)?;
             self.file.persist(text)?;

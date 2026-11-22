@@ -178,6 +178,8 @@ pub struct PeerStatus {
     pub peer: String,
     pub device_id: String,
     pub platform: DevicePlatform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<peerhatch_config::DeviceCapabilities>,
     pub state: String,
     pub connections: Option<Vec<PeerConnection>>,
 }
@@ -214,6 +216,10 @@ pub struct Status {
     pub peers: BTreeMap<String, String>,
     #[serde(default)]
     pub peer_platforms: BTreeMap<String, DevicePlatform>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub peer_capabilities: BTreeMap<String, peerhatch_config::DeviceCapabilities>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub peer_device_names: BTreeMap<String, String>,
     /// Absent when connected to an older gateway. An empty list is a known idle peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_connections: Option<BTreeMap<String, Vec<PeerConnection>>>,
@@ -254,12 +260,7 @@ impl Status {
     }
 
     pub fn peer_state(&self, peer: &str) -> &'static str {
-        match self.connections_for(peer) {
-            None => "Unavailable",
-            Some([]) if self.peer_presence => "Offline",
-            Some([]) => "Disconnected",
-            Some(_) => "Connected",
-        }
+        peerhatch_core::connection::peer_state(self.connections_for(peer), self.peer_presence)
     }
 
     pub fn peer_online(&self, peer: &str) -> bool {
@@ -268,6 +269,14 @@ impl Status {
 
     pub fn peer_platform(&self, peer: &str) -> DevicePlatform {
         self.peer_platforms.get(peer).copied().unwrap_or_default()
+    }
+
+    pub fn peer_display_name<'a>(&'a self, alias: &'a str) -> &'a str {
+        self.peer_device_names.get(alias).map_or(alias, String::as_str)
+    }
+
+    pub fn can_open_shell(&self, peer: &str) -> bool {
+        self.peer_online(peer) && self.peer_platform(peer).supports_shell(self.peer_capabilities.get(peer).copied())
     }
 
     pub fn display_name(&self) -> &str {
@@ -499,6 +508,7 @@ pub async fn peer_status(path: &Path, peer: &str, check: bool) -> Result<PeerSta
                 peer: name.into(),
                 device_id: id.into(),
                 platform: status.peer_platform(name),
+                capabilities: status.peer_capabilities.get(name).copied(),
                 state: status.peer_state(name).into(),
                 connections: status.connections_for(name).map(<[_]>::to_vec),
             })

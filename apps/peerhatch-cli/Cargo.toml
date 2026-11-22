@@ -9,6 +9,8 @@ name = "peerhatch"
 path = "src/main.rs"
 
 [dependencies]
+qrcode = { workspace = true, features = ["svg"] }
+anstream = "1"
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

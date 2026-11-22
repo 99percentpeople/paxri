@@ -14,7 +14,11 @@ mod windows;
 use windows as platform;
 
 pub(super) fn terminal_columns() -> Option<usize> {
-    platform::size().ok().map(|size| usize::from(size.cols))
+    terminal_size().map(|size| usize::from(size.cols))
+}
+
+pub(super) fn terminal_size() -> Option<Size> {
+    platform::size().ok()
 }
 
 pub async fn pipe(ipc: &Path, peer: String, invocation: Invocation) -> Result<u32> {

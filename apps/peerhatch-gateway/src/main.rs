@@ -103,6 +103,7 @@ struct Gateway {
     direct_only: bool,
     transport: Arc<NativeTransport>,
     peer_changes: tokio::sync::watch::Receiver<BTreeMap<String, i64>>,
+    device_info: tokio::sync::watch::Receiver<peerhatch_native::gateway::PeerDeviceInfo>,
     listeners: BTreeMap<String, Listener>,
     reverse_routes: Routes,
     streams: Arc<Semaphore>,
@@ -117,13 +118,24 @@ impl Gateway {
         Ok(())
     }
 
+    fn device_info_for(&self, peer: &peerhatch_config::Peer) -> Option<peerhatch_config::DeviceInfo> {
+        self.device_info.borrow().get(&peer.endpoint_id.to_ascii_lowercase()).cloned()
+    }
+
+    fn peer_platform(&self, peer: &peerhatch_config::Peer) -> Option<peerhatch_config::DevicePlatform> {
+        self.device_info_for(peer).map(|i| i.platform)
+            .filter(|p| *p != peerhatch_config::DevicePlatform::Unknown)
+            .or(peer.platform)
+    }
+
     fn peer_status(&self, selector: &str) -> Result<PeerStatus> {
         let (name, peer) = self.config.resolve_peer(selector)?;
         let session = self.transport.online_session(name).ok();
         Ok(PeerStatus {
             peer: name.clone(),
             device_id: peer.endpoint_id.clone(),
-            platform: peer.platform.unwrap_or_default(),
+            platform: self.peer_platform(peer).unwrap_or_default(),
+            capabilities: self.device_info_for(peer).map(|i| i.capabilities),
             state: if session.is_some() { "Connected" } else { "Offline" }.into(),
             connections: Some(session.map(|s| s.status()).into_iter().collect()),
         })
@@ -345,7 +357,13 @@ impl Gateway {
             peer_platforms: config
                 .peers
                 .iter()
-                .filter_map(|(name, peer)| Some((name.clone(), peer.platform?)))
+                .filter_map(|(name, peer)| Some((name.clone(), self.peer_platform(peer)?)))
+                .collect(),
+            peer_device_names: config.peers.iter()
+                .filter_map(|(alias, peer)| Some((alias.clone(), self.device_info_for(peer)?.device_name?)))
+                .collect(),
+            peer_capabilities: config.peers.iter()
+                .filter_map(|(name, peer)| Some((name.clone(), self.device_info_for(peer)?.capabilities)))
                 .collect(),
             peers: config
                 .peers
@@ -473,6 +491,7 @@ async fn handle_client(
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let state = gateway.lock().await;
             let mut changes = state.transport.subscribe_peer_changes();
+            let mut info = state.transport.subscribe_device_info();
             let subscription = state.streams.clone().try_acquire_owned();
             drop(state);
             let Ok(_subscription) = subscription else {
@@ -486,7 +505,11 @@ async fn handle_client(
                 result = async {
                     loop {
                         writer.write_all(&[1]).await?;
-                        if changes.changed().await.is_err() { return Ok(()); }
+                        let event = tokio::select! {
+                            event = changes.changed() => event,
+                            event = info.changed() => event,
+                        };
+                        if event.is_err() { return Ok(()); }
                     }
                 } => result,
             }
@@ -569,6 +592,20 @@ async fn handle_client(
         | Command::OpenFiles { .. }) => {
             let (transport, permit) = {
                 let gateway = gateway.lock().await;
+                let required = match &open {
+                    Command::OpenTerminal { peer, .. } => Some((peer, true)),
+                    Command::Exec { peer, .. } | Command::ExecPipe { peer, .. } => Some((peer, false)),
+                    _ => None,
+                };
+                if let Some((name, shell)) = required
+                    && let Some(info) = gateway.config.peers.get(name).and_then(|p| gateway.device_info_for(p))
+                    && !(if shell { info.capabilities.shell } else { info.capabilities.exec })
+                {
+                    let service = if shell { "an interactive shell" } else { "command execution" };
+                    let error = anyhow::anyhow!("{name} does not host {service}");
+                    drop(gateway);
+                    return peerhatch_control::respond::<()>(&mut socket, Err(error)).await;
+                }
                 (
                     gateway.transport.clone(),
                     gateway.streams.clone().try_acquire_owned(),
@@ -684,6 +721,7 @@ async fn run(
         key,
         config.clone(),
         options.no_relay,
+        terminal::capabilities(),
         pair_tx,
         stream_tx,
         address_tx,
@@ -694,6 +732,7 @@ async fn run(
     let stream_config = transport.subscribe_config();
     let mut peer_changes = transport.subscribe_peer_changes();
     peer_changes.mark_changed();
+    let mut device_info = transport.subscribe_device_info();
     let mut gateway = Gateway {
         active_native: config.native.clone(),
         user_managed: options.user_managed,
@@ -706,6 +745,7 @@ async fn run(
         direct_only: options.no_relay,
         transport: Arc::new(transport),
         peer_changes: peer_changes.clone(),
+        device_info: device_info.clone(),
         listeners: BTreeMap::new(),
         reverse_routes: routes.clone(),
         streams: Arc::new(Semaphore::new(256)),
@@ -728,6 +768,7 @@ async fn run(
         gateway.transport.id(),
         path.display()
     );
+    clients.spawn(terminal::watch_capabilities(gateway.transport.clone()));
     clients.spawn(gateway.transport.clone().announce_presence());
     let gateway = Arc::new(Mutex::new(gateway));
     clients.spawn(streams::serve(
@@ -746,6 +787,11 @@ async fn run(
             Ok(()) = peer_changes.changed() => {
                 if let Err(err) = gateway.lock().await.persist_peer_changes() {
                     eprintln!("Saving peer connection times: {err:#}");
+                }
+            }
+            Ok(()) = device_info.changed() => {
+                if let Err(err) = gateway.lock().await.persist_peer_platforms() {
+                    eprintln!("Saving peer platforms: {err:#}");
                 }
             }
             Some(ticket) = peer_addresses.recv() => {

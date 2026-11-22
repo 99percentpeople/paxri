@@ -4,7 +4,11 @@ use clap::{Args, Subcommand};
 use peerhatch_control::{
     Command, Direction, Forward, PeerForward, listen_address, request, tcp_target,
 };
-use std::{net::SocketAddr, path::Path};
+use std::{
+    io::{self, IsTerminal, Write},
+    net::SocketAddr,
+    path::Path,
+};
 
 #[derive(Subcommand)]
 pub enum ForwardAction {
@@ -151,6 +155,12 @@ impl ForwardAction {
 pub enum PairAction {
     /// Print this device's current pairing code
     Code,
+    /// Display the current invitation as a QR code for a phone to scan
+    Qr {
+        /// Write an SVG image to stdout (e.g. --svg > pairing.svg)
+        #[arg(long)]
+        svg: bool,
+    },
     /// Replace this device's code and dismiss requests made with the old code
     Refresh,
     /// Request pairing with another device
@@ -173,9 +183,13 @@ pub enum PairAction {
 impl PairAction {
     pub async fn run(self, ipc: &Path) -> Result<()> {
         let unpair = matches!(self, Self::Remove { .. });
-        let show_code = matches!(self, Self::Code | Self::Refresh);
+        let qr_svg = match self {
+            Self::Qr { svg } => Some(svg),
+            _ => None,
+        };
+        let show_code = qr_svg.is_some() || matches!(self, Self::Code | Self::Refresh);
         let command = match self {
-            Self::Code | Self::Status => Command::Status,
+            Self::Code | Self::Qr { .. } | Self::Status => Command::Status,
             Self::Refresh => Command::RefreshPairingCode,
             Self::Join { code } => Command::JoinPairing { code },
             Self::Cancel => Command::CancelPairing,
@@ -203,17 +217,53 @@ impl PairAction {
             return Ok(());
         }
         if show_code {
-            println!(
-                "{}",
-                pairing.code.context(
-                    pairing
-                        .message
-                        .unwrap_or_else(|| "Gateway did not return a pairing code".into())
-                )?
-            );
+            let code = pairing.code.context(
+                pairing
+                    .message
+                    .unwrap_or_else(|| "Gateway did not return a pairing code".into()),
+            )?;
+            if let Some(svg) = qr_svg {
+                return print_pairing_qr(&code, svg);
+            }
+            println!("{code}");
             return Ok(());
         }
         print!("{}", output::pairing(&pairing));
         Ok(())
     }
+}
+
+fn print_pairing_qr(code: &str, svg: bool) -> Result<()> {
+    let matrix = qrcode::QrCode::new(code)
+        .context("Invitation is too large for a QR code. Use peerhatch pair code.")?;
+    let stdout = io::stdout();
+    if svg {
+        let image = matrix
+            .render::<qrcode::render::svg::Color>()
+            .min_dimensions(384, 384)
+            .build();
+        writeln!(stdout.lock(), "{image}")?;
+        return Ok(());
+    }
+    let rows = matrix.render::<qrcode::render::unicode::Dense1x2>().build();
+    if !stdout.is_terminal() {
+        writeln!(stdout.lock(), "{rows}")?;
+        return Ok(());
+    }
+    let width = matrix.width() + 8; // Four quiet modules on each side.
+    let height = rows.lines().count() + 1; // Leave room for the shell prompt.
+    if let Some(size) = crate::shell::terminal_size()
+        && size.cols != 0
+        && size.rows != 0
+    {
+        anyhow::ensure!(
+            usize::from(size.cols) >= width && usize::from(size.rows) >= height,
+            "QR code needs {width} columns and {height} rows. Enlarge the terminal or run peerhatch pair qr --svg > pairing.svg."
+        );
+    }
+    let mut out = anstream::AutoStream::always(stdout.lock());
+    for row in rows.lines() {
+        writeln!(out, "\x1b[30;107m{row}\x1b[0m")?;
+    }
+    Ok(())
 }

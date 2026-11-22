@@ -110,7 +110,25 @@ async fn accept_tcp(
 pub async fn serve(
     current_config: impl FnOnce() -> std::sync::Arc<Config>,
     authenticated_id: &str,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+) -> Result<()> {
+    serve_services(current_config, authenticated_id, stream, true).await
+}
+
+/// A client-only endpoint still answers authenticated device probes from older gateways.
+pub async fn serve_device_info(
+    current_config: impl FnOnce() -> std::sync::Arc<Config>,
+    authenticated_id: &str,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+) -> Result<()> {
+    serve_services(current_config, authenticated_id, stream, false).await
+}
+
+async fn serve_services(
+    current_config: impl FnOnce() -> std::sync::Arc<Config>,
+    authenticated_id: &str,
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    allow_tcp: bool,
 ) -> Result<()> {
     let request = match read_frame(&mut stream).await {
         Ok(request) => request,
@@ -148,6 +166,11 @@ pub async fn serve(
                 },
             )
             .await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+        Request::OpenTcp { .. } if !allow_tcp => {
+            write_frame(&mut stream, &Answer::Error { code: "UNSUPPORTED".into() }).await?;
             stream.shutdown().await?;
             return Ok(());
         }

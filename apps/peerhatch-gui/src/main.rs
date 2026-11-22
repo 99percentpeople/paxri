@@ -10,11 +10,11 @@ use std::{
 use peerhatch_cli::gateway::{self, Action as GatewayAction};
 use peerhatch_config::{Native, NativeChange, startup::Startup};
 use peerhatch_control::{Command, GuiChange, Status};
+use peerhatch_ui::connections::ConnectionHistory;
 mod chrome;
 mod components;
 #[cfg(windows)]
-mod ime;
-mod connection_metrics;
+use peerhatch_ui::ime;
 mod pages;
 mod presence;
 mod terminal;
@@ -62,7 +62,7 @@ enum RequestResult {
 struct Dashboard {
     presence_watch: Option<(PathBuf, Task<()>)>,
     refresh_presence: bool,
-    connection_history: connection_metrics::ConnectionHistory,
+    connection_history: ConnectionHistory,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
     devices_pane: Option<pages::DevicesPane>,
@@ -78,6 +78,7 @@ struct Dashboard {
     peer_filter_open: bool,
     peer_system: Option<peerhatch_control::DevicePlatform>,
     local_code: Entity<Input>,
+    pairing_qr: Option<std::rc::Rc<qrcode::QrCode>>,
     copied_feedback: Option<Task<()>>,
     saving: bool,
     gateway_action: Option<GatewayAction>,
@@ -358,7 +359,10 @@ impl Dashboard {
                         }) {
                             view.connection_history = Default::default();
                         }
-                        view.connection_history.record(&status);
+                        let paths = status.peer_connections.iter().flatten().filter_map(|(alias, paths)| {
+                            Some((status.peers.get(alias)?.as_str(), paths.as_slice()))
+                        });
+                        view.connection_history.record(paths);
                         view.watch_presence(&status, cx);
                         if let Some(peer) = saved_peer && view.forward_filters.device.is_some() {
                             view.forward_filters.device = Some(peer);
@@ -387,11 +391,19 @@ impl Dashboard {
                                 Input::new("", "Paste the other device’s code", cx);
                         }
                         let code = status.pairing.code.as_deref().unwrap_or_default();
+                        if view.status.as_ref().is_none_or(|s| s.pairing.incoming.is_empty())
+                            && let Some(peer) = status.pairing.incoming.first()
+                        {
+                            view.review_request = Some(peer.request_id.clone());
+                        }
                         if view
                             .local_code
                             .update(cx, |field, cx| field.set_text(code, cx))
                         {
                             view.copied_feedback = None;
+                            view.pairing_qr = status.pairing.code.as_ref()
+                                .and_then(|code| qrcode::QrCode::new(code).ok())
+                                .map(std::rc::Rc::new);
                         }
                         view.startup = status.startup;
                         view.status = Some(*status);
@@ -464,6 +476,7 @@ impl Dashboard {
             profile_native: None,
             gateway_details: false,
             local_code: Input::read_only("", cx),
+            pairing_qr: None,
             copied_feedback: None,
             review_request: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),

@@ -8,7 +8,7 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
-use peerhatch_config::Config;
+use peerhatch_config::{Config, DeviceInfo};
 use peerhatch_core::{
     PeerSession, StreamKind,
     connection::{ConnectionTraffic, PathKind, PeerConnection, unix_time_ms},
@@ -210,6 +210,8 @@ pub(super) struct Connections {
     incoming: mpsc::Sender<IncomingStream<NativeSession>>,
     peer_addresses: mpsc::Sender<EndpointTicket>,
     pub(super) changes: PeerChanges,
+    pub(super) local_info: watch::Sender<DeviceInfo>,
+    pub(super) peer_info: watch::Sender<super::PeerDeviceInfo>,
     headers: Arc<Semaphore>,
 }
 impl Connections {
@@ -218,12 +220,15 @@ impl Connections {
         config: watch::Receiver<Arc<Config>>,
         incoming: mpsc::Sender<IncomingStream<NativeSession>>,
         peer_addresses: mpsc::Sender<EndpointTicket>,
+        local_info: DeviceInfo,
     ) -> Self {
         Self {
             endpoint,
             peer_addresses,
             slots: Default::default(),
             changes: PeerChanges::default(),
+            local_info: watch::channel(local_info).0,
+            peer_info: Default::default(),
             config,
             incoming,
             headers: Arc::new(Semaphore::new(256)),
@@ -249,6 +254,7 @@ impl Connections {
         if let Some(session) = slot.and_then(|slot| slot.selected.send_replace(None)) {
             session.conn.close(1u32.into(), b"device unpaired");
         }
+        self.peer_info.send_if_modified(|info| info.remove(&id.to_string()).is_some());
         self.changes.0.send_modify(|times| {
             times.remove(&id.to_string());
         });
@@ -326,9 +332,11 @@ impl Connections {
                     tx.write_all(&existing.token).await?;
                 }
                 tx.write_all(&token).await?;
-                tx.finish()?;
                 match rx.read_u8().await? {
-                    0 => self.install(&slot, conn.clone(), token)?,
+                    0 => {
+                        self.install(&slot, conn.clone(), token)?;
+                        self.exchange_info(&slot, &conn, tx, rx);
+                    }
                     1 if previous.is_some() => conn.close(0u32.into(), b"session already selected"),
                     _ => anyhow::bail!("invalid peer session acknowledgement"),
                 }
@@ -351,8 +359,10 @@ impl Connections {
                     self.install(&slot, conn.clone(), token)?;
                 }
                 tx.write_all(&[u8::from(reuse)]).await?;
-                tx.finish()?;
-                if reuse {
+                if !reuse {
+                    self.exchange_info(&slot, &conn, tx, rx);
+                } else {
+                    tx.finish()?;
                     // Keep the candidate alive until the selector consumes the acknowledgement.
                     conn.closed().await;
                 }
@@ -367,6 +377,27 @@ impl Connections {
             conn.close(2u32.into(), b"session admission failed");
         }
         result
+    }
+
+    fn exchange_info(&self, slot: &Arc<Slot>, conn: &Connection, tx: SendStream, rx: RecvStream) {
+        let slot = slot.clone();
+        let conn = conn.clone();
+        let local = self.local_info.subscribe();
+        let peers = self.peer_info.clone();
+        tokio::spawn(async move {
+            let receive = super::device_info::receive(rx, |info| {
+                // Only the currently selected connection may update this identity.
+                let selected = slot.selected.borrow();
+                if selected.as_ref().is_some_and(|s| s.conn.stable_id() == conn.stable_id()) {
+                    super::device_info::record(&peers, conn.remote_id(), info);
+                }
+            });
+            tokio::select! {
+                _ = conn.closed() => {}
+                _ = super::device_info::publish(tx, local) => {}
+                _ = receive => {}
+            }
+        });
     }
 
     fn install(&self, slot: &Arc<Slot>, conn: Connection, token: [u8; 16]) -> Result<()> {
@@ -494,6 +525,7 @@ mod tests {
                     config,
                     tx,
                     mpsc::channel(8).0,
+                    DeviceInfo { platform: peerhatch_config::DevicePlatform::Linux, capabilities: Default::default(), device_name: None },
                 )),
                 rx,
             )
@@ -526,6 +558,23 @@ mod tests {
             let mut client = at_a.recv().await.unwrap();
             assert_eq!(host.kind, StreamKind::Terminal);
             assert_eq!(client.kind, StreamKind::Command);
+            let mut remote_info = pa.peer_info.subscribe();
+            let id = b.id().to_string();
+            remote_info.wait_for(|all| all.contains_key(&id)).await?;
+            let android = DeviceInfo {
+                device_name: Some("Z Flip3".to_owned()),
+                platform: peerhatch_config::DevicePlatform::Android,
+                capabilities: Default::default(),
+            };
+            pb.local_info.send_replace(android.clone());
+            remote_info.wait_for(|all| all.get(&id) == Some(&android)).await?;
+            let upgraded = DeviceInfo {
+                capabilities: peerhatch_config::DeviceCapabilities { shell: true, exec: true },
+                ..android
+            };
+            pb.local_info.send_replace(upgraded.clone());
+            remote_info.wait_for(|all| all.get(&id) == Some(&upgraded)).await?;
+            assert_eq!(pa.live(b.id()).unwrap().token, sa.token);
             host.stream.write_u8(37).await?;
             assert_eq!(terminal.read_u8().await?, 37);
             drop((terminal, host));

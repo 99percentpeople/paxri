@@ -7,6 +7,10 @@ impl Dashboard {
         self.status.as_ref().is_some_and(|s| s.peer_online(peer))
     }
 
+    pub(super) fn can_open_shell(&self, peer: &str) -> bool {
+        self.status.as_ref().is_some_and(|s| s.can_open_shell(peer))
+    }
+
     pub(super) fn watch_presence(&mut self, status: &Status, cx: &mut Context<Self>) {
         let Some(address) = status.ipc_path.as_ref().filter(|_| status.peer_presence) else {
             self.presence_watch = None;

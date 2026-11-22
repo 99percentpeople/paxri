@@ -3,8 +3,11 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod exec;
+mod open;
 pub mod pipe;
 pub mod pty;
+
+pub use open::open;
 
 pub const MAX_DATA: usize = 32 * 1024;
 pub const READY: u8 = 0;

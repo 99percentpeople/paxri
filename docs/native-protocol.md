@@ -22,7 +22,7 @@ Each computer owns one version 1 TOML file. For a working pair of device configu
 | `native.upnp` | Allow UPnP discovery and UDP mappings on the default router (default `true`). PCP and NAT-PMP remain enabled |
 | `native.lan_port_mapping` | Opt in to physical IPv4 interface selection and NAT-PMP lease renewal |
 | `peers.<alias>.endpoint_id`, `ticket` | 64 hex digits identifying the device and its optional addressing ticket |
-| `peers.<alias>.platform` | Reported OS, including `windows`, `linux`, `macos`, or `web`. Unrecognized values display as unknown |
+| `peers.<alias>.platform` | Reported OS, including `android`, `windows`, `linux`, `macos`, or `web`. Unrecognized values display as unknown |
 | `peers.<alias>.last_status_change_ms` | Last recorded pairing or connection transition, used by the device list |
 | `forwards.<name>.listen`, `direction` | Listen address and `local` (default) or `remote` |
 | `forwards.<name>.peer` | Paired device that owns the other end |
@@ -36,7 +36,7 @@ Both endpoints can manage a forwarding rule. The creating gateway stores it in `
 
 Pairing uses the separate ALPN `p2p-tunnel/pair/1`. The code `p2p1.<endpoint ticket>.<token>` contains the issuer’s addressing ticket and a random 128-bit invitation. Each request has a fresh random request ID. Each side sends a UTF-8 JSON message of up to 16 KiB followed by FIN. The receiver verifies the ticket’s key against the authenticated peer before asking the local user to approve.
 
-The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. New peers can use PTY and files and forward TCP in either direction.
+The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. Pairing contacts can include the platform and a `capabilities` object. Android uses the system device name for pairing, falling back to the model and then `Android`. The Android client advertises `shell: false` and `exec: false`. Gateways report shell hosting and command execution for their own account.
 
 On an established connection, each peer can open a unidirectional stream to announce updated addressing tickets. Version byte `1` precedes the sequence of UTF-8 tickets, each with a big-endian `u16` length of at most 8192 bytes. The receiver verifies the device ID before updating its cache.
 
@@ -46,7 +46,7 @@ A gateway announces its availability to paired peers by establishing the shared 
 
 ## Shared connection and stream types
 
-The peer with the lexicographically smaller public key serializes connection selection. On the first bidirectional control stream it sends a presence byte, a 16-byte identifier if there is an existing connection, and a fresh 16-byte candidate identifier, then finishes sending. The other peer replies `1` if both still hold the same connection, or installs the candidate and replies `0`. Simultaneous dials converge. Each subsequent bidirectional stream opens with a type byte.
+The peer with the lexicographically smaller public key serializes connection selection. On the first bidirectional control stream it sends a presence byte, a 16-byte identifier if there is an existing connection, and a fresh 16-byte candidate identifier. The other peer replies `1` if both still hold the same connection, or installs the candidate and replies `0`. Simultaneous dials converge. After the acknowledgement, both endpoints send their current platform and capabilities on the selected admission stream and push a replacement snapshot whenever they change. Android snapshots also carry the current system device name. The device list displays it alongside the saved alias when they differ. Each snapshot is UTF-8 JSON with a big-endian `u16` length and a 4096-byte limit. Reconnection exchanges fresh snapshots. Older peers finish the admission stream after the acknowledgement and continue using the same application streams. Each subsequent bidirectional stream opens with a type byte.
 
 | Byte | Operation |
 | --- | --- |

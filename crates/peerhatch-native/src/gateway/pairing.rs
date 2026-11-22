@@ -24,6 +24,8 @@ pub struct Contact {
     pub supports_unpair: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<peerhatch_config::DevicePlatform>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<peerhatch_config::DeviceCapabilities>,
 }
 
 impl Contact {
@@ -275,6 +277,7 @@ mod tests {
         assert_eq!(legacy.platform, None);
         legacy.validate(id)?;
         for platform in [
+            DevicePlatform::Android,
             DevicePlatform::Windows,
             DevicePlatform::Linux,
             DevicePlatform::MacOs,

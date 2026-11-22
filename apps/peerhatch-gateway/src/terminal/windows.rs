@@ -54,6 +54,14 @@ fn candidates() -> Vec<PathBuf> {
     result
 }
 
+fn system_powershell() -> Option<PathBuf> {
+    Some(PathBuf::from(env::var_os("SystemRoot")?).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+}
+
+pub(super) fn has_shell() -> bool {
+    system_powershell().is_some_and(|p| p.is_file()) || candidates().iter().any(|p| p.is_file())
+}
+
 async fn find_seven(paths: &[PathBuf]) -> Option<&Path> {
     for path in paths {
         if fs::symlink_metadata(path).await.is_err() {
@@ -125,8 +133,7 @@ pub(super) async fn shell_command(script: Option<&str>) -> Result<CommandBuilder
         }
         return Ok(cmd);
     }
-    let root = env::var_os("SystemRoot").context("Windows system directory is unavailable")?;
-    let exe = PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let exe = system_powershell().context("Windows system directory is unavailable")?;
     cmd.arg(&exe);
     // Windows PowerShell 5.1 also defaults to ASCII for text piped to native
     // programs. Set that session variable while preserving the script prologue.
