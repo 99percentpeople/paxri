@@ -124,6 +124,12 @@ impl Mobile {
                 Page::Devices,
             ))
             .child(destination(
+                "nav-forwards",
+                "Port forwarding",
+                Icon::Forward,
+                Page::Forwards(None),
+            ))
+            .child(destination(
                 "nav-settings",
                 "Settings",
                 Icon::Settings,

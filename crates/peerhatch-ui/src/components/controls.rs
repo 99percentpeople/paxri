@@ -1,5 +1,5 @@
 use super::*;
-use crate::theme::PANEL_RADIUS;
+use crate::theme::{BUTTON_HEIGHT, PANEL_RADIUS};
 
 pub(super) const MENU_ROW_HEIGHT: Pixels = px(34.);
 pub(super) const MENU_PADDING: Pixels = px(5.);
@@ -27,7 +27,7 @@ impl Ui {
     fn text_field_frame<E: Styled>(self, field: E) -> E {
         field
             .w_full()
-            .h(px(36.))
+            .h(BUTTON_HEIGHT)
             .px(SPACE_2)
             .py(SPACE_1)
             .rounded(CONTROL_RADIUS)

@@ -2,13 +2,12 @@ use crate::Gateway;
 use anyhow::{Context, Result};
 use peerhatch_config::Forward;
 use peerhatch_control::{Command, ForwardDirectory, PeerForward, Status, forwarding};
-use peerhatch_core::{PeerSession, StreamKind};
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use peerhatch_core::PeerSession;
+use std::{collections::BTreeSet, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::Mutex,
     task::JoinSet,
-    time::timeout,
 };
 
 pub(super) async fn serve(
@@ -28,6 +27,37 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
     anyhow::ensure!(state.config.is_paired(id), "Peer is not paired");
     let name = match &action {
         PeerForward::List => return Ok(state.forward_status(Some(id))),
+        PeerForward::Create {
+            name,
+            listen,
+            target,
+            direction,
+        } => {
+            anyhow::ensure!(
+                !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control),
+                "Invalid rule name"
+            );
+            let (peer, _) = state
+                .config
+                .peers
+                .iter()
+                .find(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(id))
+                .context("Peer is not paired")?;
+            state
+                .change_settings(Command::SaveForward {
+                    name: name.clone(),
+                    edit: false,
+                    expected_peer: None,
+                    rule: Forward {
+                        peer: peer.clone(),
+                        listen: *listen,
+                        target: target.clone(),
+                        direction: direction.opposite(),
+                    },
+                })
+                .await?;
+            return Ok(state.forward_status(Some(id)));
+        }
         PeerForward::Edit { name, .. }
         | PeerForward::Remove { name }
         | PeerForward::SetEnabled { name, .. } => name,
@@ -77,28 +107,9 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
                 })
                 .await?
         }
-        PeerForward::List => unreachable!(),
+        PeerForward::List | PeerForward::Create { .. } => unreachable!(),
     }
     Ok(state.forward_status(Some(id)))
-}
-
-async fn query(
-    owner: &str,
-    session: impl PeerSession,
-    op: PeerForward,
-) -> Result<forwarding::Rules> {
-    let mut rules = timeout(Duration::from_secs(8), async {
-        let mut stream = session.open(StreamKind::ForwardRules).await?;
-        forwarding::exchange(&mut stream, &op).await
-    })
-    .await
-    .context("Peer forwarding request timed out")?
-    .with_context(|| format!("Could not manage forwards on {owner}"))?;
-    for rule in rules.values_mut() {
-        rule.direction = rule.direction.opposite();
-        rule.peer = owner.to_owned();
-    }
-    Ok(rules)
 }
 
 pub(super) async fn list(gateway: &Mutex<Gateway>) -> Status {
@@ -107,13 +118,16 @@ pub(super) async fn list(gateway: &Mutex<Gateway>) -> Status {
     {
         let state = gateway.lock().await;
         for (name, peer) in &state.config.peers {
-            if let Ok(session) = state.transport.online_session(name)
+            let platform = state.peer_platform(peer).unwrap_or_default();
+            let capabilities = state.device_info_for(peer).map(|info| info.capabilities);
+            if platform.supports_forward_rules(capabilities)
+                && let Ok(session) = state.transport.online_session(name)
                 && seen.insert(session.peer_id())
             {
                 let owner = name.clone();
                 let id = peer.endpoint_id.clone();
                 jobs.spawn(async move {
-                    let result = query(&owner, session, PeerForward::List).await;
+                    let result = forwarding::query(&owner, session, PeerForward::List).await;
                     (owner, id, result)
                 });
             }
@@ -129,7 +143,9 @@ pub(super) async fn list(gateway: &Mutex<Gateway>) -> Status {
     let mut status = state.status();
     let mut directory = ForwardDirectory::default();
     for (owner, id, result) in results {
-        if status.peers.get(&owner) != Some(&id) || state.transport.online_session(&owner).is_err()
+        if status.peers.get(&owner) != Some(&id)
+            || !status.peer_supports_forward_rules(&owner)
+            || state.transport.online_session(&owner).is_err()
         {
             continue;
         }
@@ -152,6 +168,6 @@ pub(super) async fn change(
     action: PeerForward,
 ) -> Result<Status> {
     let session = gateway.lock().await.transport.online_session(owner)?;
-    query(owner, session, action).await?;
+    forwarding::query(owner, session, action).await?;
     Ok(gateway.lock().await.status())
 }

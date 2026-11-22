@@ -124,7 +124,9 @@ impl RuleForm {
     fn render_form(&self, ui: Ui, cx: &Context<Self>) -> DialogContent {
         let dashboard = self.dashboard.read(cx);
         let device = if let Some(owner) = &self.owner {
-            ui.labeled("Device", owner.clone())
+            let name = dashboard.status.as_ref()
+                .map_or(owner.as_str(), |s| s.peer_display_name(owner));
+            ui.labeled("Device", name.to_owned())
         } else {
             let mut peers = Select::new(
                 "rule-device",
@@ -137,7 +139,7 @@ impl RuleForm {
             .placeholder("Choose a paired device");
             if let Some(status) = &dashboard.status {
                 for name in status.peers.keys() {
-                    peers = peers.option(name.clone(), name.clone());
+                    peers = peers.option(name.clone(), status.peer_display_name(name).to_owned());
                 }
             }
             ui.labeled("Device", peers)
@@ -217,7 +219,7 @@ impl Dashboard {
                 .sum::<usize>();
         let rows: Vec<_> = own
             .chain(shared)
-            .filter(|(_, name, f)| filters.matches(name, f, &terms))
+            .filter(|(_, name, f)| filters.matches(name, f, s.peer_display_name(&f.peer), &terms))
             .collect();
         let narrow = width < px(650.);
         let mut table = ui
@@ -267,9 +269,12 @@ impl Dashboard {
         let cell = || div().min_w_0().flex_1().flex().flex_col();
         if let Some(directory) = &s.peer_forwards {
             for (peer, error) in &directory.errors {
+                if s.peers.contains_key(peer) && !s.peer_supports_forward_rules(peer) {
+                    continue;
+                }
                 if filters.device.as_ref().is_none_or(|p| p == peer) || peer == "Gateway" {
                     table = table.child(
-                        ui.muted(format!("{peer}: forwarding rules unavailable"))
+                        ui.muted(format!("{}: forwarding rules unavailable", s.peer_display_name(peer)))
                             .id(SharedString::from(format!("forward-error-{peer}")))
                             .tooltip(crate::components::tooltip(error.clone().into())),
                     );
@@ -296,17 +301,18 @@ impl Dashboard {
         }
         for (owner, name, f) in rows {
             let owner = owner.map(String::as_str);
+            let display_name = s.peer_display_name(&f.peer);
             let key = format!("{owner:?}/{name}");
             let actions = div()
                 .w(px(36.))
                 .flex_none()
-                .child(self.port_actions(name, owner, f, cx));
+                .child(self.port_actions(name, owner, f, display_name, cx));
             let local = f.direction == Direction::Local;
             let direction = if local { "Forward" } else { "Reverse" };
             let (source, destination) = if local {
-                ("This device", f.peer.as_str())
+                ("This device", display_name)
             } else {
-                (f.peer.as_str(), "This device")
+                (display_name, "This device")
             };
             let line = |column: &'static str, value: &str| {
                 crate::components::single_line(div())
@@ -327,15 +333,15 @@ impl Dashboard {
                     .gap_1()
                     .child(
                         columns()
-                            .child(cell().child(format!("{direction} · {}", f.peer)))
+                            .child(cell().child(format!("{direction} · {display_name}")))
                             .child(f.state().to_owned())
                             .child(actions),
                     )
-                    .child(ui.muted(f.route()))
+                    .child(ui.muted(f.route_for(display_name)))
             } else {
                 columns()
                     .child(cell().child(direction))
-                    .child(cell().child(line("peer", &f.peer)))
+                    .child(cell().child(line("peer", display_name)))
                     .child(endpoint(
                         "listen",
                         source,

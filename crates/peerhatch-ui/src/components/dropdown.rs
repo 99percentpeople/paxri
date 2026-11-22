@@ -92,6 +92,13 @@ impl DropdownState {
         self.highlight(Some(index), cx);
     }
 
+    /// Native Android views above the GPUI surface must leave room for an open field menu.
+    #[cfg(target_os = "android")]
+    pub fn field_popup_top(&self, count: usize, window: &Window) -> Option<Pixels> {
+        self.trigger_bounds.filter(|_| self.is_open())
+            .map(|trigger| self.field_placement(trigger, count, window).top)
+    }
+
     fn field_placement(
         &self,
         trigger: Bounds<Pixels>,

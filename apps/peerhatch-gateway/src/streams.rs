@@ -1,6 +1,6 @@
 //! Paired application services over any backend that provides reliable duplex streams.
 use crate::{
-    reverse::{Listeners, Routes},
+    reverse::Routes,
     terminal::{SessionTools, Terminals},
 };
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use tokio::{
     task::JoinSet,
 };
 use peerhatch_config::Config;
-use peerhatch_core::{PeerSession, StreamKind, session::IncomingStream};
+use peerhatch_core::{reverse::Listeners, PeerSession, StreamKind, session::IncomingStream};
 
 pub(super) fn is_paired(cfg: &Config, id: &str) -> bool {
     cfg.peers

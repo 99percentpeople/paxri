@@ -41,6 +41,9 @@ pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
     {
         log::warn!("Retiring old font size preference: {error}");
     }
+    if settings.keybar.is_none() {
+        return file::set_gui(&path, GuiChange::Keybar(KeybarSettings::default()), true);
+    }
     Ok(settings)
 }
 
@@ -72,6 +75,7 @@ impl Mobile {
                 for session in self.sessions.values_mut() {
                     session.screen.font = self.font.clone();
                 }
+                self.keybar = settings.keybar.clone().unwrap_or_default();
                 theme::apply(settings, cx);
                 self.settings_error.clear();
             }
@@ -87,6 +91,9 @@ impl Mobile {
         available_width: Pixels,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        if selected == Some(keybar::SECTION) {
+            return self.keybar_editor(ui, cx);
+        }
         let device = SettingsGroup::device(peerhatch_ui::settings::controls::setting_field(
             self.name_input.clone(),
         ));
@@ -162,6 +169,12 @@ impl Mobile {
             } else if selected == Some(section) {
                 body = body.child(page.render(ui, SettingsLayout::Mobile));
             }
+        }
+        if selected.is_none() {
+            body = body.child(peerhatch_ui::settings::controls::category_button(
+                ui, Some(keybar::SECTION), false, None, SettingsLayout::Mobile,
+            ).role(Role::Button).aria_label("Terminal keys")
+                .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))));
         }
         body
     }

@@ -235,15 +235,24 @@ impl super::Gateway {
             .collect()
     }
 
-    pub(super) fn persist_peer_platforms(&mut self) -> Result<()> {
+    pub(super) fn persist_peer_info(&mut self) -> Result<()> {
         let mut changed = self.config.peers.iter().filter_map(|(name, peer)| {
-            let platform = self.device_info_for(peer)?.platform;
-            (platform != DevicePlatform::Unknown && Some(platform) != peer.platform).then_some((name, platform))
+            let info = self.device_info_for(peer)?;
+            let platform = Some(info.platform)
+                .filter(|p| *p != DevicePlatform::Unknown && Some(*p) != peer.platform);
+            let device_name = info.device_name.filter(|n| Some(n) != peer.device_name.as_ref());
+            (platform.is_some() || device_name.is_some()).then_some((name, platform, device_name))
         }).peekable();
         if changed.peek().is_none() { return Ok(()); }
         let mut doc: DocumentMut = self.file.text.parse()?;
-        for (name, platform) in changed {
-            peer_table(&mut doc, name)?.insert("platform", value(platform.as_str()));
+        for (name, platform, device_name) in changed {
+            let table = peer_table(&mut doc, name)?;
+            if let Some(platform) = platform {
+                table.insert("platform", value(platform.as_str()));
+            }
+            if let Some(device_name) = device_name {
+                table.insert("device_name", value(device_name));
+            }
         }
         let (text, config) = checked_document(doc)?;
         self.file.persist(text)?;

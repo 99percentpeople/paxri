@@ -130,3 +130,27 @@ fn fresh_and_partial_nodes_use_defaults_and_offline_edits_target_the_selected_fi
     assert_eq!(gui.terminal.cursor_shape, CursorShape::Block);
     assert_eq!(read_gui(&file).unwrap(), gui);
 }
+
+#[test]
+fn terminal_key_rows_keep_order_and_validate_before_saving() {
+    use peerhatch_config::keybar::KeybarSettings;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gui.toml");
+    let original = "version = 1\n[gui]\nappearance = 'dark' # keep\n";
+    fs::write(&path, original).unwrap();
+    assert!(read_gui(&path).unwrap().keybar.is_none());
+    let keys = KeybarSettings {
+        row_height: 37,
+        haptics: peerhatch_config::keybar::KeyHaptics::Light,
+        rows: vec![vec!["Shift".into(), "F2".into()], vec!["|".into(), "a".into(), "Shift".into()]],
+    };
+    set_gui(&path, GuiChange::Keybar(keys.clone()), false).unwrap();
+    assert_eq!(read_gui(&path).unwrap().keybar.as_deref(), Some(&keys));
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.starts_with(original));
+    for rows in [vec![vec![]], vec![vec!["not-a-key".into()]]] {
+        let invalid = KeybarSettings { rows, ..keys.clone() };
+        assert!(set_gui(&path, GuiChange::Keybar(invalid), false).is_err());
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+}

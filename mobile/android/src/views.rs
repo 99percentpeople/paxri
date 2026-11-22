@@ -11,16 +11,21 @@ use peerhatch_ui::{
 };
 
 const APP_BAR_HEIGHT: f32 = 56.;
-const TOOLBAR: f32 = 100.;
-const PADDING: f32 = 10.;
 
-pub(super) fn initial_size(window: &Window, cell: CellSize) -> GridSize {
+
+fn keybar_height(window: &Window, keys: &KeybarSettings) -> f32 {
+    let [_, top, _, bottom] = *EDGES.lock().unwrap();
+    let available = f32::from(window.viewport_size().height) - top - bottom - APP_BAR_HEIGHT;
+    (keys.rows.len() as f32 * f32::from(keys.row_height)).min((available * 0.45).max(0.))
+}
+
+pub(super) fn initial_size(window: &Window, cell: CellSize, keys: &KeybarSettings) -> GridSize {
     let [left, top, right, bottom] = *EDGES.lock().unwrap();
     let available = window.viewport_size();
     GridSize::from_viewport(
         size(
-            available.width - px(left + right + 2. * PADDING),
-            available.height - px(top + bottom + APP_BAR_HEIGHT + TOOLBAR),
+            available.width - px(left + right),
+            available.height - px(top + bottom + APP_BAR_HEIGHT + keybar_height(window, keys)),
         ),
         cell,
     )
@@ -53,12 +58,47 @@ impl Mobile {
                         .into_any_element(),
                 ),
             ),
+            Page::ForwardEdit { owner, .. } => (
+                (if self.rule_form.existing.is_some() {
+                    "Edit forwarding rule"
+                } else {
+                    "New forwarding rule"
+                })
+                .into(),
+                self.peers
+                    .get(owner)
+                    .map(|peer| format!("Gateway · {}", peer.name)),
+                Some("Back to forwarding rules"),
+                self.save_rule_button(owner, ui, cx),
+            ),
+            Page::Forwards(peer) => (
+                "Port forwarding".into(),
+                peer.as_ref()
+                    .and_then(|id| self.peers.get(id))
+                    .map(|p| p.name.clone()),
+                peer.as_ref().map(|_| "Back to device details"),
+                Some(
+                    ui.icon_button(
+                        Ghost,
+                        "refresh-forwards",
+                        Icon::Refresh,
+                        "Refresh forwarding rules",
+                    )
+                    .role(Role::Button)
+                    .aria_label("Refresh forwarding rules")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sync_forwards(true);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                ),
+            ),
             Page::Settings => (SharedString::from("Settings"), None, None, None),
             Page::SettingsCategory(section) => (
                 SharedString::from(section.title),
                 section.table.heading_label().map(|label| label.to_string()),
                 Some("Back to settings"),
-                None,
+                (*section == keybar::SECTION).then(|| self.save_keybar_button(ui, cx)),
             ),
             Page::Terminal(id) => {
                 let id = *id;
@@ -301,7 +341,7 @@ impl Mobile {
             .min_h_0()
             .overflow_y_scroll()
             .restrict_scroll_to_axis()
-            .px(px(PADDING + 8.))
+            .px(px(18.))
             .flex()
             .flex_col()
             .gap_4()
@@ -337,6 +377,21 @@ impl Mobile {
                 page.child(ui.separator())
                     .child(self.connection_history.connection_paths(id, paths, ui))
             })
+            .when(peer.supports_forward_rules(), |page| {
+                let id = id.to_owned();
+                page.child(ui.separator()).child(
+                    ui.navigation_row(
+                        "device-forwards",
+                        Icon::Forward.draw(18.),
+                        "Port forwarding".into(),
+                        "View forwarding rules",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.navigate(Page::Forwards(Some(id.clone())), cx);
+                        cx.notify();
+                    })),
+                )
+            })
             .when(can_connect, |page| {
                 page.pb(px(88.))
                     .child(ui.separator())
@@ -363,6 +418,7 @@ impl Mobile {
     }
 
     fn terminal(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let toolbar = keybar_height(window, &self.keybar);
         let s = self.sessions.get_mut(&id).expect("active terminal session");
         let appearance = theme::current(cx).terminal;
         s.screen
@@ -387,11 +443,11 @@ impl Mobile {
                     bounds.origin.y,
                     bounds.size.width,
                     bounds.size.height,
-                    px(TOOLBAR),
+                    px(toolbar),
                 ]
                 .map(|v| (f32::from(v) * scale).round() as i32);
                 sizing.update(cx, |this, _| {
-                    this.set_touch_area(id, area);
+                    this.set_touch_area(id, area, this.keybar.clone());
                     if let Some(s) = this.sessions.get_mut(&id) {
                         let grid = GridSize::from_viewport(bounds.size, s.screen.font.cell);
                         if s.screen.resize(grid) {
@@ -434,9 +490,8 @@ impl Mobile {
             .min_h_0()
             .flex()
             .flex_col()
-            .px(px(PADDING))
             .child(grid)
-            .child(div().h(px(TOOLBAR)).flex_none())
+            .child(div().h(px(toolbar)).flex_none())
     }
 }
 
@@ -461,7 +516,10 @@ impl Render for Mobile {
         let ui = Ui::new(window, cx);
         let dark_icons = std::ptr::eq(ui.colors, &theme::LIGHT);
         if self.dark_system_bar_icons != Some(dark_icons) {
-            match activity_action(&self.android, ActivityAction::DarkSystemBarIcons(dark_icons)) {
+            match activity_action(
+                &self.android,
+                ActivityAction::Appearance(dark_icons, ui.colors),
+            ) {
                 Ok(()) => self.dark_system_bar_icons = Some(dark_icons),
                 Err(error) => log::warn!("Setting system bar icon appearance: {error}"),
             }
@@ -510,6 +568,12 @@ impl Render for Mobile {
                             .into_any_element(),
                         Page::SettingsCategory(section) => self
                             .settings(Some(section), ui, content_width, cx)
+                            .into_any_element(),
+                        Page::ForwardEdit { owner, .. } => {
+                            self.rule_editor(&owner, ui, cx).into_any_element()
+                        }
+                        Page::Forwards(peer) => self
+                            .forward_list(peer.as_deref(), ui, cx)
                             .into_any_element(),
                         Page::Peer(id) => self.peer(&id, ui, cx).into_any_element(),
                         Page::Terminal(id) => self.terminal(id, window, cx).into_any_element(),

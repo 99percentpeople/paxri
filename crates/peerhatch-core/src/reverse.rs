@@ -1,9 +1,18 @@
 //! One control stream per remote listener, plus a peer-opened stream per accepted socket.
 use super::{read_frame, write_frame};
-use anyhow::{Result, bail, ensure};
+use crate::{PeerSession, StreamKind};
+use anyhow::{Context, Result, bail, ensure};
+use peerhatch_config::Config;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::{sync::Arc, time::Duration};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::{
+    net::TcpListener,
+    sync::{Semaphore, watch},
+    task::JoinSet,
+    time::sleep,
+};
 
 pub type ListenerId = [u8; 16];
 
@@ -56,4 +65,86 @@ pub async fn respond(
         Err(reason) => Reply::Error(reason),
     };
     write_frame(send, &reply).await
+}
+
+#[derive(Debug)]
+pub struct Listeners {
+    config: watch::Receiver<Arc<Config>>,
+    listeners: Semaphore,
+    streams: Arc<Semaphore>,
+}
+
+impl Listeners {
+    pub fn new(config: watch::Receiver<Arc<Config>>, streams: Arc<Semaphore>) -> Self {
+        Self {
+            config,
+            listeners: Semaphore::new(64),
+            streams,
+        }
+    }
+
+    pub async fn serve<S: PeerSession>(&self, session: S, stream: S::Stream) -> Result<()> {
+        let peer = session.peer_id();
+        let mut config = self.config.clone();
+        let (mut recv, mut send) = tokio::io::split(stream);
+        let (listen, id) = receive(&mut recv).await?;
+        let paired = |cfg: &Config| cfg.is_paired(&peer);
+        let binding = async {
+            ensure!(
+                paired(&config.borrow_and_update()),
+                "DENIED: peer is not paired"
+            );
+            let slot = self
+                .listeners
+                .try_acquire()
+                .context("Remote listener limit reached")?;
+            let listener = TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("Bind {listen}"))?;
+            Ok::<_, anyhow::Error>((listener, slot))
+        }
+        .await;
+        let (listener, slot) = match binding {
+            Ok(pair) => pair,
+            Err(e) => {
+                respond(&mut send, Err(format!("{e:#}"))).await?;
+                send.shutdown().await?;
+                return Ok(());
+            }
+        };
+        respond(&mut send, Ok(listener.local_addr()?)).await?;
+        let mut flows = JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = recv.read_u8() => break,
+                changed = config.changed() => {
+                    if changed.is_err() || !paired(&config.borrow_and_update()) { break; }
+                }
+                _ = flows.join_next(), if !flows.is_empty() => {}
+                accepted = listener.accept() => {
+                    let (mut tcp, _) = match accepted {
+                        Ok(pair) => pair,
+                        Err(e) => { eprintln!("accept on {listen}: {e}"); sleep(Duration::from_millis(250)).await; continue; }
+                    };
+                    let Ok(permit) = self.streams.clone().try_acquire_owned() else { continue };
+                    let session = session.clone();
+                    flows.spawn(async move {
+                        let _permit = permit;
+                        let mut stream=session.open(StreamKind::ForwardedTcp).await?;
+                        // Identify the locally authorized target before forwarding server-first TCP.
+                        stream.write_all(&id).await?;
+                        stream.flush().await?;
+                        copy_bidirectional(&mut tcp,&mut stream).await?;
+                        Ok::<(),anyhow::Error>(())
+                    });
+                }
+            }
+        }
+        drop(listener);
+        drop(slot);
+        send.shutdown().await?;
+        while flows.join_next().await.is_some() {}
+        Ok(())
+    }
 }

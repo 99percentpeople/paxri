@@ -195,7 +195,7 @@ impl RenderOnce for Button {
                 .px(SPACE_3)
                 .justify_start()
                 .overflow_hidden(),
-            ButtonLayout::Field => root.w_full().h(px(36.)).px(SPACE_3).justify_between(),
+            ButtonLayout::Field => root.w_full().px(SPACE_3).justify_between(),
             ButtonLayout::Card(width) => root.w(width).max_w_full().h_auto().p(SPACE_2),
         };
         root.border_1()

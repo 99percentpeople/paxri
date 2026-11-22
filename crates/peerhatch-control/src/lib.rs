@@ -144,11 +144,15 @@ impl ForwardStatus {
     }
 
     pub fn route(&self) -> String {
+        self.route_for(&self.peer)
+    }
+
+    pub fn route_for(&self, peer: &str) -> String {
         let listen = self.bound.as_ref().unwrap_or(&self.listen);
         let dest = &self.target;
         match self.direction {
-            Direction::Local => format!("This device / {listen} → {} / {dest}", self.peer),
-            Direction::Remote => format!("{} / {listen} → This device / {dest}", self.peer),
+            Direction::Local => format!("This device / {listen} → {peer} / {dest}"),
+            Direction::Remote => format!("{peer} / {listen} → This device / {dest}"),
         }
     }
 }
@@ -273,6 +277,10 @@ impl Status {
 
     pub fn peer_display_name<'a>(&'a self, alias: &'a str) -> &'a str {
         self.peer_device_names.get(alias).map_or(alias, String::as_str)
+    }
+
+    pub fn peer_supports_forward_rules(&self, peer: &str) -> bool {
+        self.peer_platform(peer).supports_forward_rules(self.peer_capabilities.get(peer).copied())
     }
 
     pub fn can_open_shell(&self, peer: &str) -> bool {

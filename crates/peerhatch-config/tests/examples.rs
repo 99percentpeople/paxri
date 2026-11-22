@@ -40,3 +40,22 @@ fn existing_peers_with_a_saved_terminal_flag_still_load() {
         assert!(parse(&config).unwrap().peers.contains_key("laptop"));
     }
 }
+
+#[test]
+fn forwarding_discovery_respects_advertised_support_and_legacy_peers() {
+    use peerhatch_config::{DeviceCapabilities, DevicePlatform::*};
+
+    // The original snapshot contained only terminal capabilities.
+    let legacy: DeviceCapabilities = serde_json::from_str(r#"{"shell":false,"exec":false}"#).unwrap();
+    for capabilities in [None, Some(legacy)] {
+        assert!(Windows.supports_forward_rules(capabilities));
+        assert!(Unknown.supports_forward_rules(capabilities));
+        assert!(!Android.supports_forward_rules(capabilities));
+        assert!(!Web.supports_forward_rules(capabilities));
+    }
+    for advertised in [false, true] {
+        let capabilities = Some(DeviceCapabilities { forward_rules: Some(advertised), ..legacy });
+        assert_eq!(Linux.supports_forward_rules(capabilities), advertised);
+        assert_eq!(Android.supports_forward_rules(capabilities), advertised);
+    }
+}

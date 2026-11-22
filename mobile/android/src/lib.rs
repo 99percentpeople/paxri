@@ -1,4 +1,6 @@
 mod client;
+mod forwards;
+mod keybar;
 mod navigation;
 mod settings;
 mod touch;
@@ -12,6 +14,7 @@ use jni::{
     EnvUnowned, jni_sig, jni_str,
     objects::{Global, JClass, JObject, JString},
 };
+use peerhatch_config::keybar::KeybarSettings;
 use peerhatch_terminal::{Frame, Size as PtySize};
 use std::sync::{
     Arc, LazyLock, Mutex,
@@ -61,6 +64,12 @@ enum Update {
     Connected(u64),
     Output(u64, Vec<u8>),
     Presence(Presence),
+    ForwardChanged(String, Result<(), String>),
+    ForwardRules(
+        String,
+        u64,
+        Result<peerhatch_control::forwarding::Rules, String>,
+    ),
     End(u64, Result<u32, String>),
 }
 
@@ -254,8 +263,8 @@ enum ActivityAction<'a> {
     PairingReady,
     HardwareText(u64, &'a str),
     BackEnabled(bool),
-    DarkSystemBarIcons(bool),
-    TouchArea(u64, [i32; 5]),
+    Appearance(bool, &'a theme::Palette),
+    TouchArea(u64, [i32; 5], &'a KeybarSettings),
     StopFling(u64),
 }
 
@@ -290,31 +299,30 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
                 jni_sig!("(Z)V"),
                 &[enabled.into()],
             ),
-            ActivityAction::DarkSystemBarIcons(dark) => env.call_method(
-                activity,
-                jni_str!("setDarkSystemBarIcons"),
-                jni_sig!("(Z)V"),
-                &[dark.into()],
-            ),
+            ActivityAction::Appearance(dark_icons, colors) => {
+                let argb = |rgb: u32| ((0xff000000 | rgb) as i32).into();
+                env.call_method(activity, jni_str!("setChromeAppearance"), jni_sig!("(ZIIIII)V"),
+                    &[dark_icons.into(), argb(colors.border), argb(colors.secondary.background),
+                      argb(colors.input_border), argb(colors.secondary.foreground), argb(colors.terminal.ansi[4])])
+            }
             ActivityAction::StopFling(id) => env.call_method(
                 activity,
                 jni_str!("stopTerminalFling"),
                 jni_sig!("(J)V"),
                 &[(id as i64).into()],
             ),
-            ActivityAction::TouchArea(id, [x, y, width, height, toolbar]) => env.call_method(
-                activity,
-                jni_str!("setTerminalTouchArea"),
-                jni_sig!("(JIIIII)V"),
-                &[
-                    (id as i64).into(),
-                    x.into(),
-                    y.into(),
-                    width.into(),
-                    height.into(),
-                    toolbar.into(),
-                ],
-            ),
+            ActivityAction::TouchArea(id, [x, y, width, height, toolbar], keys) => {
+                let rows: Vec<Vec<_>> = keys.rows.iter().map(|row| row.iter().map(|key|
+                    (key.as_str(), peerhatch_config::keybar::label(key))).collect()).collect();
+                let layout = serde_json::json!({
+                    "rows": rows, "row_height": keys.row_height, "haptics": keys.haptics,
+                }).to_string();
+                let layout = JString::from_str(env, layout).map_err(|e| e.to_string())?;
+                env.call_method(activity, jni_str!("setTerminalTouchArea"),
+                    jni_sig!("(JIIIIILjava/lang/String;)V"),
+                    &[(id as i64).into(), x.into(), y.into(), width.into(), height.into(),
+                      toolbar.into(), (&layout).into()])
+            }
             ActivityAction::Pair => env.call_method(
                 activity,
                 jni_str!("requestPairingCode"),
@@ -382,6 +390,11 @@ enum Page {
     Devices,
     PairingMenu,
     Settings,
+    Forwards(Option<String>),
+    ForwardEdit {
+        owner: String,
+        scope: Option<String>,
+    },
     SettingsCategory(peerhatch_ui::settings::SettingsSection),
     Peer(String),
     Terminal(u64),
@@ -390,18 +403,23 @@ enum Page {
 struct Mobile {
     android: AndroidApp,
     font: TerminalFont,
-    touch_area: (u64, [i32; 5]),
+    touch_area: Option<(u64, [i32; 5], Arc<KeybarSettings>)>,
     rt: Handle,
     client: Option<Arc<Client>>,
     updates: Sender<Update>,
     peers: Peers,
     presence: Presence,
     connection_history: ConnectionHistory,
+    forwards: forwards::ForwardList,
+    rule_form: forwards::RuleForm,
     sessions: BTreeMap<u64, Session>,
     last_session_number: BTreeMap<String, usize>,
     page: Page,
     drawer: Drawer,
     name_input: Entity<peerhatch_ui::components::input::Input>,
+    keybar: Arc<KeybarSettings>,
+    key_editor: Option<keybar::Editor>,
+    keybar_menu: Entity<peerhatch_ui::components::DropdownState>,
     terminal_settings: peerhatch_ui::settings::terminal::TerminalSettings,
     terminal_menus: [Entity<peerhatch_ui::components::DropdownState>; 3],
     settings_scroll: ScrollHandle,
@@ -415,6 +433,50 @@ struct Mobile {
 }
 
 impl Mobile {
+    fn bind_input(
+        input: &Entity<peerhatch_ui::components::input::Input>,
+        keyboard: gpui_mobile::KeyboardType,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(
+            input,
+            |this: &mut Mobile,
+             field,
+             _: &peerhatch_ui::components::input::EditingFinished,
+             cx| {
+                if this.editing_input.as_ref() != Some(&field) {
+                    return;
+                }
+                if field == this.name_input {
+                    this.commit_device_name(cx);
+                }
+                this.editing_input = None;
+                gpui_mobile::set_text_input_callback(None);
+                gpui_mobile::hide_keyboard();
+                cx.notify();
+            },
+        )
+        .detach();
+        cx.subscribe(
+            input,
+            move |this: &mut Mobile,
+                  field,
+                  _: &peerhatch_ui::components::input::KeyboardRequested,
+                  cx| {
+                this.editing_input = Some(field.clone());
+                let field = field.downgrade();
+                let mut app = cx.to_async();
+                gpui_mobile::set_text_input_callback(Some(Box::new(move |text| {
+                    let _ = field.update(&mut app, |input, cx| {
+                        input.insert_hardware_text(text, cx)
+                    });
+                })));
+                gpui_mobile::show_keyboard_with_type(keyboard);
+            },
+        )
+        .detach();
+    }
+
     fn navigate(&mut self, page: Page, cx: &mut App) {
         if self.page != page
             && let Some(input) = self.editing_input.take()
@@ -432,8 +494,12 @@ impl Mobile {
             gpui_mobile::set_text_input_callback(None);
             gpui_mobile::hide_keyboard();
         }
+        if self.page == Page::SettingsCategory(keybar::SECTION) && self.page != page {
+            self.set_touch_area(0, [0; 5], self.keybar.clone());
+            self.key_editor = None;
+        }
         if let Page::Terminal(id) = self.page {
-            self.set_touch_area(0, [0; 5]);
+            self.set_touch_area(0, [0; 5], self.keybar.clone());
             gpui_mobile::set_text_input_callback(None);
             gpui_mobile::hide_keyboard();
             if let Some(session) = self.sessions.get_mut(&id) {
@@ -459,6 +525,7 @@ impl Mobile {
             self.settings_scroll.set_offset(Point::default());
         }
         self.page = page;
+        self.sync_forwards(false);
         self.drawer.set_open(false);
         self.sync_back();
     }
@@ -480,6 +547,8 @@ impl Mobile {
         }
         let page = match self.page {
             Page::SettingsCategory(_) => Page::Settings,
+            Page::ForwardEdit { ref scope, .. } => Page::Forwards(scope.clone()),
+            Page::Forwards(Some(ref id)) => Page::Peer(id.clone()),
             Page::Terminal(id) => self
                 .sessions
                 .get(&id)
@@ -520,7 +589,7 @@ impl Mobile {
         *number += 1;
         self.generation += 1;
         let id = self.generation;
-        let grid = initial_size(window, self.font.cell);
+        let grid = initial_size(window, self.font.cell, &self.keybar);
         let size = PtySize {
             cols: grid.cols,
             rows: grid.rows,
@@ -568,6 +637,10 @@ impl Mobile {
         })));
     }
     fn update(&mut self, event: Update, cx: &mut Context<Self>) {
+        let devices_changed = matches!(
+            &event,
+            Update::Presence(_) | Update::Ready(..) | Update::Devices(_) | Update::Paired(_)
+        );
         match event {
             Update::Ready(client, peers) => {
                 self.client = Some(client);
@@ -610,7 +683,9 @@ impl Mobile {
             }
             Update::Devices(peers) => {
                 let revoked = match &self.page {
-                    Page::Peer(id) => !peers.contains_key(id),
+                    Page::Peer(id)
+                    | Page::Forwards(Some(id))
+                    | Page::ForwardEdit { owner: id, .. } => !peers.contains_key(id),
                     Page::Terminal(id) => self
                         .sessions
                         .get(id)
@@ -618,7 +693,8 @@ impl Mobile {
                     Page::Devices
                     | Page::PairingMenu
                     | Page::Settings
-                    | Page::SettingsCategory(_) => false,
+                    | Page::SettingsCategory(_)
+                    | Page::Forwards(None) => false,
                 };
                 if revoked {
                     self.navigate(Page::Devices, cx);
@@ -645,6 +721,7 @@ impl Mobile {
                 if let Some(menu) = self
                     .terminal_menus
                     .iter()
+                    .chain([&self.keybar_menu])
                     .find(|menu| menu.read(cx).is_open())
                 {
                     menu.update(cx, |menu, cx| menu.dismiss(cx));
@@ -669,27 +746,14 @@ impl Mobile {
                     && let Some(s) = self.sessions.get_mut(&id).filter(|s| s.connected())
                 {
                     let bytes = if named {
-                        let name = match value.as_str() {
-                            "Esc" => "escape",
-                            "Tab" => "tab",
-                            "Enter" => "enter",
-                            "↑" => "up",
-                            "↓" => "down",
-                            "←" => "left",
-                            "→" => "right",
-                            "backspace" => "backspace",
-                            "home" => "home",
-                            "end" => "end",
-                            _ => return,
-                        };
-                        let Some(bytes) = keys::named_key(
-                            name,
-                            first,
-                            s.screen.term.mode().contains(TermMode::APP_CURSOR),
-                        ) else {
-                            return;
-                        };
-                        bytes
+                        if value == "Space" || value.chars().count() == 1 {
+                            keys::committed_text(if value == "Space" { " " } else { &value }, first, held)
+                        } else {
+                            let name = if value == "Esc" { "escape".into() } else { value.to_ascii_lowercase() };
+                            let Some(bytes) = keys::named_key(&name, first, s.screen.term.mode().contains(TermMode::APP_CURSOR))
+                            else { return };
+                            bytes
+                        }
                     } else {
                         keys::committed_text(&value, first, held)
                     };
@@ -722,6 +786,24 @@ impl Mobile {
                     }
                 }
             }
+            Update::ForwardChanged(owner, result) => {
+                self.rule_form.saving = false;
+                if matches!(&self.page, Page::ForwardEdit { owner: peer, .. } if peer == &owner) {
+                    match result {
+                        Ok(()) => self.back(cx),
+                        Err(error) => self.rule_form.error = error,
+                    }
+                } else {
+                    // A list opened while the save was pending may still contain its previous rules.
+                    self.forwards.invalidate(&owner);
+                    self.sync_forwards(false);
+                }
+            }
+            Update::ForwardRules(peer, request, result) => {
+                if !self.forwards.complete(&peer, request, result) {
+                    return;
+                }
+            }
             Update::Presence(snapshot) => {
                 self.connection_history.record(
                     snapshot
@@ -747,6 +829,9 @@ impl Mobile {
                     });
                 }
             }
+        }
+        if devices_changed {
+            self.sync_forwards(false);
         }
         cx.notify();
     }
@@ -826,6 +911,13 @@ fn android_main(android: AndroidApp) {
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
                 use gpui_mobile::KeyboardType;
                 let mut inputs = vec![(name_input.clone(), KeyboardType::Default)];
+                let rule_form = forwards::RuleForm::new(cx);
+                inputs.extend(
+                    rule_form
+                        .inputs
+                        .iter()
+                        .map(|input| (input.clone(), KeyboardType::Default)),
+                );
                 for (field, keyboard) in terminal_settings.numbers.iter().zip([
                     KeyboardType::Decimal,
                     KeyboardType::NumberPad,
@@ -834,49 +926,13 @@ fn android_main(android: AndroidApp) {
                     inputs.push((field.read(cx).input.clone(), keyboard));
                 }
                 for (input, keyboard) in inputs {
-                    cx.subscribe(
-                        &input,
-                        |this: &mut Mobile,
-                         field,
-                         _: &peerhatch_ui::components::input::EditingFinished,
-                         cx| {
-                            if this.editing_input.as_ref() != Some(&field) {
-                                return;
-                            }
-                            if field == this.name_input {
-                                this.commit_device_name(cx);
-                            }
-                            this.editing_input = None;
-                            gpui_mobile::set_text_input_callback(None);
-                            gpui_mobile::hide_keyboard();
-                            cx.notify();
-                        },
-                    )
-                    .detach();
-                    cx.subscribe(
-                        &input,
-                        move |this: &mut Mobile,
-                              field,
-                              _: &peerhatch_ui::components::input::KeyboardRequested,
-                              cx| {
-                            this.editing_input = Some(field.clone());
-                            let field = field.downgrade();
-                            let mut app = cx.to_async();
-                            gpui_mobile::set_text_input_callback(Some(Box::new(move |text| {
-                                let _ = field.update(&mut app, |input, cx| {
-                                    input.insert_hardware_text(text, cx)
-                                });
-                            })));
-                            gpui_mobile::show_keyboard_with_type(keyboard);
-                        },
-                    )
-                    .detach();
+                    Mobile::bind_input(&input, keyboard, cx);
                 }
                 Mobile {
                     name_input,
                     android,
                     font,
-                    touch_area: (0, [0; 5]),
+                    touch_area: None,
                     rt: handle,
                     client: None,
                     updates: tx,
@@ -885,12 +941,17 @@ fn android_main(android: AndroidApp) {
                     connection_history: ConnectionHistory::default(),
                     sessions: BTreeMap::new(),
                     last_session_number: BTreeMap::new(),
+                    forwards: Default::default(),
+                    rule_form,
                     page: Page::Devices,
                     drawer: Drawer::default(),
                     settings_scroll: ScrollHandle::new(),
                     bottom_inset: 0.,
                     dark_system_bar_icons: None,
                     editing_input: None,
+                    keybar: theme::current(cx).keybar.unwrap_or_default(),
+                    key_editor: None,
+                    keybar_menu: peerhatch_ui::components::DropdownState::new(window, cx),
                     terminal_settings,
                     terminal_menus: std::array::from_fn(|_| {
                         peerhatch_ui::components::DropdownState::new(window, cx)

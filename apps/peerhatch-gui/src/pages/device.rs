@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use gpui::{prelude::*, *};
-use peerhatch_control::{Command, Status};
+use peerhatch_control::{Command, DevicePlatform, Status};
 
 impl Dashboard {
     fn new_session(&self, peer: &str, ui: Ui) -> Button {
@@ -49,11 +49,13 @@ impl Dashboard {
             size(px(440.), px(252.)),
             dashboard,
             None,
-            move |_, ui, cx| {
+            move |dashboard, ui, cx| {
+                let display_name = dashboard.status.as_ref()
+                    .map_or(peer.as_str(), |s| s.peer_display_name(&peer));
                 let name = peer.clone();
                 let expected = id.clone();
                 let body = div().flex().flex_col().gap_2()
-                    .child(format!("Unpair this device and {peer}?"))
+                    .child(format!("Unpair this device and {display_name}?"))
                     .child(ui.muted("Active connections close immediately. Both gateways remove forwarding rules for this pairing. Offline peers sync when reachable."));
                 DialogContent::new(body, "Cancel").action(
                     ui.button(Destructive, "confirm-unpair", "Unpair device")
@@ -134,7 +136,9 @@ impl Dashboard {
             .when(status.can_open_shell(peer), |page| {
                 page.child(self.sessions(peer, ui, cx)).child(ui.separator())
             })
-            .child(forwards)
+            // Android uses this gateway to store rules, including its first one.
+            .when(count > 0 || status.peer_platform(peer) == DevicePlatform::Android
+                || status.peer_supports_forward_rules(peer), |page| page.child(forwards))
             .when_some(status.peers.get(peer), |page, id| {
                 let id = id.clone();
                 let name = peer.to_owned();

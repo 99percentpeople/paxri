@@ -41,6 +41,7 @@ jni = "0.22"
 iroh = "=1.4.1"
 log = "0.4"
 peerhatch-config = { path = "../../crates/peerhatch-config" }
+peerhatch-control = { path = "../../crates/peerhatch-control" }
 peerhatch-core = { path = "../../crates/peerhatch-core" }
 peerhatch-native = { path = "../../crates/peerhatch-native" }
 peerhatch-terminal = { path = "../../crates/peerhatch-terminal" }

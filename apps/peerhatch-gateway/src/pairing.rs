@@ -243,7 +243,7 @@ impl Gateway {
         self.transport.set_peer(alias.clone(), peer.ticket.clone());
         self.apply_config(config);
         self.transport.remember_contact(peer);
-        Ok(alias)
+        Ok(self.peer_device_name(&self.config.peers[&alias]).unwrap_or(alias))
     }
 
     pub(super) fn answer_pairing(
@@ -263,10 +263,10 @@ impl Gateway {
             .clone();
         let (decision, message) = if accept {
             let generation = self.pairing.pending[id].request_id.clone();
-            let alias = self.save_peer(&peer, &generation)?;
+            let name = self.save_peer(&peer, &generation)?;
             (
                 Decision::Accepted(self.contact()),
-                format!("Paired with {alias}."),
+                format!("Paired with {name}."),
             )
         } else {
             (
@@ -320,7 +320,7 @@ impl Gateway {
                 Decision::Accepted(peer) => g.save_peer(&peer, &attempt),
                 Decision::Rejected(reason) => anyhow::bail!("{reason}"),
             }) {
-                Ok(alias) => format!("Paired with {alias}."),
+                Ok(name) => format!("Paired with {name}."),
                 Err(e) => format!("Pairing failed: {e:#}"),
             };
             g.pairing.outgoing = None;

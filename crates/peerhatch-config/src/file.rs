@@ -24,7 +24,7 @@ pub fn read_local(path: &Path) -> Result<LocalSettings> {
     match fs::read_to_string(path) {
         Ok(text) => {
             let settings: LocalSettings = toml::from_str(&text)?;
-            settings.gui.terminal.validate().map_err(anyhow::Error::msg)?;
+            settings.gui.validate().map_err(anyhow::Error::msg)?;
             Ok(settings)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings {
@@ -161,6 +161,29 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
         let gui = subtable(doc.as_table_mut(), "gui")?;
         let ser = ValueSerializer::new();
         let (table, key, value) = match change {
+            GuiChange::Keybar(v) => {
+                let keys = subtable(gui, "keybar")?;
+                for (name, mut value) in [
+                    ("row_height", v.row_height.serialize(ValueSerializer::new())?),
+                    ("haptics", v.haptics.serialize(ValueSerializer::new())?),
+                ] {
+                    if let Some(old) = keys.get(name).and_then(Item::as_value) {
+                        *value.decor_mut() = old.decor().clone();
+                    }
+                    keys.insert(name, Item::Value(value));
+                }
+                let mut rows = toml_edit::Array::new();
+                for row in v.rows {
+                    let mut value = row.serialize(ValueSerializer::new())?;
+                    value.decor_mut().set_prefix("\n  ");
+                    rows.push_formatted(value);
+                }
+                if !rows.is_empty() {
+                    rows.set_trailing_comma(true);
+                    rows.set_trailing("\n");
+                }
+                (keys, "rows", Some(toml_edit::Value::Array(rows)))
+            }
             GuiChange::Appearance(v) => (gui, "appearance", Some(v.serialize(ser)?)),
             GuiChange::TabPlacement(v) => (gui, "tab_placement", Some(v.serialize(ser)?)),
             GuiChange::Scheme(v) => (subtable(gui, "terminal")?, "scheme", Some(v.serialize(ser)?)),

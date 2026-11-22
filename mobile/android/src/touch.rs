@@ -115,12 +115,14 @@ impl Mobile {
         }
     }
 
-    pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5]) {
-        if self.touch_area == (id, rect) {
+    pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5], keys: Arc<KeybarSettings>) {
+        if self.touch_area.as_ref().is_some_and(|(session, bounds, layout)| {
+            *session == id && *bounds == rect && *layout == keys
+        }) {
             return;
         }
-        match activity_action(&self.android, ActivityAction::TouchArea(id, rect)) {
-            Ok(()) => self.touch_area = (id, rect),
+        match activity_action(&self.android, ActivityAction::TouchArea(id, rect, &keys)) {
+            Ok(()) => self.touch_area = Some((id, rect, keys)),
             Err(error) => log::warn!("Setting terminal touch area: {error}"),
         }
     }

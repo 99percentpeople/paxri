@@ -106,6 +106,10 @@ pub fn scheme_select(
     schemes
 }
 
+pub fn number_field(input: impl IntoElement) -> Div {
+    div().w(px(108.)).max_w_full().child(input)
+}
+
 pub fn setting_field(control: impl IntoElement) -> Div {
     div().w(px(224.)).max_w_full().min_w_0().child(control)
 }

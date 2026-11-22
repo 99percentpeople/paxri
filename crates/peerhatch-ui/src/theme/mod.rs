@@ -14,7 +14,7 @@ pub const SPACE_2: Pixels = px(8.);
 pub const SPACE_3: Pixels = px(12.);
 pub const SPACE_4: Pixels = px(16.);
 pub const BUTTON_HEIGHT: Pixels = px(if cfg!(target_os = "android") {
-    44.
+    40.
 } else {
     32.
 });

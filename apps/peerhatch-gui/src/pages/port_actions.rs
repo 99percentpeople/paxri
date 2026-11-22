@@ -38,6 +38,7 @@ impl Dashboard {
         name: &str,
         owner: Option<&str>,
         rule: &ForwardStatus,
+        display_name: &str,
         cx: &Context<Self>,
     ) -> PortActions {
         let dashboard = cx.entity();
@@ -88,7 +89,7 @@ impl Dashboard {
         let remove = name.to_owned();
         let peer = rule.peer.clone();
         let remote = owner.map(str::to_owned);
-        let prompt = format!("Remove the forwarding rule for {}?", rule.route());
+        let prompt = format!("Remove the forwarding rule for {}?", rule.route_for(display_name));
         let content = content.item("remove", Icon::Trash.label("Remove"), move |w, cx| {
             let name = remove.clone();
             let peer = peer.clone();

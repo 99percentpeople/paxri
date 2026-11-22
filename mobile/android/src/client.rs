@@ -75,6 +75,10 @@ impl Drop for Client {
 }
 
 impl Peer {
+    pub fn supports_forward_rules(&self) -> bool {
+        self.platform.supports_forward_rules(self.capabilities)
+    }
+
     pub fn supports_shell(&self) -> bool {
         self.platform.supports_shell(self.capabilities)
     }
@@ -96,6 +100,16 @@ fn config(peers: &Peers) -> Result<Arc<Config>> {
 }
 
 impl Client {
+    pub async fn manage_forward(
+        &self,
+        peer_id: &str,
+        name: &str,
+        action: peerhatch_control::PeerForward,
+    ) -> Result<peerhatch_control::forwarding::Rules> {
+        let session = self.transport.online_session(peer_id)?;
+        peerhatch_control::forwarding::query(name, session, action).await
+    }
+
     pub async fn start(dir: &Path, updates: Sender<Update>) -> Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let key = peerhatch_native::identity::init(&dir.join("device.key"))?;
@@ -112,7 +126,10 @@ impl Client {
             key,
             config(&peers)?,
             false,
-            Default::default(),
+            peerhatch_config::DeviceCapabilities {
+                forward_rules: Some(false),
+                ..Default::default()
+            },
             incoming,
             streams,
             addresses,
@@ -139,7 +156,15 @@ impl Client {
         ));
         let weak = Arc::downgrade(&client);
         tokio::spawn(async move {
-            let mut probes = tokio::task::JoinSet::new();
+            let mut flows = tokio::task::JoinSet::new();
+            let slots = Arc::new(tokio::sync::Semaphore::new(256));
+            let Some(client) = weak.upgrade() else { return };
+            let config = client.transport.subscribe_config();
+            let listeners = Arc::new(peerhatch_core::reverse::Listeners::new(
+                config.clone(),
+                slots.clone(),
+            ));
+            drop(client);
             loop {
                 tokio::select! {
                     changed = name.changed() => {
@@ -166,16 +191,27 @@ impl Client {
                     }
                     stream = unsolicited.recv() => {
                         let Some(request) = stream else { break };
-                        if request.kind == StreamKind::Services && probes.len() < 8 {
-                            let Some(client) = weak.upgrade() else { break };
-                            let cfg = client.transport.subscribe_config();
-                            probes.spawn(async move {
-                                let id = request.session.peer_id();
-                                let _ = peerhatch_core::serve_device_info(|| cfg.borrow().clone(), &id, request.stream).await;
-                            });
-                        }
+                        let id = request.session.peer_id();
+                        if !matches!(request.kind, StreamKind::Services | StreamKind::Listen) || !config.borrow().is_paired(&id) { continue; }
+                        let Ok(permit) = slots.clone().try_acquire_owned() else { continue };
+                        let mut cfg = config.clone();
+                        let listeners = listeners.clone();
+                        flows.spawn(async move {
+                            let _permit = permit;
+                            let current = cfg.clone();
+                            tokio::select! {
+                                biased;
+                                _ = cfg.wait_for(|c| !c.is_paired(&id)) => {}
+                                result = async {
+                                    match request.kind {
+                                        StreamKind::Listen => listeners.serve(request.session, request.stream).await,
+                                        _ => peerhatch_core::serve(|| current.borrow().clone(), &id, request.stream).await,
+                                    }
+                                } => if let Err(error) = result { log::debug!("Forwarding stream: {error:#}"); }
+                            }
+                        });
                     }
-                    _ = probes.join_next(), if !probes.is_empty() => {}
+                    _ = flows.join_next(), if !flows.is_empty() => {}
                     changed = info.changed() => {
                         if changed.is_err() { break; }
                         let Some(client) = weak.upgrade() else { break };
@@ -321,7 +357,9 @@ impl Client {
             "Choose another device’s invitation"
         );
         let attempt = uuid::Uuid::new_v4().simple().to_string();
-        let contact = self.transport.contact(crate::DEVICE_NAME.borrow().effective());
+        let contact = self
+            .transport
+            .contact(crate::DEVICE_NAME.borrow().effective());
         let decision = timeout(
             Duration::from_secs(120),
             self.transport.request_pairing(&invite, &contact, &attempt),

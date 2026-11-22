@@ -1735,6 +1735,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3682,6 +3688,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "interprocess"
+version = "2.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0ed453af5ae3bdbf68e41dde07eae0bffcc986419f63521ba9c89d82988c70"
+dependencies = [
+ "doctest-file",
+ "futures-core",
+ "libc",
+ "recvmsg",
+ "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5443,6 +5464,7 @@ dependencies = [
  "jni 0.22.4",
  "log",
  "peerhatch-config",
+ "peerhatch-control",
  "peerhatch-core",
  "peerhatch-native",
  "peerhatch-terminal",
@@ -5470,6 +5492,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "peerhatch-control"
+version = "0.0.0-dev"
+dependencies = [
+ "anyhow",
+ "interprocess",
+ "peerhatch-config",
+ "peerhatch-core",
+ "peerhatch-files",
+ "peerhatch-terminal",
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
+ "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "peerhatch-core"
 version = "0.0.0-dev"
 dependencies = [
@@ -5477,6 +5517,18 @@ dependencies = [
  "peerhatch-config",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "peerhatch-files"
+version = "0.0.0-dev"
+dependencies = [
+ "anyhow",
+ "filetime",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -6241,6 +6293,12 @@ dependencies = [
  "font-types 0.12.7",
  "once_cell",
 ]
+
+[[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"

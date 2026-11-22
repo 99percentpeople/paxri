@@ -569,7 +569,7 @@ mod tests {
             pb.local_info.send_replace(android.clone());
             remote_info.wait_for(|all| all.get(&id) == Some(&android)).await?;
             let upgraded = DeviceInfo {
-                capabilities: peerhatch_config::DeviceCapabilities { shell: true, exec: true },
+                capabilities: peerhatch_config::DeviceCapabilities { shell: true, exec: true, forward_rules: Some(true), create_forward_rules: true },
                 ..android
             };
             pb.local_info.send_replace(upgraded.clone());

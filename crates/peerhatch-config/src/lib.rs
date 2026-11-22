@@ -6,6 +6,7 @@ use url::{Host, Url};
 
 pub mod file;
 pub mod gui;
+pub mod keybar;
 pub mod peer_id;
 pub mod startup;
 
@@ -90,6 +91,8 @@ pub struct Peer {
     pub pairing_id: Option<String>,
     pub ticket: Option<String>,
     pub platform: Option<DevicePlatform>,
+    /// Last name advertised by the paired endpoint, including while it is offline.
+    pub device_name: Option<String>,
     /// Unix milliseconds of the last pairing or connection state transition observed locally.
     pub last_status_change_ms: Option<i64>,
     // Accept profiles written by versions with the OpenSSH client.
@@ -122,6 +125,11 @@ pub enum DevicePlatform {
 pub struct DeviceCapabilities {
     pub shell: bool,
     pub exec: bool,
+    /// None for older peers that did not advertise rule management.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forward_rules: Option<bool>,
+    /// Accepts creation of gateway-owned rules scoped to the authenticated pairing.
+    pub create_forward_rules: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -136,6 +144,11 @@ impl DevicePlatform {
     /// Gateways predating capability exchange hosted terminals on these systems.
     pub fn supports_shell(self, capabilities: Option<DeviceCapabilities>) -> bool {
         capabilities.map_or(matches!(self, Self::Windows | Self::Linux | Self::MacOs), |c| c.shell)
+    }
+
+    pub fn supports_forward_rules(self, capabilities: Option<DeviceCapabilities>) -> bool {
+        capabilities.and_then(|c| c.forward_rules)
+            .unwrap_or(!matches!(self, Self::Android | Self::Web))
     }
 
     pub fn current() -> Self {
@@ -225,7 +238,7 @@ pub fn tcp_target(input: &str) -> Result<String, String> {
 
 pub fn parse(input: &str) -> Result<Config, String> {
     let mut config: Config = toml::from_str(input).map_err(|e| format!("{e}"))?;
-    config.gui.terminal.validate()?;
+    config.gui.validate()?;
     if config.version != 1 {
         return Err(format!(
             "unsupported configuration version {}",

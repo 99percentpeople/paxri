@@ -39,7 +39,13 @@ impl ForwardFilters {
         self.device.is_some() || self.direction.is_some() || self.state.is_some()
     }
 
-    pub(super) fn matches(&self, name: &str, rule: &ForwardStatus, terms: &[&str]) -> bool {
+    pub(super) fn matches(
+        &self,
+        name: &str,
+        rule: &ForwardStatus,
+        display_name: &str,
+        terms: &[&str],
+    ) -> bool {
         let state = if rule.enabled() && rule.error.is_some() {
             "Error"
         } else {
@@ -61,7 +67,7 @@ impl ForwardFilters {
             Direction::Remote => "reverse",
         };
         let searchable = format!(
-            "{name} {} {} {} {} {direction} {state} {}",
+            "{name} {display_name} {} {} {} {} {direction} {state} {}",
             rule.peer,
             rule.listen,
             rule.bound.as_deref().unwrap_or(""),
@@ -85,7 +91,7 @@ impl ForwardFilters {
         for name in status.peers.keys() {
             devices = devices.option_with_icon(
                 Some(name.clone()),
-                name.clone(),
+                status.peer_display_name(name).to_owned(),
                 Icon::device(status.peer_platform(name)),
             );
         }
@@ -129,8 +135,8 @@ impl ForwardFilters {
             .items_center()
             .gap_2()
             .when(compact, |d| d.w_full())
-            .when(!compact, |d| d.w(px(444.)).flex_none())
-            .child(field(123.).child(devices))
+            .when(!compact, |d| d.w(px(510.)).flex_none())
+            .child(field(189.).child(devices))
             .child(field(140.).child(directions))
             .child(field(119.).child(states));
         div()

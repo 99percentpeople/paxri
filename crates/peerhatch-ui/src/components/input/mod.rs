@@ -108,6 +108,16 @@ impl TextInput<false> {
         self.bounds
     }
 
+    #[cfg(target_os = "android")]
+    pub fn edit_at_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.cursor = self.buffer.text.len();
+        self.buffer.anchor = self.buffer.cursor;
+        self.reveal_cursor = true;
+        self.focus.focus(window, cx);
+        cx.emit(KeyboardRequested);
+        cx.notify();
+    }
+
     pub fn is_composing(&self) -> bool {
         self.buffer.marked.is_some()
     }

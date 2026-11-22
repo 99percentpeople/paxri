@@ -1,7 +1,7 @@
 //! Terminal preferences shared by the desktop and Android settings pages.
 use super::{
     SettingsGroup, catalog,
-    controls::{preview_label, scheme_select, setting_field},
+    controls::{number_field, preview_label, scheme_select, setting_field},
 };
 use crate::{
     components::{
@@ -189,7 +189,7 @@ impl Render for NumberField {
             .flex_col()
             .items_end()
             .gap_1()
-            .child(div().w(px(108.)).max_w_full().child(self.input.clone()))
+            .child(number_field(self.input.clone()))
             .when_some(self.error, |field, message| {
                 field.child(div().w(px(168.)).max_w_full().child(ui.alert(message)))
             })

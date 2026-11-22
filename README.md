@@ -96,6 +96,18 @@ On the computer, open **Devices → Add Device** or run `peerhatch pair qr`. In 
 
 The device list shows connection state and the last observed change. Open a connected computer to see its direct or relay path, upload and download rates, and round-trip latency. Tap the floating terminal button at the bottom right to start a session, then tap the terminal to open the keyboard. Drag one finger to scroll or pinch with two fingers to change the terminal font size. The phone remembers your chosen size. The back arrow returns to the device’s session list and keeps the shell running. Reopen a session to continue, start another shell, or choose **End session** in the top bar to release it. Sessions last while the Android app process is running. Hold Ctrl, Alt or Shift while pressing another key, or tap a modifier to latch it for the next key. Tap a latched modifier again to cancel. Modifiers can be combined with each other, the software keyboard, and the terminal toolbar. The PTY resizes when the keyboard opens or closes. The app keeps the screen awake while it is in the foreground.
 
+In **Settings → Terminal keys**, edit each row as a comma-separated list. The preview updates as you type. Add or remove individual keys in the text field. Use **Add row** for a new row or tap the trash icon beside a row to delete it. Use `Comma` for a literal comma. Choose key vibration (Off, Light, Standard or Strong), adjust the row height and tap **Save** to apply the layout to open sessions. **Restore defaults** restores the two default rows at 40 dp, with ↑ above ↓ and PgUp above PgDn. The Android app stores the layout in its private `files/gui.toml`, with one inner array per row. For example:
+
+```toml
+[gui.keybar]
+row_height = 40
+haptics = "standard"
+rows = [
+  ["Esc", "Tab", "Ctrl", "Alt", "Home", "Up", "End", "PageUp"],
+  ["Keys", "Shift", "Backspace", "Enter", "Left", "Down", "Right", "PageDown"],
+]
+```
+
 The terminal header shows the active path. Public relays use Android's certificate verifier. The APK includes the verifier's network security resource so Android can retrieve signed revocation lists from the certificate authorities listed by the verifier.
 
 ## Build and develop

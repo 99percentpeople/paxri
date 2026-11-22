@@ -1,6 +1,7 @@
 //! Only forwarding operations are accepted on a peer management stream.
 use super::{Direction, ForwardStatus, read, write};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use peerhatch_core::{PeerSession, StreamKind};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -17,6 +18,12 @@ pub struct ForwardDirectory {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerForward {
     List,
+    Create {
+        name: String,
+        listen: SocketAddr,
+        target: String,
+        direction: Direction,
+    },
     Edit {
         name: String,
         listen: SocketAddr,
@@ -48,4 +55,20 @@ pub async fn exchange(
     write(stream, op).await?;
     let result: Result<Rules, String> = read(stream).await?;
     result.map_err(anyhow::Error::msg)
+}
+
+/// Query the peer over its authenticated session and express returned routes from the caller's side.
+pub async fn query(owner: &str, session: impl PeerSession, op: PeerForward) -> Result<Rules> {
+    let mut rules = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut stream = session.open(StreamKind::ForwardRules).await?;
+        exchange(&mut stream, &op).await
+    })
+    .await
+    .context("Peer forwarding request timed out")?
+    .with_context(|| format!("Could not manage forwards on {owner}"))?;
+    for rule in rules.values_mut() {
+        rule.direction = rule.direction.opposite();
+        rule.peer = owner.to_owned();
+    }
+    Ok(rules)
 }

@@ -8,12 +8,11 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
-    net::{TcpListener, TcpStream},
-    sync::{Semaphore, oneshot, watch},
-    task::{JoinHandle, JoinSet},
+    net::TcpStream,
+    sync::{oneshot, watch},
+    task::JoinHandle,
     time::{sleep, timeout},
 };
-use peerhatch_config::Config;
 use peerhatch_core::{
     PeerSession, StreamKind, Transport,
     reverse::{self as wire, ListenerId},
@@ -66,88 +65,6 @@ impl Routes {
             .context("peer has no active reverse listener with this ID")?;
         let mut tcp = timeout(Duration::from_secs(6), TcpStream::connect(&target)).await??;
         copy_bidirectional(&mut tcp, &mut stream).await?;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct Listeners {
-    config: watch::Receiver<Arc<Config>>,
-    listeners: Semaphore,
-    streams: Arc<Semaphore>,
-}
-
-impl Listeners {
-    pub(super) fn new(config: watch::Receiver<Arc<Config>>, streams: Arc<Semaphore>) -> Self {
-        Self {
-            config,
-            listeners: Semaphore::new(64),
-            streams,
-        }
-    }
-
-    pub async fn serve<S: PeerSession>(&self, session: S, stream: S::Stream) -> Result<()> {
-        let peer = session.peer_id();
-        let mut config = self.config.clone();
-        let (mut recv, mut send) = tokio::io::split(stream);
-        let (listen, id) = wire::receive(&mut recv).await?;
-        let paired = |cfg: &Config| cfg.is_paired(&peer);
-        let binding = async {
-            ensure!(
-                paired(&config.borrow_and_update()),
-                "DENIED: peer is not paired"
-            );
-            let slot = self
-                .listeners
-                .try_acquire()
-                .context("Remote listener limit reached")?;
-            let listener = TcpListener::bind(listen)
-                .await
-                .with_context(|| format!("Bind {listen}"))?;
-            Ok::<_, anyhow::Error>((listener, slot))
-        }
-        .await;
-        let (listener, slot) = match binding {
-            Ok(pair) => pair,
-            Err(e) => {
-                wire::respond(&mut send, Err(format!("{e:#}"))).await?;
-                send.shutdown().await?;
-                return Ok(());
-            }
-        };
-        wire::respond(&mut send, Ok(listener.local_addr()?)).await?;
-        let mut flows = JoinSet::new();
-        loop {
-            tokio::select! {
-                biased;
-                _ = recv.read_u8() => break,
-                changed = config.changed() => {
-                    if changed.is_err() || !paired(&config.borrow_and_update()) { break; }
-                }
-                _ = flows.join_next(), if !flows.is_empty() => {}
-                accepted = listener.accept() => {
-                    let (mut tcp, _) = match accepted {
-                        Ok(pair) => pair,
-                        Err(e) => { eprintln!("accept on {listen}: {e}"); sleep(Duration::from_millis(250)).await; continue; }
-                    };
-                    let Ok(permit) = self.streams.clone().try_acquire_owned() else { continue };
-                    let session = session.clone();
-                    flows.spawn(async move {
-                        let _permit = permit;
-                        let mut stream=session.open(StreamKind::ForwardedTcp).await?;
-                        // Identify the locally authorized target before forwarding server-first TCP.
-                        stream.write_all(&id).await?;
-                        stream.flush().await?;
-                        copy_bidirectional(&mut tcp,&mut stream).await?;
-                        Ok::<(),anyhow::Error>(())
-                    });
-                }
-            }
-        }
-        drop(listener);
-        drop(slot);
-        send.shutdown().await?;
-        while flows.join_next().await.is_some() {}
         Ok(())
     }
 }

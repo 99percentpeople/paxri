@@ -68,7 +68,8 @@ impl Gateway {
         if generations.next() != generation || generations.any(|id| Some(id) != generation) {
             return Ok(UnpairAck::NewerPairing);
         }
-        let message = format!("{name} unpaired from this device.");
+        let display_name = self.peer_device_name(first).unwrap_or_else(|| name.clone());
+        let message = format!("{display_name} unpaired from this device.");
         self.remove_identity(id, None).await?;
         self.pairing.message = Some(message);
         Ok(UnpairAck::Cleared)
@@ -127,7 +128,7 @@ pub(super) async fn remove(
         );
         let online = g.transport.online_session(name).is_ok();
         let notice = PendingUnpair {
-            name: name.clone(),
+            name: g.peer_device_name(peer).unwrap_or_else(|| name.clone()),
             ticket: g.transport.peer_ticket(name)?.to_string(),
             pairing_id: g
                 .config

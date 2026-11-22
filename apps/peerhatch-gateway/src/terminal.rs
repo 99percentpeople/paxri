@@ -31,7 +31,7 @@ pub(super) fn capabilities() -> peerhatch_config::DeviceCapabilities {
     let shell = exec && std::path::Path::new(&CommandBuilder::new_default_prog().get_shell()).is_file();
     #[cfg(windows)]
     let shell = exec && windows::has_shell();
-    peerhatch_config::DeviceCapabilities { shell, exec }
+    peerhatch_config::DeviceCapabilities { shell, exec, forward_rules: Some(true), create_forward_rules: true }
 }
 
 pub(super) async fn watch_capabilities(transport: Arc<peerhatch_native::gateway::NativeTransport>) {

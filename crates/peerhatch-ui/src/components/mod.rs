@@ -53,7 +53,7 @@ impl Ui {
             .child(text.into())
     }
 
-    pub fn labeled(self, label: &'static str, control: impl IntoElement) -> Div {
+    pub fn labeled(self, label: impl Into<SharedString>, control: impl IntoElement) -> Div {
         div()
             .flex()
             .flex_col()

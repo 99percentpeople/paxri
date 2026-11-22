@@ -122,6 +122,11 @@ impl Gateway {
         self.device_info.borrow().get(&peer.endpoint_id.to_ascii_lowercase()).cloned()
     }
 
+    fn peer_device_name(&self, peer: &peerhatch_config::Peer) -> Option<String> {
+        self.device_info_for(peer).and_then(|info| info.device_name)
+            .or_else(|| peer.device_name.clone())
+    }
+
     fn peer_platform(&self, peer: &peerhatch_config::Peer) -> Option<peerhatch_config::DevicePlatform> {
         self.device_info_for(peer).map(|i| i.platform)
             .filter(|p| *p != peerhatch_config::DevicePlatform::Unknown)
@@ -360,7 +365,7 @@ impl Gateway {
                 .filter_map(|(name, peer)| Some((name.clone(), self.peer_platform(peer)?)))
                 .collect(),
             peer_device_names: config.peers.iter()
-                .filter_map(|(alias, peer)| Some((alias.clone(), self.device_info_for(peer)?.device_name?)))
+                .filter_map(|(alias, peer)| Some((alias.clone(), self.peer_device_name(peer)?)))
                 .collect(),
             peer_capabilities: config.peers.iter()
                 .filter_map(|(name, peer)| Some((name.clone(), self.device_info_for(peer)?.capabilities)))
@@ -790,8 +795,8 @@ async fn run(
                 }
             }
             Ok(()) = device_info.changed() => {
-                if let Err(err) = gateway.lock().await.persist_peer_platforms() {
-                    eprintln!("Saving peer platforms: {err:#}");
+                if let Err(err) = gateway.lock().await.persist_peer_info() {
+                    eprintln!("Saving peer information: {err:#}");
                 }
             }
             Some(ticket) = peer_addresses.recv() => {

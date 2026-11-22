@@ -24,6 +24,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.PopupWindow;
+import android.widget.ScrollView;
 import android.widget.LinearLayout;
 import dev.gpui.mobile.GpuiInputActivity;
 
@@ -45,6 +46,9 @@ public final class PeerHatchActivity extends GpuiInputActivity {
     private TerminalGestures gestures;
     private TerminalKeybar keybar;
     private int keybarHeight;
+    private String keyLayout;
+    private TerminalKeybar.Colors keyColors;
+    private ScrollView keybarScroll;
     private Rect touchArea = new Rect();
     private boolean visible;
     private String scannedCode;
@@ -138,13 +142,24 @@ public final class PeerHatchActivity extends GpuiInputActivity {
         SystemBars.install(this, this::reportInsets);
     }
 
-    public void setDarkSystemBarIcons(boolean dark) {
-        runOnUiThread(() -> SystemBars.setDarkIcons(getWindow(), dark));
+    public void setChromeAppearance(boolean darkIcons, int panel, int key, int pressed, int text, int selectedText) {
+        runOnUiThread(() -> {
+            SystemBars.setDarkIcons(getWindow(), darkIcons);
+            keyColors = new TerminalKeybar.Colors(panel, key, pressed, text, selectedText);
+            if (keybar != null) keybar.applyColors(keyColors);
+            else updateTerminalTouch();
+        });
     }
 
-    public void setTerminalTouchArea(long session, int x, int y, int width, int height, int toolbarHeight) {
+    public void setTerminalTouchArea(long session, int x, int y, int width, int height, int toolbarHeight, String layout) {
         runOnUiThread(() -> {
             if (touchSession != session) dismissTerminalTouch();
+            if (width > 0 && keybarScroll != null && !layout.equals(keyLayout)) {
+                keybarScroll.removeAllViews();
+                keybar = new TerminalKeybar(this, session, layout, keyColors);
+                keybarScroll.addView(keybar);
+            }
+            keyLayout = layout;
             touchSession = session;
             keybarHeight = toolbarHeight;
             touchArea.set(x, y, x + width, y + height);
@@ -154,7 +169,7 @@ public final class PeerHatchActivity extends GpuiInputActivity {
 
     public void stopTerminalFling(long session) {
         runOnUiThread(() -> {
-            if (touchSession == session && terminalTouch != null) {
+            if (touchSession == session && gestures != null) {
                 gestures.stopFling();
             }
         });
@@ -166,12 +181,16 @@ public final class PeerHatchActivity extends GpuiInputActivity {
             terminalTouch = null;
             gestures = null;
             keybar = null;
+            keybarScroll = null;
         }
     }
 
     private void updateTerminalTouch() {
         View decor = getWindow().getDecorView();
-        if (!visible || touchSession == 0 || touchArea.isEmpty() || !decor.isAttachedToWindow()) {
+        // The settings preview uses only the keybar portion, without an active terminal.
+        boolean preview = touchSession == 0 && keybarHeight > 0;
+        if (!visible || keyColors == null || !decor.isAttachedToWindow() || touchArea.width() <= 0
+                || (!preview && (touchSession == 0 || touchArea.isEmpty()))) {
             dismissTerminalTouch();
             return;
         }
@@ -181,13 +200,18 @@ public final class PeerHatchActivity extends GpuiInputActivity {
         if (terminalTouch == null) {
             // NativeActivity sends its main surface straight to the NDK input queue.
             // Use an unfocusable child window over just the canvas so the IME stays with GPUI.
-            gestures = new TerminalGestures(this, touchSession);
-            keybar = new TerminalKeybar(this, touchSession);
+            keybar = new TerminalKeybar(this, touchSession, keyLayout, keyColors);
+            keybarScroll = new ScrollView(this);
+            keybarScroll.setVerticalScrollBarEnabled(false);
+            keybarScroll.addView(keybar);
             LinearLayout panel = new LinearLayout(this);
             panel.setOrientation(LinearLayout.VERTICAL);
             panel.setMotionEventSplittingEnabled(true);
-            panel.addView(gestures, new LinearLayout.LayoutParams(-1, 0, 1));
-            panel.addView(keybar, new LinearLayout.LayoutParams(-1, keybarHeight));
+            if (!preview) {
+                gestures = new TerminalGestures(this, touchSession);
+                panel.addView(gestures, new LinearLayout.LayoutParams(-1, 0, 1));
+            }
+            panel.addView(keybarScroll, new LinearLayout.LayoutParams(-1, keybarHeight));
             terminalTouch = new PopupWindow(panel, touchArea.width(), touchArea.height() + keybarHeight, false);
             terminalTouch.setSplitTouchEnabled(true);
             terminalTouch.setTouchModal(false);
@@ -195,8 +219,8 @@ public final class PeerHatchActivity extends GpuiInputActivity {
             terminalTouch.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
             terminalTouch.showAtLocation(decor, Gravity.TOP | Gravity.LEFT, x, y);
         } else {
-            if (keybar.getLayoutParams().height != keybarHeight) {
-                keybar.setLayoutParams(new LinearLayout.LayoutParams(-1, keybarHeight));
+            if (keybarScroll.getLayoutParams().height != keybarHeight) {
+                keybarScroll.setLayoutParams(new LinearLayout.LayoutParams(-1, keybarHeight));
             }
             terminalTouch.update(x, y, touchArea.width(), touchArea.height() + keybarHeight);
         }
@@ -265,7 +289,7 @@ public final class PeerHatchActivity extends GpuiInputActivity {
     }
 
     void terminalAction(long session, String key) {
-        if (touchSession != session || keybar == null) return;
+        if (session == 0 || touchSession != session || keybar == null) return;
         if (key.equals("Keys")) {
             TerminalGestures.tap(session);
             return;
@@ -285,10 +309,10 @@ public final class PeerHatchActivity extends GpuiInputActivity {
         runOnUiThread(() -> {
             if (touchSession != session) return;
             switch (text) {
-            case "\u001b[D": sendTerminalInput("←", true); break;
-            case "\u001b[C": sendTerminalInput("→", true); break;
-            case "\u001b[A": sendTerminalInput("↑", true); break;
-            case "\u001b[B": sendTerminalInput("↓", true); break;
+            case "\u001b[D": sendTerminalInput("Left", true); break;
+            case "\u001b[C": sendTerminalInput("Right", true); break;
+            case "\u001b[A": sendTerminalInput("Up", true); break;
+            case "\u001b[B": sendTerminalInput("Down", true); break;
             case "\u001b[H": sendTerminalInput("home", true); break;
             case "\u001b[F": sendTerminalInput("end", true); break;
             default: sendTerminalInput(text, false);
