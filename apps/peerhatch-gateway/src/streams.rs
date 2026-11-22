@@ -21,6 +21,7 @@ pub async fn serve<S: PeerSession>(
     mut incoming: mpsc::Receiver<IncomingStream<S>>,
     config: watch::Receiver<Arc<Config>>,
     routes: Routes,
+    gateway: Arc<tokio::sync::Mutex<crate::Gateway>>,
 ) {
     let limit = Arc::new(Semaphore::new(256));
     let terminals = Arc::new(Terminals::new(config.clone()));
@@ -36,6 +37,7 @@ pub async fn serve<S: PeerSession>(
                 let terminals = terminals.clone();
                 let listeners = listeners.clone();
                 let routes = routes.clone();
+                let gateway = gateway.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
                     let peer = session.peer_id();
@@ -56,6 +58,7 @@ pub async fn serve<S: PeerSession>(
                                 Err(e) => Err(e),
                             }
                         }
+                        StreamKind::ForwardRules => crate::forward_management::serve(gateway, &peer, stream).await,
                         StreamKind::Listen => listeners.serve(session, stream).await,
                         StreamKind::ForwardedTcp => routes.forward(&peer, stream).await,
                     };

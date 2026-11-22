@@ -1,4 +1,4 @@
-//! The settings index and the editor use the same rows, including service names supplied by the gateway.
+//! The settings index and the editor use the same rows.
 use crate::{
     Dashboard, Input,
     components::{

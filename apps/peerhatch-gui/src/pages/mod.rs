@@ -1,11 +1,11 @@
 mod device;
 mod device_list;
+mod forward_filters;
+pub(crate) use forward_filters::ForwardFilters;
 mod home;
 pub(crate) use home::DevicesPane;
 mod network_settings;
-mod port_access;
 mod port_actions;
-mod published_services;
 mod rules;
 mod settings;
 mod settings_catalog;
@@ -16,7 +16,7 @@ mod terminal_settings;
 use crate::{
     Dashboard,
     components::{ButtonVariant::Secondary, Icon, Ui, actions, heading, row, single_line, tooltip},
-    theme::{SPACE_1, SPACE_3, SPACE_4},
+    theme::{SPACE_2, SPACE_3, SPACE_4},
 };
 use gpui::{prelude::*, *};
 use peerhatch_cli::gateway::Action;
@@ -46,21 +46,9 @@ fn overview() -> Div {
         .gap(SPACE_4)
 }
 
-fn overview_columns(primary: impl IntoElement, secondary: impl IntoElement) -> Div {
-    let column = |basis| div().min_w_0().flex_basis(px(basis)).flex_grow();
-    div()
-        .w_full()
-        .flex()
-        .flex_wrap()
-        .items_start()
-        .gap(SPACE_4)
-        .child(column(356.).child(primary))
-        .child(column(300.).child(secondary))
-}
-
 fn device_heading(
     ui: Ui,
-    context: &'static str,
+    badge: Div,
     name: SharedString,
     platform: DevicePlatform,
     id: Option<(&str, String)>,
@@ -75,39 +63,41 @@ fn device_heading(
         }
         None => ui.muted(platform.label()).into_any_element(),
     };
-    row().gap(SPACE_4).py(SPACE_1).child(
-        div()
-            .min_w_0()
-            .flex_grow()
-            .flex_basis(px(220.))
-            .flex()
-            .items_center()
-            .gap(SPACE_3)
-            .child(ui.icon_tile(Icon::device(platform), 48., 25.))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .child(ui.muted(context).text_xs())
-                    .child(
-                        single_line(div())
-                            .w_full()
-                            .text_2xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .id("device-heading")
-                            .tooltip(tooltip(name.clone()))
-                            .child(name),
-                    )
-                    .child(detail),
-            ),
-    )
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(SPACE_3)
+        .child(ui.icon_tile(Icon::device(platform), 48., 25.))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(SPACE_2)
+                        .child(
+                            single_line(div())
+                                .text_2xl()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .id("device-heading")
+                                .tooltip(tooltip(name.clone()))
+                                .child(name),
+                        )
+                        .child(badge),
+                )
+                .child(detail),
+        )
 }
 
 impl Dashboard {
     fn gateway_notice(&self, ui: Ui, cx: &mut Context<Self>) -> Div {
-        ui.card()
+        ui.section()
             .child(
                 row().child(heading("Local gateway")).child(
                     actions()

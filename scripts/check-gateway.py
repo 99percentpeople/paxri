@@ -129,7 +129,6 @@ def check_native_terminal(root, keys, call, start, cli, ipc, wait):
         assert not marker.exists()
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: s["pairing"]["message"] == "Paired with host.")
-    assert not any(json.loads(call("host", "status", "--json"))["gateway_port_access"].values())
     wait("host", lambda s: s["peer_connections"].get("client"))
     assert call("host", "exec", keys["client"][:8].upper(), "--", "printf", "paired") == "paired"
     # Launch the foreground program directly, including an empty argument and a literal shell metacharacter.
@@ -308,13 +307,10 @@ def check_pairing(root, keys, call, start, target_port, wait):
         assert links[0]["path"] == "direct" and links[0]["address"] and links[0]["rtt_ms"] is not None, links
     rejected("host", "status", "missing", "--json")
     assert status("client")["peer_platforms"] == {"Studio-2": platform}
-    assert not any(status("host")["gateway_port_access"].values()) and not any(status("client")["gateway_port_access"].values())
     call("spare", "pair", "join", old_code)
     wait("spare", lambda s: not s["pairing"]["outgoing"] and "invalid" in (s["pairing"]["message"] or "").lower())
     assert not status("spare")["peers"]
 
-    call("host", "port-access", "set", "--connect", str(target_port))
-    assert str(target_port) in call("host", "port-access", "show")
     call("client", "forward", "add", "echo", "--peer", host_short, "--listen", "0", "--target", str(target_port))
     assert status("client")["forwards"]["echo"]["peer"] == "Studio-2"
     port = int(status("client")["forwards"]["echo"]["bound"].rsplit(":", 1)[1])
@@ -324,7 +320,7 @@ def check_pairing(root, keys, call, start, target_port, wait):
         conn.shutdown(socket.SHUT_WR)
         assert received.read() == b"deriap"
 
-    # Re-pairing the same identities preserves local aliases, ACLs and rules.
+    # Re-pairing the same identities preserves local aliases and rules.
     join_and_wait(call("host", "pair", "code"))
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: not s["pairing"]["outgoing"])
@@ -348,7 +344,6 @@ def check_pairing(root, keys, call, start, target_port, wait):
             assert f'platform = "{platform}"' in path.read_text()
     assert status("client")["peers"] == {"Studio": spare, "Studio-2": keys["host"]}
     assert status("client")["forwards"]["echo"]["peer"] == "Studio-2"
-    assert status("host")["gateway_port_access"]["connect"] == [f"127.0.0.1:{target_port}"]
     assert call("host", "pair", "code") == code
     # Even direct-only devices can use the previously copied code after the issuer restarts.
     call("spare", "pair", "join", code)
@@ -457,17 +452,15 @@ def check_lifecycle(client):
     print("Background gateway lifecycle passed.")
 
 
-def check_gateway_port_access(root, call, start, rule_state, target_port):
+def check_shared_forwards(root, call, start, rule_state, target_port):
     peers = ("first", "second", "unpaired")
     ids = {name: call(name, "identity", str(root / (name + ".key"))) for name in peers}
     address = f"127.0.0.1:{target_port}"
     host_file = root / "host.toml"
     host_file.write_text(
-        f'version=1\n[peers.first]\nendpoint_id="{ids["first"]}"\nports.connect=["{address}"]\n'
+        f'version=1\n[peers.first]\nendpoint_id="{ids["first"]}"\n'
         f'[peers.second]\nendpoint_id="{ids["second"]}"\n')
-    host_process, host = start("host")
-    empty = {"connect": [], "listen": []}
-    assert host["gateway_port_access"] == empty
+    _, host = start("host")
 
     def greeting(bound):
         ip, port = bound.rsplit(":", 1)
@@ -485,10 +478,6 @@ def check_gateway_port_access(root, call, start, rule_state, target_port):
         start(name)
         call(name, "forward", "add", "pull", "--peer", "host", "--listen", "0", "--target", address)
         listeners[name] = rule_state(name, "pull", lambda rule: rule["bound"])["bound"]
-    assert greeting(listeners["first"]) == b"", "Legacy per-device grant became active"
-
-    call("host", "port-access", "set", "--connect", str(target_port), "--listen", "0")
-    assert address in call("host", "port-access", "show")
     reverse = {}
     for name in peers[:2]:
         assert greeting(listeners[name]) == b"ready\n", name
@@ -500,37 +489,50 @@ def check_gateway_port_access(root, call, start, rule_state, target_port):
     rule_state("unpaired", "push", lambda rule: not rule["bound"] and
                any(reason in (rule["error"] or "") for reason in ("DENIED", "peer not paired")))
 
-    call("host", "port-access", "set")
-    for name in peers[:2]:
-        rule_state(name, "push", lambda rule: "DENIED" in (rule["error"] or ""))
-        ip, port = reverse[name].rsplit(":", 1)
-        with socket.socket() as probe:
-            probe.settimeout(2)
-            assert probe.connect_ex((ip, int(port))) != 0, "Revoked listener still accepts connections"
-        assert greeting(listeners[name]) == b"", name
-    assert json.loads(call("host", "status", "--json"))["gateway_port_access"] == empty
-    call("host", "port-access", "set", "--connect", str(target_port), "--listen", "0")
-    host_process.terminate()
-    host_process.wait(timeout=12)
-    _, restarted = start("host")
-    assert restarted["gateway_port_access"] == {"connect": [address], "listen": ["127.0.0.1:0"]}
-    print("PASS: legacy grants stay closed, two paired peers share TCP and reverse grants, "
-          "unpaired TCP and reverse requests denied, grants persist on restart and revocation reaches both peers")
+    def directory(node):
+        return json.loads(call(node, "forward", "list", "--json"))["peers"]["rules"]
+
+    call("host", "forward", "add", "private", "--peer", "second", "--listen", "0", "--target", address)
+    shared = directory("host")
+    for peer in peers[:2]:
+        assert shared[peer]["pull"]["direction"] == "remote"
+        assert shared[peer]["push"]["direction"] == "local"
+        assert shared[peer]["push"]["bound"] == reverse[peer]
+    assert set(directory("first")["host"]) == set(), "Third-party rule was disclosed"
+    try:
+        call("first", "forward", "remove", "private", "--owner", "host")
+        raise AssertionError("Unrelated peer modified a rule")
+    except subprocess.CalledProcessError as error:
+        assert "Unknown forwarding rule for this pairing" in error.stderr, error.stderr
+    assert "private" in directory("second")["host"]
+    call("host", "forward", "pause", "pull", "--owner", "first")
+    assert not rule_state("first", "pull", lambda r: not r["bound"])["enabled"]
+    assert directory("host")["first"]["pull"]["enabled"] is False
+    assert greeting(listeners["second"]) == b"ready\n"
+    call("host", "forward", "resume", "pull", "--owner", "first")
+    assert greeting(rule_state("first", "pull", lambda r: r["bound"])["bound"]) == b"ready\n"
+    # Change the direction from the other endpoint, keeping its view of the two addresses.
+    call("host", "forward", "edit", "pull", "--owner", "first", "--listen", "0", "--target", address)
+    edited = rule_state("first", "pull", lambda r: r["direction"] == "remote" and r["bound"])
+    assert directory("host")["first"]["pull"]["direction"] == "local"
+    assert greeting(edited["bound"]) == b"ready\n"
+    call("host", "forward", "remove", "pull", "--owner", "first")
+    assert "pull" not in directory("host")["first"]
+    assert "pull" in json.loads(call("second", "status", "--json"))["forwards"]
+    print("PASS: forward and reverse TCP, same-name rules on different owners, bilateral list/edit/pause/resume/remove, third-party and unpaired isolation")
 
 
 def check_unpair(root, keys, call, start, wait, echo_port):
     address = f"127.0.0.1:{echo_port}"
     spare = call("spare", "identity", str(root / "spare.key"))
     (root / "host.toml").write_text(
-        f'version=1\ndevice_name="Host"\n[peers.client]\nendpoint_id="{keys["client"]}"\n'
-        f'[port_access]\nlisten=["127.0.0.1:0"]\n[services.echo]\ntarget="{address}"\nallow_peers=["client"]\n')
+        f'version=1\ndevice_name="Host"\n[peers.client]\nendpoint_id="{keys["client"]}"\n')
     host_process, host = start("host")
     peer = f'endpoint_id="{keys["host"]}"\nticket="{host["ticket"]}"\n'
     (root / "client.toml").write_text(
         f'version=1\ndevice_name="Client"\n[peers.host]\n{peer}[peers.other-name]\n{peer}'
-        f'[peers.spare]\nendpoint_id="{spare}"\n[port_access]\nconnect=["{address}"]\n'
-        f'[services.shared]\ntarget="{address}"\nallow_peers=["host","spare","other-name"]\n'
-        '[forwards.pull]\npeer="host"\nlisten="127.0.0.1:0"\nservice="echo"\n'
+        f'[peers.spare]\nendpoint_id="{spare}"\n'
+        f'[forwards.pull]\npeer="host"\nlisten="127.0.0.1:0"\ntarget="{address}"\n'
         f'[forwards.push]\npeer="other-name"\ndirection="remote"\nlisten="127.0.0.1:0"\ntarget="{address}"\n')
     client, _ = start("client")
     rules = wait("client", lambda s: all(r["bound"] for r in s["forwards"].values()))["forwards"]
@@ -548,8 +550,6 @@ def check_unpair(root, keys, call, start, wait, echo_port):
                 pass
     def cleaned(state):
         assert state["peers"] == {"spare": spare} and state["forwards"] == {}
-        assert state["service_allow_peers"] == {"shared": ["spare"]}
-        assert state["gateway_port_access"]["connect"] == [address]
     cleaned(json.loads(call("client", "status", "--json")))
     for addr in addresses:
         with socket.socket() as probe:
@@ -560,7 +560,7 @@ def check_unpair(root, keys, call, start, wait, echo_port):
     client, restarted = start("client")
     cleaned(restarted)
     remote = json.loads(call("host", "status", "--json"))
-    assert not remote["peers"] and remote["service_allow_peers"] == {"echo": []}
+    assert not remote["peers"]
     code = remote["pairing"]["code"]
 
     def pair_again():
@@ -605,7 +605,7 @@ def check_unpair(root, keys, call, start, wait, echo_port):
     # This peer is offline and has no ticket.
     call("client", "pair", "remove", spare[:8])
     status = json.loads(call("client", "status", "--json"))
-    assert not status["peers"] and status["service_allow_peers"] == {"shared": []}
+    assert not status["peers"]
     print("PASS: unpair closes live TCP in both directions, releases listeners, removes all identity aliases, "
           "syncs both gateways, retries offline across restart, preserves a newer pairing and accepts a short ID")
 
@@ -619,7 +619,7 @@ def main():
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
     parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
     parser.add_argument("--file-copy", action="store_true", help="copy files and directories between two isolated gateways")
-    parser.add_argument("--port-access", action="store_true", help="exercise global TCP permissions across distinct paired identities")
+    parser.add_argument("--forwarding", action="store_true", help="exercise shared forwarding and management from both endpoints")
     parser.add_argument("--lifecycle", action="store_true", help="exercise background launch, restart and stop")
     args = parser.parse_args()
     if args.native_terminal and (not sys.platform.startswith("linux") or os.geteuid() == 0):
@@ -699,8 +699,8 @@ def main():
 
         if args.unpair:
             return check_unpair(root, keys, call, start, wait, streaming.server_address[1])
-        if args.port_access:
-            return check_gateway_port_access(root, call, start, rule_state, target.server_address[1])
+        if args.forwarding:
+            return check_shared_forwards(root, call, start, rule_state, target.server_address[1])
         if args.native_terminal:
             check_native_terminal(root, keys, call, start, cli, ipc, wait)
             return
@@ -711,18 +711,6 @@ def main():
         (root / "host.toml").write_text(f'''version=1
 [peers.client]
 endpoint_id="{keys['client']}"
-[services.echo]
-target="127.0.0.1:{target.server_address[1]}"
-allow_peers=["client"]
-[services.private]
-target="127.0.0.1:{target.server_address[1]}"
-allow_peers=[]
-[services.finish-first]
-target="127.0.0.1:{finish_first.server_address[1]}"
-allow_peers=["client"]
-[services.streaming]
-target="127.0.0.1:{streaming.server_address[1]}"
-allow_peers=["client"]
 ''')
         _, host = start("host")
         assert host["device_id"] == keys["host"]
@@ -742,26 +730,29 @@ ticket="{ticket}"
             return check_file_copy(root, cli, ipc, keys["host"][:8])
         command = [cli, "--ipc", ipc("client"), "connect", "host"]
         payload = bytes(range(256)) * 1024
-        echo = subprocess.run([cli, "--ipc", ipc("client"), "connect", keys["host"][:8], "echo"],
+        echo = subprocess.run([cli, "--ipc", ipc("client"), "connect", keys["host"][:8], str(target.server_address[1])],
                               input=payload, capture_output=True, timeout=15)
         assert echo.returncode == 0 and echo.stdout == b"ready\n" + payload[::-1], echo.stderr
-        duplex = subprocess.run([*command, "streaming"], input=payload, capture_output=True, timeout=15)
+        duplex = subprocess.run([*command, str(streaming.server_address[1])], input=payload, capture_output=True, timeout=15)
         assert duplex.returncode == 0 and duplex.stdout == payload, duplex.stderr
-        asyncio.run(check_remote_eof([*command, "finish-first"]))
+        asyncio.run(check_remote_eof([*command, str(finish_first.server_address[1])]))
         assert finish_first.received.wait(5)
-        denial = subprocess.run([*command, "private"], input=b"", capture_output=True, timeout=10)
-        assert denial.returncode != 0 and not denial.stdout and b"DENIED" in denial.stderr
+        with socket.socket() as unused:
+            unused.bind(("127.0.0.1", 0))
+            refused_port = str(unused.getsockname()[1])
+        denial = subprocess.run([*command, refused_port], input=b"", capture_output=True, timeout=10)
+        assert denial.returncode != 0 and not denial.stdout and b"TARGET_REFUSED" in denial.stderr
         direct.terminate()
         direct.wait(timeout=12)
-        print("PASS: stdio service access with no forwards, binary data, EOF in both orders and access denial")
+        print("PASS: stdio TCP access with no forwards, binary data, EOF in both orders and target refusal")
         (root / "client.toml").write_text(client_config + f'''[forwards.test]
 listen="127.0.0.1:{listen_port}"
 peer="host"
-service="echo"
-[forwards.denied]
+target="{target.server_address[1]}"
+[forwards.refused]
 listen="127.0.0.1:0"
 peer="host"
-service="private"
+target="{refused_port}"
 ''')
         process, status = start("client")
 
@@ -781,11 +772,11 @@ service="private"
             conn.sendall(payload)
             conn.shutdown(socket.SHUT_WR)
             assert replies.read() == payload[::-1]  # half-close, data survives pause
-        with connect(status, "denied") as conn:
-            assert conn.recv(64) == b""  # denied without contacting the target
+        with connect(status, "refused") as conn:
+            assert conn.recv(64) == b""
         deadline = time.monotonic() + 3
-        while "DENIED" not in (root / "client.log").read_text(encoding="utf-8"):
-            assert time.monotonic() < deadline, "missing access denial for local forward"
+        while "TARGET_REFUSED" not in (root / "client.log").read_text(encoding="utf-8"):
+            assert time.monotonic() < deadline, "missing target refusal for local forward"
             time.sleep(.02)
         with socket.socket() as blocker:
             blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -809,19 +800,15 @@ service="private"
         with connect(restarted, "test") as conn, conn.makefile("rb") as replies:
             assert replies.readline() == b"ready\n"
         print("PASS: paired TCP forwarding, server greeting, 256 KiB after half-close, "
-              "pause/resume, bind conflict, service denial and gateway crash recovery")
+              "pause/resume, bind conflict, target refusal and gateway crash recovery")
 
-        # A TCP port with no published service requires its own explicit grant.
+        # Both directions work with just the pairing.
         with TargetServer(("127.0.0.1", 0), Target) as extra:
             threading.Thread(target=extra.serve_forever, daemon=True).start()
             target_port = str(extra.server_address[1])
             call("client", "forward", "add", "pull", "--peer", "host", "--listen", "0", "--target", target_port)
             state = json.loads(call("client", "status", "--json"))
-            with connect(state, "pull") as conn:
-                assert conn.recv(1) == b""
             call("client", "forward", "add", "push", "--remote", "--peer", "host", "--listen", "0", "--target", target_port)
-            rule_state("client", "push", lambda f: "DENIED" in (f["error"] or ""))
-            call("host", "port-access", "set", "--listen", "0", "--connect", target_port)
             reverse = rule_state("client", "push", lambda f: f["bound"])
             assert reverse["direction"] == "remote" and reverse["bound"].startswith("127.0.0.1:")
             with connect(state, "pull") as conn, conn.makefile("rb") as replies:
@@ -859,12 +846,10 @@ service="private"
                 assert replies.read() == b"nepo llits"
             call("client", "forward", "resume", "push")
             rule_state("client", "push", lambda f: f["bound"])
-            call("host", "port-access", "set")
-            rule_state("client", "push", lambda f: "DENIED" in (f["error"] or ""))
             call("client", "forward", "remove", "push")
             call("client", "forward", "remove", "pull")
             extra.shutdown()
-        print("PASS: local and remote TCP listeners, live grants and revocation, retry, concurrent streams and half-close through pause")
+        print("PASS: local and remote TCP listeners, concurrent streams and half-close through pause")
 
 
 if __name__ == "__main__":

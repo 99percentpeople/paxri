@@ -4,7 +4,7 @@ PeerHatch gateways share an authenticated connection using the iroh QUIC ALPN `p
 
 ## Node configuration
 
-Each computer owns one version 1 TOML file. For a working pair of service and listener configurations, start with [home.toml](../examples/home.toml) and [laptop.toml](../examples/laptop.toml). Replace the example Ed25519 public keys with your devices’ keys or pair interactively. `peerhatch config check FILE` validates a file locally.
+Each computer owns one version 1 TOML file. For a working pair of device configurations, start with [home.toml](../examples/home.toml) and [laptop.toml](../examples/laptop.toml). Replace the example Ed25519 public keys with your devices’ keys or pair interactively. `peerhatch config check FILE` validates a file locally.
 
 | Key | Meaning |
 | --- | --- |
@@ -24,29 +24,19 @@ Each computer owns one version 1 TOML file. For a working pair of service and li
 | `peers.<alias>.endpoint_id`, `ticket` | 64 hex digits identifying the device and its optional addressing ticket |
 | `peers.<alias>.platform` | Reported OS, including `windows`, `linux`, `macos`, or `web`. Unrecognized values display as unknown |
 | `peers.<alias>.last_status_change_ms` | Last recorded pairing or connection transition, used by the device list |
-| `port_access.connect`, `port_access.listen` | TCP destinations all paired peers can reach here and addresses they can listen on here. Both lists start empty |
-| `services.<name>.target`, `allow_peers` | Local TCP destination and the aliases allowed to open it |
 | `forwards.<name>.listen`, `direction` | Listen address and `local` (default) or `remote` |
 | `forwards.<name>.peer` | Paired device that owns the other end |
-| `forwards.<name>.service` or `target` | Named service for a local listener or explicit TCP destination. Choose one |
+| `forwards.<name>.target` | Destination TCP host and port, or a loopback port |
 
-Set these lists on the computer that receives the connection or listen request. For example:
+A listener can bind to loopback, a particular interface, `0.0.0.0` or `[::]`. Port zero asks the OS for an available port. A bare port in the GUI or CLI uses IPv4 loopback.
 
-```toml
-[port_access]
-connect = ["127.0.0.1:3000"]
-listen = ["127.0.0.1:8080"]
-```
-
-Use `peerhatch port-access show` to inspect both lists. `peerhatch port-access set` replaces both lists, and omitting both options clears them. Development profiles with old `peers.<alias>.ports` entries still open. Those entries grant no access in the new gateway. Add an address to the global lists only if all paired devices should be allowed to use it. Named services retain their own `allow_peers` lists.
-
-A listen address can be a loopback address, a particular interface, `0.0.0.0` or `[::]`. Port zero asks the OS for an available port. A bare port in the CLI uses IPv4 loopback. The running gateway reports the actual bound address.
+Both endpoints can manage a forwarding rule. The creating gateway stores it in `[forwards.<name>]`. Use `peerhatch forward list` to see the storage owner, direction from this device, actual bound port, target and state. For an older named forwarding rule, replace its `service` key with the target TCP address before starting the gateway. The retired `[services]` and `[port_access]` tables are ignored.
 
 ## Pairing and addressing
 
 Pairing uses the separate ALPN `p2p-tunnel/pair/1`. The code `p2p1.<endpoint ticket>.<token>` contains the issuer’s addressing ticket and a random 128-bit invitation. Each request has a fresh random request ID. Each side sends a UTF-8 JSON message of up to 16 KiB followed by FIN. The receiver verifies the ticket’s key against the authenticated peer before asking the local user to approve.
 
-The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases and permissions. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. New peers can use PTY and files and begin with empty TCP allowlists.
+The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. New peers can use PTY and files and forward TCP in either direction.
 
 On an established connection, each peer can open a unidirectional stream to announce updated addressing tickets. Version byte `1` precedes the sequence of UTF-8 tickets, each with a big-endian `u16` length of at most 8192 bytes. The receiver verifies the device ID before updating its cache.
 
@@ -60,22 +50,21 @@ The peer with the lexicographically smaller public key serializes connection sel
 
 | Byte | Operation |
 | --- | --- |
-| 1 | Named service, explicit TCP target, or device information |
+| 1 | Explicit TCP target or device information |
 | 2 | Interactive PTY |
 | 3 | Execute a program or shell command in a PTY |
 | 4 | Request a TCP listener on the peer |
 | 5 | TCP connection accepted by that listener |
 | 6 | File transfer |
+| 7 | List or manage this pairing’s forwarding rules |
 
-## TCP opening, permissions, and EOF
+## TCP forwarding
 
-On a type 1 stream the initiator immediately sends a big-endian `u32` byte length and 1–4096 bytes of UTF-8 JSON. For example, `{"type":"OPEN","service":"dev-web"}` opens a named service. `{"type":"OPEN_TCP","target":"127.0.0.1:3000"}` opens a target authorized in `port_access.connect` or explicitly published to this peer. Device-information requests are also authenticated.
+On a type 1 stream the initiator sends a big-endian `u32` byte length and 1–4096 bytes of UTF-8 JSON. For example, `{"type":"OPEN_TCP","target":"127.0.0.1:3000"}` connects to port 3000 on the receiving gateway’s loopback interface. The receiver checks pairing, validates the target and connects using its operating-system account. It responds with `{"type":"OK"}` or an error code such as `DENIED`, `TARGET_REFUSED`, `TARGET_TIMEOUT`, `TARGET_UNREACHABLE`, or `INVALID_REQUEST`. After `OK`, the stream carries raw TCP bytes. EOF finishes only that sending direction.
 
-A paired gateway can send `{"type":"LIST_SERVICES"}` on the same stream kind. The publisher returns `{"type":"SERVICES","names":["dev-web"]}` with names sorted by key, filtered using the same authenticated device ID and service allowlist as `OPEN`. An empty list is a successful reply. An unpaired caller receives `DENIED`. The catalog reply uses the same length prefix and allows up to 512 KiB of JSON. An oversized catalog returns `CATALOG_TOO_LARGE`. Older publishers return `INVALID_REQUEST`. Each later `OPEN` checks the current permissions again.
+Type 7 uses length-prefixed JSON (up to 1 MiB). A request contains an `op` of `list`, `edit`, `set_enabled`, or `remove`. The receiver derives the caller from the authenticated session and only returns or changes its own rules for that identity. An edit supplies the listen address, target and direction from the caller’s perspective. It cannot change the paired device. The reply contains the receiver’s rules for the caller or an error. Each gateway queries connected peers when the forwarding list is requested.
 
-The host looks up the authenticated device and opens the approved TCP destination. It responds with `{"type":"OK"}` or `{"type":"ERROR","code":"DENIED"}` using the same framing. Other errors are `TARGET_REFUSED`, `TARGET_TIMEOUT`, `TARGET_UNREACHABLE`, and `INVALID_REQUEST`. Unknown and unauthorized services both return `DENIED`. After `OK`, exchange raw bytes. TCP EOF finishes only that sending direction. Preserve buffered bytes following the handshake and allow the reverse direction to complete.
-
-A type 4 request carries length-prefixed JSON with a `listen` address and a random 16-byte `id`. After checking the authenticated peer and `port_access.listen`, the host replies with `bound` or `error` and keeps the control stream open. Each accepted TCP socket starts a type 5 stream with the raw 16-byte ID. The initiator checks the peer and active ID before connecting its local target. Closing the control stream releases the port. Removing authorization also releases the listener. Existing streams can finish. Persisted rules retry after a disconnect.
+A type 4 request carries length-prefixed JSON with a `listen` address and a random 16-byte `id`. After checking the authenticated pairing, the host replies with `bound` or `error` and keeps the control stream open. Each accepted TCP socket starts a type 5 stream with the raw 16-byte ID. The initiator checks the peer and active ID before connecting its local target. Closing the control stream releases the port. Unpairing also releases the listener. Existing streams can finish. Persisted rules retry after a disconnect.
 
 ## Native PTY
 

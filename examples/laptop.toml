@@ -22,4 +22,4 @@ endpoint_id = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
 [forwards.home-web]
 listen = "127.0.0.1:8080"
 peer = "home"
-service = "dev-web"
+target = "127.0.0.1:3000"

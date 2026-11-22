@@ -21,7 +21,7 @@ pub struct PeerConnection {
     pub rtt_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     Direct,
@@ -54,13 +54,23 @@ impl PeerConnection {
     }
 
     pub fn stream_labels(&self) -> impl Iterator<Item = String> + '_ {
-        self.streams.iter().map(|(kind, count)| {
-            if *count == 1 {
-                kind.label().to_owned()
-            } else {
-                format!("{} ×{count}", kind.label())
-            }
-        })
+        self.stream_labels_matching(|_| true)
+    }
+
+    pub fn stream_labels_matching(
+        &self,
+        include: impl Fn(StreamKind) -> bool,
+    ) -> impl Iterator<Item = String> {
+        self.streams
+            .iter()
+            .filter(move |(kind, _)| include(**kind))
+            .map(|(kind, count)| {
+                if *count == 1 {
+                    kind.label().to_owned()
+                } else {
+                    format!("{} ×{count}", kind.label())
+                }
+            })
     }
 
     pub fn description(&self) -> String {

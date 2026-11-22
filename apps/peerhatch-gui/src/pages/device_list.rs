@@ -47,6 +47,7 @@ impl Dashboard {
         let terms: Vec<_> = query.split_whitespace().collect();
         let active = self.peer_system.is_some();
         let controls = div()
+            .flex_none()
             .w_full()
             .flex()
             .items_center()
@@ -65,11 +66,16 @@ impl Dashboard {
                     cx.notify();
                 })),
             );
-        let card = div().flex().flex_col().gap_2().child(controls).when(
-            self.peer_filter_open || active || !query.is_empty(),
-            |d| {
+        let card = div()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(controls)
+            .when(self.peer_filter_open || active || !query.is_empty(), |d| {
                 d.child(
                     div()
+                        .flex_none()
                         .flex()
                         .gap_1()
                         .items_center()
@@ -96,8 +102,7 @@ impl Dashboard {
                             )
                         }),
                 )
-            },
-        );
+            });
         let now = peerhatch_control::unix_time_ms();
         let rows = status
             .peers_by_last_change()
@@ -128,16 +133,24 @@ impl Dashboard {
                         Ghost,
                         SharedString::from(format!("device-{name}")),
                         div()
+                            .w_full()
                             .min_w_0()
-                            .flex_1()
                             .flex()
-                            .flex_col()
+                            .items_center()
+                            .gap_2()
                             .py_1()
-                            .child(div().truncate().child(peer.clone()))
-                            .child(ui.muted(detail.clone()).text_xs().truncate()),
+                            .child(ui.icon_tile(Icon::device(platform), 30., 18.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().child(peer.clone()))
+                                    .child(ui.muted(detail.clone()).text_xs().truncate()),
+                            ),
                     )
                     .row()
-                    .icon(Icon::device(platform))
                     .tooltip(crate::components::tooltip(
                         format!("{name} · {} · {detail}", platform.label()).into(),
                     ))
@@ -151,6 +164,15 @@ impl Dashboard {
         if rows.peek().is_none() {
             return card.child(ui.muted("No devices match your filters."));
         }
-        card.child(div().flex().flex_col().children(rows))
+        card.child(
+            div()
+                .id("paired-list")
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(rows),
+        )
     }
 }

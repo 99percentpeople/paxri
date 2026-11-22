@@ -179,16 +179,11 @@ if [[ $8 == 1 ]]; then
     # Require traffic to traverse the relay even if new direct candidates appear.
     ip netns exec gw-a nft insert rule ip lab forward_traffic ip daddr 203.0.113.20 meta l4proto udp drop
     ip netns exec gw-b nft insert rule ip lab forward_traffic ip daddr 203.0.113.10 meta l4proto udp drop
-    cat >> b.toml <<'EOF'
-[services.fixture]
-target = "127.0.0.1:9001"
-allow_peers = ["other"]
-EOF
     cat >> a.toml <<'EOF'
 [forwards.fixture]
 listen = "127.0.0.1:9000"
 peer = "other"
-service = "fixture"
+target = "127.0.0.1:9001"
 EOF
     mkdir public
     head -c 262144 /dev/urandom > public/fixture.bin

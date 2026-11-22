@@ -16,6 +16,7 @@ pub enum StreamKind {
     Listen = 4,
     ForwardedTcp = 5,
     Files = 6,
+    ForwardRules = 7,
 }
 
 impl StreamKind {
@@ -27,6 +28,7 @@ impl StreamKind {
             4 => Self::Listen,
             5 => Self::ForwardedTcp,
             6 => Self::Files,
+            7 => Self::ForwardRules,
             n => bail!("Unknown peer stream type {n}"),
         })
     }
@@ -45,6 +47,7 @@ impl StreamKind {
             Self::Listen => "Remote listener",
             Self::ForwardedTcp => "Forwarded TCP",
             Self::Files => "File transfer",
+            Self::ForwardRules => "Forwarding rules",
         }
     }
 }

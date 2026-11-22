@@ -7,7 +7,3 @@ version = 1
 [peers.laptop]
 # Replace this example public key with the peer device ID.
 endpoint_id = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-
-[services.dev-web]
-target = "127.0.0.1:3000"
-allow_peers = ["laptop"]

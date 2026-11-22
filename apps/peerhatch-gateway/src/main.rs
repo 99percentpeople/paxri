@@ -7,9 +7,10 @@ use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
     task::{JoinHandle, JoinSet},
 };
-use peerhatch_config::{Config, Destination, Direction, Forward};
+use peerhatch_config::{Config, Direction, Forward};
 mod account;
 mod pairing;
+mod forward_management;
 mod platforms;
 mod settings;
 use settings::SettingsFile;
@@ -49,7 +50,7 @@ struct Options {
 struct LocalListener {
     address: SocketAddr,
     task: JoinHandle<()>,
-    route: tokio::sync::watch::Sender<(String, Destination)>,
+    route: tokio::sync::watch::Sender<(String, String)>,
 }
 
 impl Drop for LocalListener {
@@ -86,9 +87,9 @@ impl Listener {
         match self {
             Self::Local(l) => {
                 l.route
-                    .send_replace((rule.peer.clone(), rule.destination.clone()));
+                    .send_replace((rule.peer.clone(), rule.target.clone()));
             }
-            Self::Remote(r) => r.set_target(rule.destination.address().into()),
+            Self::Remote(r) => r.set_target(rule.target.clone()),
         }
     }
 }
@@ -169,7 +170,7 @@ impl Gateway {
             self.transport.clone(),
             rule.peer.clone(),
             rule.listen,
-            rule.destination.address().into(),
+            rule.target.clone(),
             self.reverse_routes.clone(),
         ))
     }
@@ -186,7 +187,7 @@ impl Gateway {
         let transport = self.transport.clone();
         let slots = self.streams.clone();
         let (route, destination) =
-            tokio::sync::watch::channel((rule.peer.clone(), rule.destination.clone()));
+            tokio::sync::watch::channel((rule.peer.clone(), rule.target.clone()));
         let task = tokio::spawn(async move {
             loop {
                 let tcp = match socket.accept().await {
@@ -206,7 +207,7 @@ impl Gateway {
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(e) = peerhatch_core::forward(&*transport, &peer, &target, tcp).await {
-                        eprintln!("forward to {peer}/{}: {e:#}", target.address());
+                        eprintln!("forward to {peer}/{target}: {e:#}");
                     }
                 });
             }
@@ -220,27 +221,6 @@ impl Gateway {
 
     async fn change_settings(&mut self, mut change: Command) -> Result<()> {
         // Store the configured alias while holding the same lock as the settings write.
-        if let Command::SetGatewayPortAccess {
-            expected: Some(previous),
-            ..
-        } = &change
-        {
-            anyhow::ensure!(
-                *previous == self.config.port_access,
-                "Port access changed. Review the current lists and retry."
-            );
-        }
-        match &change {
-            Command::SaveService { name, expected, .. } => anyhow::ensure!(
-                self.config.services.get(name) == expected.as_ref(),
-                "Service {name} already exists or has changed. Reopen the form and retry."
-            ),
-            Command::RemoveService { name, expected } => anyhow::ensure!(
-                self.config.services.get(name) == Some(expected),
-                "Service {name} changed or was removed. Review the current list and retry."
-            ),
-            _ => {}
-        }
         if let Command::SaveForward {
             rule: Forward { peer, .. },
             ..
@@ -259,6 +239,15 @@ impl Gateway {
         } = &change
         {
             self.check_forward_peer(name, expected_peer.as_deref())?;
+        }
+        if let Command::SaveForward { name, edit: false, rule, .. } = &mut change
+            && name.is_empty()
+        {
+            let base = format!("tcp-{}", rule.listen.port());
+            *name = std::iter::once(base.clone())
+                .chain((2..).map(|n| format!("{base}-{n}")))
+                .find(|id| !self.config.forwards.contains_key(id))
+                .expect("available forward ID");
         }
         let (text, config) = self.file.prepare(&change)?;
         // Reserve any new port before saving. The active rule survives a bind or disk error.
@@ -338,7 +327,6 @@ impl Gateway {
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),
             device_name: config.device_name.clone(),
-            gateway_port_access: Some(config.port_access.clone()),
             ticket,
             peer_connections: Some(self.transport.connections()),
             peer_last_status_change_ms: self.peer_change_times(),
@@ -352,46 +340,36 @@ impl Gateway {
                 .iter()
                 .map(|(name, p)| (name.clone(), p.endpoint_id.clone()))
                 .collect(),
-            service_allow_peers: Some(
-                config.services
-                    .iter()
-                    .map(|(name, service)| (name.clone(), service.allow_peers.clone()))
-                    .collect(),
-            ),
-            services: config
-                .services
-                .iter()
-                .map(|(name, s)| (name.clone(), s.target.clone()))
-                .collect(),
-            forwards: config
-                .forwards
-                .iter()
-                .map(|(name, rule)| {
-                    let state = self
-                        .listeners
-                        .get(name)
-                        .map(Listener::state)
-                        .unwrap_or_default();
-                    let status = ForwardStatus {
-                        listen: rule.listen.to_string(),
-                        bound: state.address.map(|a| a.to_string()),
-                        peer: rule.peer.clone(),
-                        direction: rule.direction,
-                        service: match &rule.destination {
-                            Destination::Service(s) => s.clone(),
-                            _ => String::new(),
-                        },
-                        target: match &rule.destination {
-                            Destination::Target(t) => Some(t.clone()),
-                            _ => None,
-                        },
-                        enabled: Some(self.listeners.contains_key(name)),
-                        error: state.error,
-                    };
-                    (name.clone(), status)
-                })
-                .collect(),
+            peer_forwards: None,
+            forwards: self.forward_status(None),
         }
+    }
+
+    fn forward_status(&self, peer_id: Option<&str>) -> BTreeMap<String, ForwardStatus> {
+        self.config
+            .forwards
+            .iter()
+            .filter(|(_, rule)| {
+                peer_id.is_none_or(|id| self.config.peers[&rule.peer].endpoint_id.eq_ignore_ascii_case(id))
+            })
+            .map(|(name, rule)| {
+                let state = self
+                    .listeners
+                    .get(name)
+                    .map(Listener::state)
+                    .unwrap_or_default();
+                let status = ForwardStatus {
+                    listen: rule.listen.to_string(),
+                    bound: state.address.map(|a| a.to_string()),
+                    peer: rule.peer.clone(),
+                    direction: rule.direction,
+                    target: rule.target.clone(),
+                    enabled: Some(self.listeners.contains_key(name)),
+                    error: state.error,
+                };
+                (name.clone(), status)
+            })
+            .collect()
     }
 }
 
@@ -408,7 +386,7 @@ async fn handle_client(
     // Resolve only outgoing local requests. Transport authentication and incoming
     // stream authorization continue to use the complete public key.
     if let Command::CheckPeer { peer }
-    | Command::ListPeerServices { peer }
+    | Command::ManagePeerForward { owner: peer, .. }
     | Command::Connect { peer, .. }
     | Command::OpenTerminal { peer, .. }
     | Command::Exec { peer, .. }
@@ -420,6 +398,14 @@ async fn handle_client(
         }
     }
     match command {
+        Command::ListForwards => {
+            let status = forward_management::list(&gateway).await;
+            peerhatch_control::respond(&mut socket, Ok(status)).await
+        }
+        Command::ManagePeerForward { owner, action } => {
+            let result = forward_management::change(&gateway, &owner, action).await;
+            peerhatch_control::respond(&mut socket, result).await
+        }
         Command::Shutdown => {
             if let Some(sender) = shutdown {
                 sender
@@ -461,18 +447,6 @@ async fn handle_client(
                     }
                 } => result,
             }
-        }
-        Command::ListPeerServices { peer } => {
-            use tokio::io::AsyncReadExt;
-            let transport = gateway.lock().await.transport.clone();
-            let result = tokio::select! {
-                _ = socket.read_u8() => return Ok(()),
-                result = tokio::time::timeout(
-                    std::time::Duration::from_secs(25),
-                    peerhatch_core::list_services(&*transport, &peer),
-                ) => result.with_context(|| format!("Loading services from {peer} timed out")).and_then(|r| r),
-            };
-            peerhatch_control::respond(&mut socket, result).await
         }
         Command::CheckPeer { peer } => {
             let transport = gateway.lock().await.transport.clone();
@@ -545,10 +519,7 @@ async fn handle_client(
         }
         Command::SaveForward { .. }
         | Command::RemoveForward { .. }
-        | Command::SaveService { .. }
-        | Command::RemoveService { .. }
-        | Command::SetDeviceName { .. }
-        | Command::SetGatewayPortAccess { .. } => {
+        | Command::SetDeviceName { .. } => {
             let result = {
                 let mut gateway = gateway.lock().await;
                 gateway
@@ -577,8 +548,8 @@ async fn handle_client(
                 .await;
             };
             drop(management_slot);
-            if let Command::Connect { peer, service } = open {
-                let stream = match peerhatch_core::open_service(&*transport, &peer, &service).await {
+            if let Command::Connect { peer, target } = open {
+                let stream = match peerhatch_core::open_tcp(&*transport, &peer, &target).await {
                     Ok(stream) => stream,
                     Err(e) => return peerhatch_control::respond::<()>(&mut socket, Err(e)).await,
                 };
@@ -586,7 +557,7 @@ async fn handle_client(
                 let (reader, writer) = tokio::io::split(stream);
                 return peerhatch_control::bridge(socket, reader, writer)
                     .await
-                    .with_context(|| format!("stream to {peer}/{service}"));
+                    .with_context(|| format!("stream to {peer}/{target}"));
             }
             let opened = async {
                 match open {
@@ -678,11 +649,7 @@ async fn run(
     .await?;
     let routes = Routes::default();
     let mut clients = JoinSet::new();
-    clients.spawn(streams::serve(
-        stream_rx,
-        transport.subscribe_config(),
-        routes.clone(),
-    ));
+    let stream_config = transport.subscribe_config();
     let mut peer_changes = transport.subscribe_peer_changes();
     peer_changes.mark_changed();
     let mut gateway = Gateway {
@@ -698,7 +665,7 @@ async fn run(
         transport: Arc::new(transport),
         peer_changes: peer_changes.clone(),
         listeners: BTreeMap::new(),
-        reverse_routes: routes,
+        reverse_routes: routes.clone(),
         streams: Arc::new(Semaphore::new(256)),
     };
     if let Err(e) = gateway.init_pairing().await {
@@ -721,6 +688,7 @@ async fn run(
     );
     clients.spawn(gateway.transport.clone().announce_presence());
     let gateway = Arc::new(Mutex::new(gateway));
+    clients.spawn(streams::serve(stream_rx, stream_config, routes, gateway.clone()));
     let management = Arc::new(Semaphore::new(32));
     clients.spawn(platforms::fill_missing(gateway.clone()));
     clients.spawn(unpair::retry_pending(gateway.clone()));

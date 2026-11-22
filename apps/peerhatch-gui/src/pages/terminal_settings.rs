@@ -8,6 +8,16 @@ use crate::{
 use gpui::{prelude::*, *};
 use peerhatch_control::{Command, GuiChange};
 
+fn preview_label(preview: Div, label: &'static str) -> Div {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(theme::SPACE_2)
+        .child(preview)
+        .child(div().truncate().child(label))
+}
+
 impl Dashboard {
     pub(super) fn terminal_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
         let style = theme::current(cx).terminal;
@@ -37,13 +47,7 @@ impl Dashboard {
                         )
                     }),
                 );
-                div()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(theme::SPACE_2)
-                    .child(swatch)
-                    .child(div().truncate().child(scheme.label()))
+                preview_label(swatch, scheme.label())
             });
         }
         group.grouped_setting("Text", catalog::SCHEME, setting_field(schemes));
@@ -117,24 +121,39 @@ impl Dashboard {
                 }),
             ),
         );
-        group.grouped_setting(
-            "Cursor",
-            catalog::CURSOR_SHAPE,
-            ui.setting_choice(
-                "terminal-cursor-shape",
-                style.cursor_shape,
-                CursorShape::ALL,
-                CursorShape::label,
-                cx.listener(|v, value, _, cx| {
-                    v.send(
-                        Command::SetGui {
-                            change: GuiChange::CursorShape(*value),
-                        },
-                        cx,
-                    )
-                }),
-            ),
+        let mut shapes = Select::new(
+            "terminal-cursor-shape",
+            style.cursor_shape,
+            cx.listener(|v, shape: &CursorShape, _, cx| {
+                v.send(
+                    Command::SetGui {
+                        change: GuiChange::CursorShape(*shape),
+                    },
+                    cx,
+                );
+            }),
         );
+        for shape in CursorShape::ALL {
+            shapes = shapes.option_with_content(shape, move || {
+                let mark = div()
+                    .absolute()
+                    .left_0()
+                    .bg(rgb(ui.colors.canvas.foreground));
+                let mark = match shape {
+                    CursorShape::Underline => mark.bottom_0().w_full().h(px(2.)),
+                    CursorShape::Bar => mark.top_0().w(px(2.)).h_full(),
+                    CursorShape::Block => mark.top_0().size_full(),
+                };
+                let cell = div()
+                    .relative()
+                    .w(px(10.))
+                    .h(px(14.))
+                    .flex_none()
+                    .child(mark);
+                preview_label(cell, shape.label())
+            });
+        }
+        group.grouped_setting("Cursor", catalog::CURSOR_SHAPE, setting_field(shapes));
         group.grouped_setting(
             "Cursor",
             catalog::CURSOR_BLINK,

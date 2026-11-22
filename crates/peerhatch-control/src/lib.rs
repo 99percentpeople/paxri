@@ -14,9 +14,11 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use peerhatch_config::{
-    Destination, DevicePlatform, Direction, Forward, PortAccess, Service, listen_address, tcp_target,
+    DevicePlatform, Direction, Forward, listen_address, tcp_target,
 };
 
+pub mod forwarding;
+pub use forwarding::{PeerForward, ForwardDirectory};
 pub use peerhatch_config::gui::{GuiChange, GuiSettings};
 pub use peerhatch_files as files;
 pub use peerhatch_terminal as terminal;
@@ -30,9 +32,8 @@ const DEADLINE: Duration = Duration::from_secs(5);
 pub enum Command {
     Status,
     WatchPeerConnections,
-    ListPeerServices {
-        peer: String,
-    },
+    ListForwards,
+    ManagePeerForward { owner: String, action: PeerForward },
     CheckPeer {
         peer: String,
     },
@@ -71,16 +72,6 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_peer: Option<String>,
     },
-    SaveService {
-        name: String,
-        expected: Option<Service>,
-        rename_to: Option<String>,
-        service: Service,
-    },
-    RemoveService {
-        name: String,
-        expected: Service,
-    },
     SetDeviceName {
         name: Option<String>,
     },
@@ -102,13 +93,9 @@ pub enum Command {
         size: terminal::Size,
         invocation: terminal::exec::Invocation,
     },
-    SetGatewayPortAccess {
-        expected: Option<PortAccess>,
-        ports: PortAccess,
-    },
     Connect {
         peer: String,
-        service: String,
+        target: String,
     },
 }
 
@@ -124,9 +111,8 @@ pub struct ForwardStatus {
     pub listen: String,
     pub bound: Option<String>,
     pub peer: String,
-    pub service: String,
     #[serde(default)]
-    pub target: Option<String>,
+    pub target: String,
     #[serde(default)]
     pub direction: Direction,
     #[serde(default)]
@@ -154,7 +140,7 @@ impl ForwardStatus {
 
     pub fn route(&self) -> String {
         let listen = self.bound.as_ref().unwrap_or(&self.listen);
-        let dest = self.target.as_ref().unwrap_or(&self.service);
+        let dest = &self.target;
         match self.direction {
             Direction::Local => format!("This device / {listen} → {} / {dest}", self.peer),
             Direction::Remote => format!("{} / {listen} → This device / {dest}", self.peer),
@@ -219,16 +205,15 @@ pub struct Status {
     /// Last pairing or Connected/Idle transition by peer alias, in Unix milliseconds.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_last_status_change_ms: BTreeMap<String, i64>,
-    #[serde(default)]
-    pub gateway_port_access: Option<PortAccess>,
-    pub services: BTreeMap<String, String>,
-    /// Missing on gateways that only report service targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_allow_peers: Option<BTreeMap<String, Vec<String>>>,
     pub forwards: BTreeMap<String, ForwardStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_forwards: Option<ForwardDirectory>,
 }
 
-pub use peerhatch_core::connection::{PeerConnection, unix_time_ms};
+pub use peerhatch_core::{
+    StreamKind,
+    connection::{PathKind, PeerConnection, unix_time_ms},
+};
 
 impl Status {
     pub fn resolve_peer(&self, selector: &str) -> Result<(&str, &str)> {
@@ -413,7 +398,7 @@ impl ControlListener {
     }
 }
 
-async fn read<T: DeserializeOwned>(socket: &mut Stream) -> Result<T> {
+async fn read<T: DeserializeOwned>(socket: &mut (impl AsyncRead + Unpin)) -> Result<T> {
     let size = socket.read_u32().await? as usize;
     ensure!(
         (1..=MAX_FRAME).contains(&size),
@@ -424,7 +409,7 @@ async fn read<T: DeserializeOwned>(socket: &mut Stream) -> Result<T> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-async fn write<T: Serialize>(socket: &mut Stream, value: &T) -> Result<()> {
+async fn write<T: Serialize>(socket: &mut (impl AsyncWrite + Unpin), value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(bytes.len() <= MAX_FRAME, "management response too large");
     socket.write_u32(bytes.len() as u32).await?;
@@ -485,13 +470,8 @@ pub async fn watch_peer_connections(path: &Path) -> Result<Stream> {
     Ok(stream)
 }
 
-pub async fn list_peer_services(path: &Path, peer: String) -> Result<Vec<String>> {
-    let (_, names) = begin(path, Command::ListPeerServices { peer }, Duration::from_secs(30)).await?;
-    Ok(names)
-}
-
 pub async fn request(path: &Path, command: Command) -> Result<Status> {
-    let deadline = if matches!(command, Command::CheckPeer { .. } | Command::Unpair { .. }) {
+    let deadline = if matches!(command, Command::CheckPeer { .. } | Command::Unpair { .. } | Command::ListForwards | Command::ManagePeerForward { .. }) {
         Duration::from_secs(30)
     } else {
         DEADLINE
@@ -549,11 +529,11 @@ pub fn is_offline(error: &anyhow::Error) -> bool {
     })
 }
 
-pub async fn connect(path: &Path, peer: String, service: String) -> Result<Stream> {
+pub async fn connect(path: &Path, peer: String, target: String) -> Result<Stream> {
     // Allow the network dial and remote OPEN handshake to finish.
     let (socket, ()) = begin(
         path,
-        Command::Connect { peer, service },
+        Command::Connect { peer, target },
         Duration::from_secs(50),
     )
     .await?;

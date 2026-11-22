@@ -46,22 +46,8 @@ impl Ui {
         }
     }
 
-    pub fn card(self) -> Div {
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(SPACE_3)
-            .p(SPACE_4)
-            .rounded(PANEL_RADIUS)
-            .border_1()
-            .border_color(rgb(self.colors.border))
-            .bg(rgb(self.colors.card))
-            .text_color(rgb(self.colors.canvas.foreground))
-    }
-
-    pub fn section(self, title: &'static str) -> Div {
-        self.card().child(heading(title))
+    pub fn section(self) -> Div {
+        div().w_full().min_w_0().flex_none().flex().flex_col().gap(SPACE_3)
     }
 
     pub fn separator(self) -> Div {

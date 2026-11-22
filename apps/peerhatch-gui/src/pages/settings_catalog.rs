@@ -5,11 +5,6 @@ pub(super) const DEVICE: SettingsSection =
     SettingsSection::new(SettingsTable::Root, "This device", Icon::Monitor);
 pub(super) const GATEWAY: SettingsSection =
     SettingsSection::new(SettingsTable::Named("gateway"), "Gateway", Icon::Server);
-pub(super) const PORT_ACCESS: SettingsSection = SettingsSection::new(
-    SettingsTable::Named("port_access"),
-    "Port access",
-    Icon::Server,
-);
 pub(super) const NETWORK: SettingsSection =
     SettingsSection::new(SettingsTable::Named("native"), "Network", Icon::Globe);
 pub(super) const APPEARANCE: SettingsSection =
@@ -19,11 +14,6 @@ pub(super) const TERMINAL: SettingsSection = SettingsSection::new(
     "Terminal",
     Icon::Terminal,
 );
-pub(super) const SERVICES: SettingsSection = SettingsSection::new(
-    SettingsTable::Named("services"),
-    "Published services",
-    Icon::TabsOnTop,
-);
 pub(super) const RUNTIME: SettingsSection =
     SettingsSection::new(SettingsTable::Runtime, "Runtime", Icon::Settings);
 
@@ -32,18 +22,10 @@ pub(super) const INTERFACE: SettingsSection =
 
 pub(super) fn page_for(section: SettingsSection) -> SettingsSection {
     let table = section.table.top_level();
-    [
-        DEVICE,
-        GATEWAY,
-        NETWORK,
-        PORT_ACCESS,
-        INTERFACE,
-        SERVICES,
-        RUNTIME,
-    ]
-    .into_iter()
-    .find(|page| page.table == table)
-    .unwrap_or(SettingsSection { table, ..section })
+    [DEVICE, GATEWAY, NETWORK, INTERFACE, RUNTIME]
+        .into_iter()
+        .find(|page| page.table == table)
+        .unwrap_or(SettingsSection { table, ..section })
 }
 
 pub(super) const DEVICE_NAME: SettingSpec = SettingSpec::new(

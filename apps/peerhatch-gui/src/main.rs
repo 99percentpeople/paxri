@@ -14,6 +14,7 @@ mod chrome;
 mod components;
 #[cfg(windows)]
 mod ime;
+mod latency;
 mod pages;
 mod presence;
 mod terminal;
@@ -60,12 +61,11 @@ enum RequestResult {
 struct Dashboard {
     presence_watch: Option<(PathBuf, Task<()>)>,
     refresh_presence: bool,
+    latency: latency::LatencyHistory,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
     devices_pane: Option<pages::DevicesPane>,
-    forward_filter: Option<String>,
-    connect_field: Entity<Input>,
-    listen_field: Entity<Input>,
+    forward_filters: pages::ForwardFilters,
     settings_editor: pages::SettingsEditor,
     name_field: TextSetting,
     relay_field: TextSetting,
@@ -213,6 +213,7 @@ impl Dashboard {
         #[cfg(windows)]
         let startup_changed = matches!(command, Operation::Manage(GatewayAction::Startup { .. }));
         let offline_path = self.config_path.clone();
+        let show_forwards = self.devices_pane == Some(pages::DevicesPane::Forwards);
         let job = self.runtime.spawn(async move {
             let state = |status: Option<Status>| -> anyhow::Result<RequestResult> {
                 if let Some(s) = status {
@@ -238,9 +239,19 @@ impl Dashboard {
             };
             let command = match command {
                 Operation::Api(Command::Status) => {
-                    return state(
-                        gateway::discover(selected.as_deref(), selected_config.as_deref()).await?,
-                    );
+                    let mut status = gateway::discover(selected.as_deref(), selected_config.as_deref()).await?;
+                    if show_forwards && let Some(current) = &mut status {
+                        let ipc = current.ipc_path.as_deref().unwrap_or(&path);
+                        match peerhatch_control::request(ipc, Command::ListForwards).await {
+                            Ok(list) => *current = list,
+                            Err(error) => {
+                                let mut directory = peerhatch_control::ForwardDirectory::default();
+                                directory.errors.insert("Gateway".into(), format!("{error:#}"));
+                                current.peer_forwards = Some(directory);
+                            }
+                        }
+                    }
+                    return state(status);
                 }
                 Operation::Api(command) => command,
                 Operation::Open => {
@@ -315,10 +326,24 @@ impl Dashboard {
                         theme::apply(settings, cx);
                         view.action_error = None;
                     }
-                    Ok(RequestResult::Gateway(status, legacy)) => {
+                    Ok(RequestResult::Gateway(mut status, legacy)) => {
+                        if show_forwards && changing {
+                            view.refresh_presence = true;
+                            if let Some(old) = &mut view.status
+                                && old.device_id == status.device_id && old.peers == status.peers
+                            {
+                                status.peer_forwards = old.peer_forwards.take();
+                            }
+                        }
+                        if view.status.as_ref().is_none_or(|old| {
+                            old.device_id != status.device_id || old.ipc_path != status.ipc_path
+                        }) {
+                            view.latency = Default::default();
+                        }
+                        view.latency.record(&status);
                         view.watch_presence(&status, cx);
-                        if let Some(peer) = saved_peer && view.forward_filter.is_some() {
-                            view.forward_filter = Some(peer);
+                        if let Some(peer) = saved_peer && view.forward_filters.device.is_some() {
+                            view.forward_filters.device = Some(peer);
                         }
                         view.reconcile_device_selection(&status);
                         view.profile_native = legacy;
@@ -410,12 +435,11 @@ impl Dashboard {
         let mut view = Self {
             presence_watch: None,
             refresh_presence: false,
+            latency: Default::default(),
             terminal_sessions: BTreeMap::new(),
             home_scroll: ScrollHandle::new(),
             devices_pane: None,
-            forward_filter: None,
-            connect_field: Input::new("", "127.0.0.1:3000", cx),
-            listen_field: Input::new("", "127.0.0.1:8080", cx),
+            forward_filters: pages::ForwardFilters::new(cx),
             settings_editor: pages::SettingsEditor::new(cx),
             name_field: TextSetting::new("", Self::commit_device_name, cx),
             relay_field: TextSetting::new("Automatic public relay", Self::commit_relay_url, cx),

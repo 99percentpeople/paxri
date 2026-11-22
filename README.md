@@ -21,7 +21,7 @@ Linux archives come in glibc builds for AMD64 and ARM64 and a musl build for ARM
 
 ## Pair two computers
 
-Open **PeerHatch** on macOS or run `peerhatch-gui` on either desktop. In **Devices**, choose **Add Device** at the end of the device list to see the local pairing code or enter one from another device. Enter the first computer’s code on the second, then approve the request on the first. Share the code with the person who controls the other device. Approval grants shell and file access as the gateway account. TCP targets and listeners have separate permissions.
+Open **PeerHatch** on macOS or run `peerhatch-gui` on either desktop. In **Devices**, choose **Add Device** at the end of the device list to see the local pairing code or enter one from another device. Enter the first computer’s code on the second, then approve the request on the first. Share the code with the person who controls the other device. Approval grants shell and file access as the gateway account. Paired devices can connect to TCP addresses reachable by the gateway and bind TCP listeners with the gateway account’s privileges.
 
 The CLI performs the same steps. On **both** computers, start the gateway if it is idle:
 
@@ -40,7 +40,7 @@ peerhatch gateway start
 
 The pairing code survives restarts. `peerhatch pair refresh` replaces it and dismisses requests made with the old code. Peer commands accept the displayed device name, the full public ID, or a unique hexadecimal prefix of at least four characters.
 
-To unpair in the desktop app, open **Devices**, select the device, and choose **Unpair device**. Unpairing works offline. It removes local aliases and forwarding rules for that identity, and removes it from each published service’s allowed devices. An online peer removes the corresponding pairing and confirms. For an offline peer the gateway saves the notification and retries after reconnects or restarts. Both gateways need unpair support for automatic confirmation. `peerhatch pair status` shows pending confirmations. Pairing again requires a new approval.
+To unpair in the desktop app, open **Devices**, select the device, and choose **Unpair device**. Unpairing works offline. It removes local aliases and forwarding rules for that identity and revokes its access to the gateway’s TCP targets and reverse listeners. An online peer removes the corresponding pairing and confirms. For an offline peer the gateway saves the notification and retries after reconnects or restarts. Both gateways need unpair support for automatic confirmation. `peerhatch pair status` shows pending confirmations. Pairing again requires a new approval.
 
 ## Use a paired device
 
@@ -59,22 +59,17 @@ peerhatch cp -rp home:projects/demo ./backups/
 
 **Files.** `peerhatch cp` transfers in either direction. `peer:path` is relative to the gateway user’s home directory unless the path is absolute. Use `-r` for directories, `-p` for timestamps and supported Unix permission bits, `-n` to skip existing files, `-v` for per-file reporting, and `-q` for errors only. Multiple sources require an existing destination directory. An interrupted file keeps its previous contents. Completed files in the same transfer remain on disk.
 
-**TCP forwarding.** On the machine running a web server on port 3000, allow paired devices to reach that TCP target. On the laptop, create the listener:
+**Port forwarding.** In **Devices → Port forwarding**, choose **Add rule**, select a paired device, and enter the listening port and target. A bare port uses IPv4 loopback. **Forward** listens on this computer and connects to the target on the peer. **Reverse** listens on the peer and connects to the target on this computer.
 
 ```sh
-# On home, allow all paired devices to reach this target
-peerhatch port-access set --connect 127.0.0.1:3000
-
-# On laptop
-peerhatch forward add home-web --peer home --listen 8080 --target 3000
+peerhatch forward add web --peer home --listen 8080 --target 3000
+peerhatch forward add preview --peer home --remote --listen 9000 --target 5000
 peerhatch forward list
 ```
 
-Open `http://127.0.0.1:8080` on the laptop. For a listener on the other computer, authorize `listen` on that computer and pass `--remote` when creating the rule. A named service can also be opened directly on stdin/stdout with `peerhatch connect home dev-web`. Examples for both ends are in [home.toml](examples/home.toml) and [laptop.toml](examples/laptop.toml).
+Open `http://127.0.0.1:8080` on this computer to reach port 3000 on `home`. Both devices can edit, pause, resume or remove their shared rule. The creating gateway stores it. From the other device, use the owner in the list, for example `peerhatch forward pause web --owner laptop`. Locally stored rules remain visible when the peer goes offline. Rules stored on the peer appear while it is connected. To open a TCP stream directly on stdin/stdout, use `peerhatch connect home 3000`. [Example configuration](examples/laptop.toml)
 
-**Published services.** On the computer hosting the TCP target, open **Settings → Published services → Add service**. Enter a name such as `dev-web`, a target such as `127.0.0.1:3000`, and select the paired devices that may connect. You can select offline devices. On the connecting device, choose **Port forwarding → Add rule → Named service**, select the device, then pick a **Remote service** from its authorized list. Use the refresh button to pick up permission changes. If discovery is unavailable, you can still enter a known service name. An empty selection in the publisher’s allowed-device list denies new connections by name. The row menu lets you edit or remove the service. Changes apply to new connections immediately and survive gateway restarts. If you rename a service, update its name in the forwarding rules on other devices. A target also listed under **Port access → Connect** remains reachable by address from all paired devices.
-
-**Desktop.** Select a peer in the **Devices** sidebar to see its connection and terminal sessions. **Port forwarding** lists rules for all devices. Filter by device, add a rule, or open a row’s menu to edit, pause, resume, or remove it. Use **Settings → Port access** to manage the addresses all paired devices can reach or listen on through this gateway. Use **+** to open another terminal. Tabs can be renamed, reordered, and detached. Settings includes application appearance, terminal colors, cursor, and gateway startup. `peerhatch-gui` opens Devices without arguments and accepts the same commands as `peerhatch` when launched from a terminal.
+**Desktop.** Select a peer in the **Devices** sidebar to see its connection and terminal sessions. **Port forwarding** lists rules for all devices. Filter by device, add a rule, or open a row’s menu to edit, pause, resume, or remove it. Use **+** to open another terminal. Tabs can be renamed, reordered, and detached. Settings includes application appearance, terminal colors, cursor, and gateway startup. `peerhatch-gui` opens Devices without arguments and accepts the same commands as `peerhatch` when launched from a terminal.
 
 ## Build and develop
 

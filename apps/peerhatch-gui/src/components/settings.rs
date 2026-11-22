@@ -82,7 +82,6 @@ pub(crate) struct SettingRow {
     path: Option<String>,
     search: String,
     control: AnyElement,
-    grow_value: bool,
     pub details: Option<AnyElement>,
     subsection: Option<&'static str>,
 }
@@ -109,13 +108,7 @@ impl SettingRow {
                 d.child(ui.muted(self.description))
             });
 
-        // Values share the available width with the label and fill a line after wrapping.
-        // Interactive controls keep their own preferred width.
-        let control = if self.grow_value {
-            div().min_w_0().flex_grow().flex_basis(px(224.))
-        } else {
-            div().min_w_0().max_w(px(440.)).flex_initial()
-        };
+        let control = div().min_w_0().max_w(px(440.)).flex_initial();
         let header = row()
             .w_full()
             .gap(SPACE_3)
@@ -174,17 +167,6 @@ impl SettingsGroup {
         row.search.push_str(&heading.to_lowercase());
     }
 
-    pub fn value(&mut self, key: &str, title: &str, value: &str, ui: Ui) {
-        let row = self.add(
-            key,
-            title.to_owned(),
-            "",
-            value,
-            ui.muted(value.to_owned()).text_right(),
-        );
-        row.grow_value = true;
-    }
-
     pub fn add(
         &mut self,
         key: &str,
@@ -209,7 +191,6 @@ impl SettingsGroup {
             path,
             search,
             control: control.into_any_element(),
-            grow_value: false,
             details: None,
             subsection: None,
         })

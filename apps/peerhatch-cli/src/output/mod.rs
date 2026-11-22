@@ -1,9 +1,8 @@
 //! Human-readable reports for the management commands.
 mod table;
 
-use std::collections::BTreeMap;
 use table::Report;
-use peerhatch_control::{Direction, ForwardStatus, PairingStatus, PeerConnection, PortAccess, Status};
+use peerhatch_control::{Direction, PairingStatus, PeerConnection, Status};
 
 fn connection_row(link: &PeerConnection) -> [String; 4] {
     let path = link.path.label();
@@ -75,16 +74,7 @@ pub(super) fn status(status: &Status) -> String {
             connections,
         );
     }
-    report.table(
-        "Published services",
-        ["NAME", "TARGET"],
-        status
-            .services
-            .iter()
-            .map(|(name, target)| [name.clone(), target.clone()])
-            .collect(),
-    );
-    forward_table(&mut report, &status.forwards);
+    forward_table(&mut report, status);
     report.text
 }
 
@@ -108,22 +98,23 @@ pub(super) fn peer(status: &Status, name: &str, id: &str) -> String {
     report.text
 }
 
-fn forward_table(report: &mut Report, rules: &BTreeMap<String, ForwardStatus>) {
-    let rows = rules
-        .iter()
-        .map(|(name, rule)| {
+fn forward_table(report: &mut Report, status: &Status) {
+    let local = status.forwards.iter().map(|(name, rule)| ("This device", name, rule));
+    let shared = status.peer_forwards.iter().flat_map(|d| &d.rules)
+        .flat_map(|(owner, rules)| rules.iter().map(move |(name, rule)| (owner.as_str(), name, rule)));
+    let rows = local.chain(shared)
+        .map(|(owner, name, rule)| {
             let direction = match rule.direction {
-                Direction::Local => "Local",
-                Direction::Remote => "Remote",
+                Direction::Local => "Forward",
+                Direction::Remote => "Reverse",
             };
             [
                 name.clone(),
+                owner.to_owned(),
                 direction.into(),
                 rule.peer.clone(),
                 rule.bound.as_ref().unwrap_or(&rule.listen).clone(),
-                rule.target
-                    .clone()
-                    .unwrap_or_else(|| format!("service {}", rule.service)),
+                rule.target.clone(),
                 rule.state().into(),
             ]
         })
@@ -132,6 +123,7 @@ fn forward_table(report: &mut Report, rules: &BTreeMap<String, ForwardStatus>) {
         "Forwarding rules",
         [
             "NAME",
+            "OWNER",
             "DIRECTION",
             "PEER",
             "LISTEN",
@@ -142,27 +134,14 @@ fn forward_table(report: &mut Report, rules: &BTreeMap<String, ForwardStatus>) {
     );
 }
 
-pub(super) fn forwards(rules: &BTreeMap<String, ForwardStatus>) -> String {
+pub(super) fn forwards(status: &Status) -> String {
     let mut report = Report::new();
-    forward_table(&mut report, rules);
-    report.text
-}
-
-pub(super) fn port_access(ports: &PortAccess) -> String {
-    let mut report = Report::new();
-    let connect = ports
-        .connect
-        .iter()
-        .map(|addr| ["Connect".into(), addr.clone()]);
-    let listen = ports
-        .listen
-        .iter()
-        .map(|addr| ["Listen".into(), addr.to_string()]);
-    report.table(
-        "Gateway port access",
-        ["ACCESS", "ADDRESS"],
-        connect.chain(listen).collect(),
-    );
+    forward_table(&mut report, status);
+    if let Some(directory) = &status.peer_forwards {
+        for (peer, error) in &directory.errors {
+            report.line(&format!("{peer}: {error}"));
+        }
+    }
     report.text
 }
 

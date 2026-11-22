@@ -295,20 +295,12 @@ impl Dashboard {
             Box::new(move || self.network_settings(ui, cx)),
         ));
         sources.push((
-            catalog::PORT_ACCESS,
-            Box::new(move || self.port_access_settings(ui, cx)),
-        ));
-        sources.push((
             catalog::APPEARANCE,
             Box::new(move || self.appearance_settings(ui, cx)),
         ));
         sources.push((
             catalog::TERMINAL,
             Box::new(move || self.terminal_settings(ui, cx)),
-        ));
-        sources.push((
-            catalog::SERVICES,
-            Box::new(move || self.published_services(ui, cx)),
         ));
         sources.push((
             catalog::RUNTIME,

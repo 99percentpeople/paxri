@@ -14,7 +14,7 @@ mod management;
 mod output;
 mod shell;
 mod stdio;
-use management::{ForwardAction, PairAction, PortAction};
+use management::{ForwardAction, PairAction};
 
 #[derive(Args)]
 pub struct GatewayOptions {
@@ -46,7 +46,7 @@ pub enum Command {
         #[command(subcommand)]
         action: gateway::Action,
     },
-    /// Show the running gateway, peers, published services and bound ports
+    /// Show the running gateway, peers and bound ports
     Status {
         /// Paired device name, full ID or unique ID prefix (at least 4 hex digits)
         peer: Option<String>,
@@ -57,7 +57,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Pair devices by code and approval for terminal and file access
+    /// Pair devices by code and approval for terminal, file and TCP access
     Pair {
         #[command(subcommand)]
         action: PairAction,
@@ -66,11 +66,12 @@ pub enum Command {
     Ticket,
     /// Copy files between this computer and a paired device
     Cp(copy::CopyArgs),
-    /// Open a peer service on stdin/stdout
+    /// Open a TCP address on a paired device using stdin/stdout
     Connect {
         /// Paired device name, full ID or unique ID prefix
         peer: String,
-        service: String,
+        #[arg(value_parser = peerhatch_control::tcp_target)]
+        target: String,
     },
     /// Open the paired device's native interactive shell
     Shell {
@@ -96,16 +97,14 @@ pub enum Command {
         #[arg(trailing_var_arg = true, num_args = 1.., required_unless_present = "script", value_names = ["PROGRAM", "ARG"])]
         argv: Vec<String>,
     },
-    /// Manage the TCP addresses paired devices may connect to or listen on here
-    PortAccess {
-        #[command(subcommand)]
-        action: PortAction,
-    },
     /// Manage local and remote TCP listeners
     #[command(
         after_help = "Examples\n  peerhatch forward add web --peer home --listen 8080 --target 3000\n  peerhatch forward add preview --remote --peer home --listen 9000 --target 5000"
     )]
     Forward {
+        /// Manage an existing rule stored on this paired device
+        #[arg(long, global = true)]
+        owner: Option<String>,
         #[command(subcommand)]
         action: ForwardAction,
     },
@@ -236,8 +235,8 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
             };
             return shell::run(&ipc, peer, Some(command)).await;
         }
-        Command::Connect { peer, service } => {
-            connect_stdio(&ipc, peer, service).await?;
+        Command::Connect { peer, target } => {
+            connect_stdio(&ipc, peer, target).await?;
         }
         Command::Status { peer, check, json } => {
             let mut status = match active.take() {
@@ -284,17 +283,15 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
                 .await?
                 .ticket
         ),
-        Command::Forward { action } => action.run(&ipc).await?,
-        Command::PortAccess { action } => action.run(&ipc).await?,
+        Command::Forward { action, owner } => action.run(&ipc, owner).await?,
         Command::Config {
             command: ConfigCommand::Check { file },
         } => {
             let config = load_config(&file)?;
             println!(
-                "{}: OK ({} peers, {} services, {} forwards)",
+                "{}: OK ({} peers, {} forwards)",
                 file.display(),
                 config.peers.len(),
-                config.services.len(),
                 config.forwards.len()
             );
         }
@@ -304,8 +301,8 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
     Ok(0)
 }
 
-async fn connect_stdio(ipc: &Path, peer: String, service: String) -> Result<()> {
-    let socket = peerhatch_control::connect(ipc, peer, service).await?;
+async fn connect_stdio(ipc: &Path, peer: String, target: String) -> Result<()> {
+    let socket = peerhatch_control::connect(ipc, peer, target).await?;
     peerhatch_control::bridge(socket, stdio::input()?, stdio::output()?).await
 }
 

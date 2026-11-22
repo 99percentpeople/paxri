@@ -91,12 +91,11 @@ impl Listeners {
         let mut config = self.config.clone();
         let (mut recv, mut send) = tokio::io::split(stream);
         let (listen, id) = wire::receive(&mut recv).await?;
-        let permitted =
-            |cfg: &Config| cfg.port_access.listen.contains(&listen) && cfg.is_paired(&peer);
+        let paired = |cfg: &Config| cfg.is_paired(&peer);
         let binding = async {
             ensure!(
-                permitted(&config.borrow_and_update()),
-                "DENIED: peer has no permission to listen on {listen}"
+                paired(&config.borrow_and_update()),
+                "DENIED: peer is not paired"
             );
             let slot = self
                 .listeners
@@ -123,7 +122,7 @@ impl Listeners {
                 biased;
                 _ = recv.read_u8() => break,
                 changed = config.changed() => {
-                    if changed.is_err() || !permitted(&config.borrow_and_update()) { break; }
+                    if changed.is_err() || !paired(&config.borrow_and_update()) { break; }
                 }
                 _ = flows.join_next(), if !flows.is_empty() => {}
                 accepted = listener.accept() => {

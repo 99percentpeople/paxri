@@ -23,12 +23,12 @@ pub struct Config {
     pub gateway: startup::GatewaySettings,
     #[serde(default)]
     pub native: Native,
-    #[serde(default)]
-    pub port_access: PortAccess,
+    #[serde(default, rename = "port_access")]
+    _retired_port_access: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub peers: BTreeMap<String, Peer>,
-    #[serde(default, deserialize_with = "tcp_services")]
-    pub services: BTreeMap<String, Service>,
+    #[serde(default, rename = "services")]
+    _retired_services: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub forwards: BTreeMap<String, Forward>,
 }
@@ -147,56 +147,6 @@ impl DevicePlatform {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PortAccess {
-    pub connect: Vec<String>,
-    pub listen: Vec<SocketAddr>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Service {
-    pub target: String,
-    pub allow_peers: Vec<String>,
-}
-
-// Read older files in place. A retired per-connection sshd handler publishes no service.
-fn tcp_services<'de, D: serde::Deserializer<'de>>(
-    data: D,
-) -> Result<BTreeMap<String, Service>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Entry {
-        target: Target,
-        allow_peers: Vec<String>,
-    }
-    #[derive(Deserialize)]
-    #[serde(untagged, deny_unknown_fields)]
-    enum Target {
-        Tcp(String),
-        Retired {
-            #[serde(rename = "sshd_config")]
-            _path: std::path::PathBuf,
-        },
-    }
-    let entries = BTreeMap::<String, Entry>::deserialize(data)?;
-    Ok(entries
-        .into_iter()
-        .filter_map(|(name, entry)| {
-            let Target::Tcp(target) = entry.target else {
-                return None;
-            };
-            Some((
-                name,
-                Service {
-                    target,
-                    allow_peers: entry.allow_peers,
-                },
-            ))
-        })
-        .collect())
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -205,17 +155,11 @@ pub enum Direction {
     Remote,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Destination {
-    Service(String),
-    Target(String),
-}
-
-impl Destination {
-    pub fn address(&self) -> &str {
+impl Direction {
+    pub fn opposite(self) -> Self {
         match self {
-            Self::Service(s) | Self::Target(s) => s,
+            Self::Local => Self::Remote,
+            Self::Remote => Self::Local,
         }
     }
 }
@@ -227,8 +171,7 @@ pub struct Forward {
     pub peer: String,
     #[serde(default)]
     pub direction: Direction,
-    #[serde(flatten)]
-    pub destination: Destination,
+    pub target: String,
 }
 
 /// A bare port in a port rule means IPv4 loopback. Explicit IPs keep their scope.
@@ -274,27 +217,10 @@ pub fn parse(input: &str) -> Result<Config, String> {
     {
         return Err("native.relay_url requires an HTTP(S) URL with a host".into());
     }
-    for address in &mut config.port_access.connect {
-        *address = tcp_target(address)?;
-    }
     for (name, peer) in &config.peers {
         if peer.endpoint_id.len() != 64 || !peer.endpoint_id.bytes().all(|c| c.is_ascii_hexdigit())
         {
             return Err(format!("peers.{name}.endpoint_id requires 64 hex digits"));
-        }
-    }
-    for (name, service) in &config.services {
-        if !valid_target(&service.target) {
-            return Err(format!(
-                "services.{name}.target requires a host and TCP port"
-            ));
-        }
-        for peer in &service.allow_peers {
-            if !config.peers.contains_key(peer) {
-                return Err(format!(
-                    "services.{name}.allow_peers refers to unknown peer {peer}"
-                ));
-            }
         }
     }
     for (name, forward) in &mut config.forwards {
@@ -304,16 +230,7 @@ pub fn parse(input: &str) -> Result<Config, String> {
                 forward.peer
             ));
         }
-        match &mut forward.destination {
-            Destination::Service(service) => {
-                if service.trim().is_empty() || forward.direction == Direction::Remote {
-                    return Err(format!(
-                        "forwards.{name}: service requires a local listener and a remote service name"
-                    ));
-                }
-            }
-            Destination::Target(target) => *target = tcp_target(target)?,
-        }
+        forward.target = tcp_target(&forward.target).map_err(|e| format!("forwards.{name}: {e}"))?;
     }
     Ok(config)
 }

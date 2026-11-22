@@ -31,17 +31,23 @@ impl Dashboard {
                 .map(|(name, _)| DevicesPane::Peer(name.to_string()));
         }
         if self
-            .forward_filter
+            .forward_filters
+            .device
             .as_ref()
             .is_some_and(|peer| !status.peers.contains_key(peer))
         {
-            self.forward_filter = None;
+            self.forward_filters.device = None;
         }
     }
 
     pub(super) fn show_devices_pane(&mut self, pane: DevicesPane, cx: &mut Context<Self>) {
         self.action_error = None;
+        let forwards = pane == DevicesPane::Forwards;
         self.devices_pane = Some(pane);
+        if forwards {
+            if self.busy { self.refresh_presence = true; }
+            else { self.send(Command::Status, cx); }
+        }
         self.home_scroll.set_offset(Point::default());
         cx.notify();
     }
@@ -108,10 +114,8 @@ impl Dashboard {
             .gap_2()
             .child(
                 div()
-                    .id("paired-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -119,11 +123,19 @@ impl Dashboard {
                         d.child(self.paired_devices(ui, s, cx))
                     })
                     .child(add)
-                    .when_some(self.status.as_ref(), |d,s| {
+                    .when_some(self.status.as_ref(), |d, s| {
                         if s.pairing.pending_unpairs.is_empty() {
-                            d.when_some(s.pairing.message.clone(), |d,m| d.child(ui.muted(m).text_xs()))
+                            d.when_some(s.pairing.message.clone(), |d, m| {
+                                d.child(ui.muted(m).text_xs())
+                            })
                         } else {
-                            d.child(ui.muted(format!("Awaiting unpair confirmation: {}", s.pairing.pending_unpairs.join(", "))).text_xs())
+                            d.child(
+                                ui.muted(format!(
+                                    "Awaiting unpair confirmation: {}",
+                                    s.pairing.pending_unpairs.join(", ")
+                                ))
+                                .text_xs(),
+                            )
                         }
                     }),
             )
@@ -133,7 +145,7 @@ impl Dashboard {
                     .row()
                     .pressed(self.devices_pane == Some(DevicesPane::Forwards))
                     .on_click(cx.listener(|v, _, _, cx| {
-                        v.forward_filter = None;
+                        v.forward_filters.reset(None, cx);
                         v.show_devices_pane(DevicesPane::Forwards, cx);
                     })),
             )
@@ -167,7 +179,7 @@ impl Dashboard {
             (_, Some(status)) => overview()
                 .child(device_heading(
                     ui,
-                    "This device",
+                    ui.muted("This device").text_xs().flex_none(),
                     self.local_name.clone(),
                     DevicePlatform::current(),
                     Some((
@@ -175,9 +187,14 @@ impl Dashboard {
                         peerhatch_config::peer_id::default_prefix(&status.device_id).into(),
                     )),
                 ))
-                .child(ui.section("Paired devices").child(
-                    ui.muted("Choose Add Device in the device list to pair your first device."),
-                )),
+                .child(ui.separator())
+                .child(
+                    ui.section()
+                        .child(crate::components::heading("Paired devices"))
+                        .child(ui.muted(
+                            "Choose Add Device in the device list to pair your first device.",
+                        )),
+                ),
         };
         DockPanel::scroll("devices-content", self.home_scroll.clone(), content)
             .with_navigation(self.device_sidebar(ui, cx))

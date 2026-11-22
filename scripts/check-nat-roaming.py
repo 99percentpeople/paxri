@@ -65,8 +65,7 @@ def run(peerhatch):
     a = [peerhatch, "--ipc", str(Path("a.sock").resolve())]
     b = [peerhatch, "--ipc", str(Path("b.sock").resolve())]
     config = Path("b.toml")
-    config.write_text(config.read_text().replace("[native]", "[native]\nlan_port_mapping=true") +
-                      '\n[services.echo]\ntarget="127.0.0.1:9001"\nallow_peers=["other"]\n')
+    config.write_text(config.read_text().replace("[native]", "[native]\nlan_port_mapping=true"))
 
     with ExitStack() as stack:
         def start(ns, *args, **options):
@@ -94,7 +93,7 @@ def run(peerhatch):
             if time.monotonic() > deadline:
                 raise RuntimeError("Gateway IPC did not start")
             time.sleep(.1)
-        stream = start("node-a", *a, "connect", "other", "echo", stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        stream = start("node-a", *a, "connect", "other", "9001", stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         ready = stack.enter_context(selectors.DefaultSelector())
         ready.register(stream.stdout, selectors.EVENT_READ)
         seq = 0

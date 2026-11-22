@@ -1,15 +1,18 @@
 use crate::output;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use std::{net::SocketAddr, path::Path};
 use peerhatch_control::{
-    Command, Destination, Direction, Forward, PortAccess, listen_address, request, tcp_target,
+    Command, Direction, Forward, PeerForward, listen_address, request, tcp_target,
 };
+use std::{net::SocketAddr, path::Path};
 
 #[derive(Subcommand)]
 pub enum ForwardAction {
     /// Show forwarding rules, their endpoints and current listener state
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     Add(Rule),
     Edit(Rule),
     Remove {
@@ -28,41 +31,80 @@ pub struct Rule {
     name: String,
     /// Paired device name, full ID or unique ID prefix
     #[arg(long)]
-    peer: String,
+    peer: Option<String>,
     /// Listening IP and port, or a loopback port
     #[arg(long, value_parser = listen_address)]
     listen: SocketAddr,
     /// Listen on the peer and forward connections to a TCP target on this device
-    #[arg(long, conflicts_with = "service")]
+    #[arg(long)]
     remote: bool,
     /// Destination host:port, or a loopback port
-    #[arg(long, required_unless_present = "service", conflicts_with = "service", value_parser = tcp_target)]
-    target: Option<String>,
-    /// Published service on the peer, for a local listener
-    #[arg(long)]
-    service: Option<String>,
+    #[arg(long, value_parser = tcp_target)]
+    target: String,
 }
 
 impl ForwardAction {
-    pub async fn run(self, ipc: &Path) -> Result<()> {
+    pub async fn run(self, ipc: &Path, owner: Option<String>) -> Result<()> {
         let edit = matches!(self, Self::Edit(_));
         let enabled = matches!(self, Self::Resume { .. });
-        let (name, command) = match self {
-            Self::List => {
-                let status = request(ipc, Command::Status).await?;
-                print!("{}", output::forwards(&status.forwards));
-                return Ok(());
+        if let Self::List { json } = self {
+            anyhow::ensure!(owner.is_none(), "List shows rules from all online owners");
+            let status = request(ipc, Command::ListForwards).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "local": status.forwards, "peers": status.peer_forwards
+                    }))?
+                );
+            } else {
+                print!("{}", output::forwards(&status));
             }
+            return Ok(());
+        }
+        if let Some(owner) = owner {
+            let action = match self {
+                Self::Edit(args) => {
+                    anyhow::ensure!(
+                        args.peer.is_none(),
+                        "A peer-owned rule already belongs to this pairing. Omit --peer."
+                    );
+                    PeerForward::Edit {
+                        name: args.name,
+                        target: args.target,
+                        listen: args.listen,
+                        direction: if args.remote {
+                            Direction::Remote
+                        } else {
+                            Direction::Local
+                        },
+                    }
+                }
+                Self::Remove { name } => PeerForward::Remove { name },
+                Self::Pause { name } | Self::Resume { name } => {
+                    PeerForward::SetEnabled { name, enabled }
+                }
+                Self::Add(_) => anyhow::bail!("Create a rule with --peer and omit --owner"),
+                Self::List { .. } => unreachable!(),
+            };
+            request(
+                ipc,
+                Command::ManagePeerForward {
+                    owner: owner.clone(),
+                    action,
+                },
+            )
+            .await?;
+            println!("Updated forwarding rules on {owner}.");
+            return Ok(());
+        }
+        let (name, command) = match self {
+            Self::List { .. } => unreachable!(),
             Self::Add(args) | Self::Edit(args) => {
-                let destination = match (args.target, args.service) {
-                    (Some(s), _) => Destination::Target(s),
-                    (_, Some(s)) => Destination::Service(s),
-                    _ => anyhow::bail!("Enter a target or service"),
-                };
                 let rule = Forward {
                     listen: args.listen,
-                    peer: args.peer,
-                    destination,
+                    peer: args.peer.context("Specify the paired device with --peer")?,
+                    target: args.target,
                     direction: if args.remote {
                         Direction::Remote
                     } else {
@@ -106,37 +148,6 @@ impl ForwardAction {
 }
 
 #[derive(Subcommand)]
-pub enum PortAction {
-    Show,
-    /// Replace both gateway-wide allowlists for paired devices.
-    Set {
-        #[arg(long, value_delimiter = ',', value_parser = tcp_target)]
-        connect: Vec<String>,
-        #[arg(long, value_delimiter = ',', value_parser = listen_address)]
-        listen: Vec<SocketAddr>,
-    },
-}
-
-impl PortAction {
-    pub async fn run(self, ipc: &Path) -> Result<()> {
-        let command = match self {
-            Self::Set { connect, listen } => Command::SetGatewayPortAccess {
-                expected: None,
-                ports: PortAccess { connect, listen },
-            },
-            Self::Show => Command::Status,
-        };
-        let status = request(ipc, command).await?;
-        let ports = status
-            .gateway_port_access
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Update the gateway to manage global port access."))?;
-        print!("{}", output::port_access(ports));
-        Ok(())
-    }
-}
-
-#[derive(Subcommand)]
 pub enum PairAction {
     /// Print this device's current pairing code
     Code,
@@ -148,7 +159,7 @@ pub enum PairAction {
     Status,
     /// Unpair a device by name, full ID or unique ID prefix
     ///
-    /// Close its connections and remove its forwarding rules and service grants
+    /// Close its connections and remove its forwarding rules
     /// on both gateways. An offline gateway receives the notice on a later retry.
     Remove { peer: String },
     /// Withdraw this device's outgoing request
@@ -168,7 +179,10 @@ impl PairAction {
             Self::Refresh => Command::RefreshPairingCode,
             Self::Join { code } => Command::JoinPairing { code },
             Self::Cancel => Command::CancelPairing,
-            Self::Remove { peer } => Command::Unpair { peer, expected_id: None },
+            Self::Remove { peer } => Command::Unpair {
+                peer,
+                expected_id: None,
+            },
             Self::Accept { device_id } => Command::AnswerPairing {
                 device_id,
                 request_id: None,
@@ -182,7 +196,10 @@ impl PairAction {
         };
         let pairing = request(ipc, command).await?.pairing;
         if unpair {
-            println!("{}", pairing.message.as_deref().unwrap_or("Device unpaired."));
+            println!(
+                "{}",
+                pairing.message.as_deref().unwrap_or("Device unpaired.")
+            );
             return Ok(());
         }
         if show_code {
