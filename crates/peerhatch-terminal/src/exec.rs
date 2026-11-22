@@ -1,4 +1,4 @@
-//! Launch request for a command in a remote PTY. The session then uses ordinary terminal frames.
+//! Launch request shared by native PTY and piped commands.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

@@ -94,6 +94,11 @@ impl NativeSession {
             // Give queued terminal input and redraws precedence over bulk file bytes.
             let _ = tx.set_priority(-1);
         }
+        // Keep activity reports readable by clients that predate pipe execution.
+        let kind = match kind {
+            StreamKind::Pipe => StreamKind::Command,
+            other => other,
+        };
         *self
             .activity
             .lock()

@@ -51,11 +51,16 @@ peerhatch status home --check
 peerhatch shell home
 peerhatch exec home -- vim "notes from today.txt"
 peerhatch exec home -c 'uname -s && uptime'
+peerhatch exec --pipe home -- cat image.png > copy.png
 peerhatch cp build.zip home:Downloads/
 peerhatch cp -rp home:projects/demo ./backups/
 ```
 
 **Terminal.** The gateway starts a native PTY under its own account. Windows prefers PowerShell 7 and falls back to Windows PowerShell 5.1. On Unix it uses the account’s shell. `exec` preserves terminal input, resize events, and the remote exit status. Captured output can contain both output streams and terminal escape sequences. A redirected session starts at 80 columns by 24 rows. An unprivileged gateway can host terminal and file sessions.
+
+Inside a remote terminal, `peerhatch status` queries the gateway hosting that terminal. From the initiating computer, `peerhatch exec home -- peerhatch status` does the same. Keep the CLI beside the gateway executable. To add commands for this device, put executables in `tools/bin/` beside its `node.toml`. [Session tools and examples](docs/installation.md#remote-terminal-tools)
+
+Use `exec --pipe` for scripts and binary tools. It streams stdin, stdout and stderr separately, forwards stdin EOF, and returns the remote exit code. Both gateways must support this mode. With a screenshot tool installed on the peer, an application can read its PNG directly from stdout. Use a binary-safe caller such as Python’s `subprocess.run(..., capture_output=True)`.
 
 **Files.** `peerhatch cp` transfers in either direction. `peer:path` is relative to the gateway user’s home directory unless the path is absolute. Use `-r` for directories, `-p` for timestamps and supported Unix permission bits, `-n` to skip existing files, `-v` for per-file reporting, and `-q` for errors only. Multiple sources require an existing destination directory. An interrupted file keeps its previous contents. Completed files in the same transfer remain on disk.
 

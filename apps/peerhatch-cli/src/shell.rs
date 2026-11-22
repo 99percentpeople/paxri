@@ -17,6 +17,22 @@ pub(super) fn terminal_columns() -> Option<usize> {
     platform::size().ok().map(|size| usize::from(size.cols))
 }
 
+pub async fn pipe(ipc: &Path, peer: String, invocation: Invocation) -> Result<u32> {
+    let stream = peerhatch_control::open_pipe(ipc, peer, invocation).await?;
+    let stdout: Box<dyn AsyncWrite + Unpin> = if std::io::stdout().is_terminal() {
+        Box::new(tokio::io::stdout())
+    } else {
+        Box::new(crate::stdio::output()?)
+    };
+    peerhatch_control::terminal::pipe::client(
+        stream,
+        crate::stdio::input()?,
+        stdout,
+        crate::stdio::error()?,
+    )
+    .await
+}
+
 pub async fn run(ipc: &Path, peer: String, invocation: Option<Invocation>) -> Result<u32> {
     let console_output = std::io::stdout().is_terminal();
     let attached = std::io::stdin().is_terminal() && console_output;

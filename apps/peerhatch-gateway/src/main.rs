@@ -390,6 +390,7 @@ async fn handle_client(
     | Command::Connect { peer, .. }
     | Command::OpenTerminal { peer, .. }
     | Command::Exec { peer, .. }
+    | Command::ExecPipe { peer, .. }
     | Command::OpenFiles { peer } = &mut command
     {
         let result = gateway.lock().await.canonicalize_peer(peer);
@@ -532,6 +533,7 @@ async fn handle_client(
         open @ (Command::Connect { .. }
         | Command::OpenTerminal { .. }
         | Command::Exec { .. }
+        | Command::ExecPipe { .. }
         | Command::OpenFiles { .. }) => {
             let (transport, permit) = {
                 let gateway = gateway.lock().await;
@@ -562,13 +564,16 @@ async fn handle_client(
             let opened = async {
                 match open {
                     Command::OpenTerminal { peer, size } => {
-                        terminal::open_pty(transport.online_session(&peer)?, size, None).await
+                        terminal::open(transport.online_session(&peer)?, Some(size), None).await
                     }
                     Command::Exec {
                         peer,
                         size,
                         invocation,
-                    } => terminal::open_pty(transport.online_session(&peer)?, size, Some(invocation)).await,
+                    } => terminal::open(transport.online_session(&peer)?, Some(size), Some(invocation)).await,
+                    Command::ExecPipe { peer, invocation } => {
+                        terminal::open(transport.online_session(&peer)?, None, Some(invocation)).await
+                    }
                     Command::OpenFiles { peer } => {
                         use peerhatch_core::{StreamKind, Transport};
                         transport.open(&peer, StreamKind::Files).await
@@ -607,6 +612,11 @@ async fn run(
     let control = ControlListener::bind(&path)
         .await
         .with_context(|| format!("bind IPC {}", path.display()))?;
+    #[cfg(unix)]
+    let path = std::path::absolute(path)?;
+    let profile = std::path::absolute(&options.config)?;
+    let profile_dir = profile.parent().context("Missing profile directory")?;
+    let tools = terminal::SessionTools::new(path.clone(), profile_dir);
     let _profile_lock = if options.user_managed {
         let parent = options
             .config
@@ -688,7 +698,9 @@ async fn run(
     );
     clients.spawn(gateway.transport.clone().announce_presence());
     let gateway = Arc::new(Mutex::new(gateway));
-    clients.spawn(streams::serve(stream_rx, stream_config, routes, gateway.clone()));
+    clients.spawn(streams::serve(
+        stream_rx, stream_config, routes, gateway.clone(), tools,
+    ));
     let management = Arc::new(Semaphore::new(32));
     clients.spawn(platforms::fill_missing(gateway.clone()));
     clients.spawn(unpair::retry_pending(gateway.clone()));

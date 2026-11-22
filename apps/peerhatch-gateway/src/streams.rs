@@ -1,7 +1,7 @@
 //! Paired application services over any backend that provides reliable duplex streams.
 use crate::{
     reverse::{Listeners, Routes},
-    terminal::Terminals,
+    terminal::{SessionTools, Terminals},
 };
 use std::sync::Arc;
 use tokio::{
@@ -22,9 +22,10 @@ pub async fn serve<S: PeerSession>(
     config: watch::Receiver<Arc<Config>>,
     routes: Routes,
     gateway: Arc<tokio::sync::Mutex<crate::Gateway>>,
+    tools: SessionTools,
 ) {
     let limit = Arc::new(Semaphore::new(256));
-    let terminals = Arc::new(Terminals::new(config.clone()));
+    let terminals = Arc::new(Terminals::new(config.clone(), tools));
     let listeners = Arc::new(Listeners::new(config.clone(), limit.clone()));
     let mut tasks = JoinSet::new();
     loop {
@@ -46,7 +47,7 @@ pub async fn serve<S: PeerSession>(
                     }
                     let result = match kind {
                         StreamKind::Services => peerhatch_core::serve(|| config.borrow().clone(), &peer, stream).await,
-                        StreamKind::Terminal | StreamKind::Command => terminals.serve(peer.clone(), kind, stream).await,
+                        StreamKind::Terminal | StreamKind::Command | StreamKind::Pipe => terminals.serve(peer.clone(), kind, stream).await,
                         StreamKind::Files => {
                             let allowed = crate::account::is_standard_user();
                             match allowed {

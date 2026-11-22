@@ -57,6 +57,7 @@ The peer with the lexicographically smaller public key serializes connection sel
 | 5 | TCP connection accepted by that listener |
 | 6 | File transfer |
 | 7 | List or manage this pairing’s forwarding rules |
+| 8 | Execute a program or shell command with binary pipes |
 
 ## TCP forwarding
 
@@ -79,6 +80,12 @@ The host checks pairing, account privileges, and the 16-session quota. Its one-b
 | 3 | Host to client | `u32` child exit code after the final output |
 
 UTF-8 characters and escape sequences may span frames. The CLI uses the host terminal. The GUI emulator handles cursor position, alternate screen, SGR colors, application mouse reporting, bracketed paste, focus events, terminal queries, and palette or cursor changes. OSC 0/2 can update a tab title until the user renames it. Closing the client, losing the session, or unpairing the peer releases the PTY.
+
+## Piped commands
+
+Type 8 takes the same length-prefixed invocation as type 3 and omits the terminal size. Admission checks, the shared session quota and the one-byte launch reply match those of a native terminal. An unsupported stream type fails the request before execution.
+
+After ready, the client sends a big-endian `u16` length followed by up to 32768 bytes of stdin. A zero length closes the child's stdin. The client keeps the transport open to receive results. The host prefixes each output chunk with 1 for stdout or 2 for stderr, then a big-endian `u16` length (1–32768) and the original bytes. After both pipes drain, the host sends 3 and the big-endian `u32` exit code. A Unix signal exit uses 128 plus the signal number.
 
 ## File transfer
 

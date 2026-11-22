@@ -93,6 +93,22 @@ fn overlapped_pipe(handle: &std::os::windows::io::OwnedHandle) -> io::Result<boo
 }
 
 #[cfg(windows)]
+pub fn error() -> io::Result<Box<dyn AsyncWrite + Unpin>> {
+    use std::os::windows::io::AsHandle;
+    let handle = io::stderr().as_handle().try_clone_to_owned()?;
+    if overlapped_pipe(&handle)? {
+        Ok(Box::new(async_pipe(handle)?))
+    } else {
+        Ok(Box::new(tokio::io::stderr()))
+    }
+}
+
+#[cfg(unix)]
+pub fn error() -> io::Result<impl AsyncWrite + Unpin> {
+    Ok(tokio::io::stderr())
+}
+
+#[cfg(windows)]
 fn async_pipe(
     handle: std::os::windows::io::OwnedHandle,
 ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {

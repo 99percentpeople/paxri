@@ -93,6 +93,10 @@ pub enum Command {
         size: terminal::Size,
         invocation: terminal::exec::Invocation,
     },
+    ExecPipe {
+        peer: String,
+        invocation: terminal::exec::Invocation,
+    },
     Connect {
         peer: String,
         target: String,
@@ -579,6 +583,20 @@ pub async fn open_pty(
         None => Command::OpenTerminal { peer, size },
     };
     let (socket, ()) = begin(path, command, Duration::from_secs(50)).await?;
+    Ok(socket)
+}
+
+pub async fn open_pipe(
+    path: &Path,
+    peer: String,
+    invocation: terminal::exec::Invocation,
+) -> Result<Stream> {
+    let (socket, ()) = begin(
+        path,
+        Command::ExecPipe { peer, invocation },
+        Duration::from_secs(50),
+    )
+    .await?;
     Ok(socket)
 }
 

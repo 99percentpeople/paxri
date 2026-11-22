@@ -54,6 +54,28 @@ In **Settings → Network**, choose whether to allow UPnP, try a physical LAN ro
 
 Windows supports the ordinary-user installation without an administrator account. Boot-time registration requires elevation, uses Task Scheduler and stores the startup helper under Program Files. A Windows S4U task has limited access to user-encrypted files and authenticated network shares. On Windows, `peerhatch gateway status` and **Settings → Runtime → Gateway details** show the running executable and check the actual Task Scheduler registration, even when the gateway is stopped. The report identifies disabled or missing tasks and startup paths pointing to another installation. A client opened from a new folder reuses the running gateway for the same profile. To switch the running executable, use `peerhatch gateway restart` from the desired folder. To update the login or boot task, select the startup mode again or run `peerhatch gateway startup login` or `peerhatch gateway startup system` there. On Linux the app uses desktop autostart or systemd, and on macOS it uses LaunchAgents or LaunchDaemons. A gateway running as root or an elevated administrator rejects remote PTY and file operations.
 
+## Remote terminal tools
+
+GUI terminals, `peerhatch shell`, and both forms of `peerhatch exec` share the host gateway’s session environment. The gateway adds the directory containing its companion CLI and then the profile’s `tools/bin/` directory to the child’s command search path. The system PATH and shell configuration files stay untouched. A gateway-only installation can still host shells and use tools already on its PATH.
+
+- `PEERHATCH_IPC` identifies the host gateway’s Unix socket or Windows pipe, including when multiple gateways run on the same computer.
+- `PEERHATCH_CALLER_ID` is the full paired device ID of the computer that opened this session. Inside a Unix terminal, `peerhatch cp ./build.log "${PEERHATCH_CALLER_ID}:Downloads/"` sends a file back to that computer. In PowerShell, use `peerhatch cp .\build.log "${env:PEERHATCH_CALLER_ID}:Downloads/"`.
+
+To add a tool, place a native executable (or an executable script with a shebang on Unix) in `tools/bin/` next to the host’s active `node.toml`. Create this directory if needed. Open a new session to pick it up. For example, an independently installed `ph-inspect` or `ph-inspect.exe` can be called as `peerhatch exec home -- ph-inspect`. Arguments and the tool’s exit status follow the normal `exec` behavior.
+
+An extension runs as the gateway account in its OS session. A desktop tool needs access to the intended graphical session and the platform’s screen capture or accessibility permissions. With a PNG-producing `ph-screenshot` installed, a caller can capture its output directly:
+
+```python
+import subprocess
+
+png = subprocess.run(
+    ["peerhatch", "exec", "--pipe", "home", "--", "ph-screenshot"],
+    capture_output=True, check=True,
+).stdout
+```
+
+The byte string can be passed directly to an image consumer. Diagnostics go to stderr. The same mode accepts a shell script through `-c`.
+
 ## Docker on Linux
 
 The image includes the CLI and gateway. Use the repository's `compose.yaml` or extract it from the `peerhatch-build-info` artifact. Run Compose in that directory.

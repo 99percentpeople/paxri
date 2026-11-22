@@ -78,11 +78,14 @@ pub enum Command {
         /// Paired device name, full ID or unique ID prefix
         peer: String,
     },
-    /// Run a command in a paired device's native terminal and return its exit status
+    /// Run a command on a paired device and return its exit status
     #[command(
-        after_help = "Examples\n  peerhatch exec home top\n  peerhatch exec home -- vim notes.txt\n  peerhatch exec home -c 'uname -a'"
+        after_help = "Examples\n  peerhatch exec home top\n  peerhatch exec home -- vim notes.txt\n  peerhatch exec home -c 'uname -a'\n  peerhatch exec --pipe home -- cat image.png > copy.png"
     )]
     Exec {
+        /// Use byte-preserving stdin, stdout and stderr pipes without a terminal
+        #[arg(long)]
+        pipe: bool,
         /// Paired device name, full ID or unique ID prefix
         peer: String,
         /// Run one script in the remote device's default shell
@@ -221,7 +224,7 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
         Command::Gateway { .. } => unreachable!(),
         Command::Cp(args) => return args.run(&ipc).await,
         Command::Shell { peer } => return shell::run(&ipc, peer, None).await,
-        Command::Exec { peer, script, argv } => {
+        Command::Exec { peer, script, argv, pipe } => {
             use peerhatch_control::terminal::exec::Invocation;
             let command = match script {
                 Some(script) => Invocation::Shell { script },
@@ -233,6 +236,9 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
                     }
                 }
             };
+            if pipe {
+                return shell::pipe(&ipc, peer, command).await;
+            }
             return shell::run(&ipc, peer, Some(command)).await;
         }
         Command::Connect { peer, target } => {

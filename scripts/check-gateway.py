@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import socketserver
 import subprocess
@@ -127,6 +128,8 @@ def check_native_terminal(root, keys, call, start, cli, ipc, wait):
     with session("exec", keys["host"][:8], "--", "touch", str(marker)) as (child, _, _):
         assert child.wait(14) != 0
         assert not marker.exists()
+    with session("exec", "--pipe", "host", "--", "touch", str(marker)) as (child, _, _):
+        assert child.wait(14) != 0 and not marker.exists()
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: s["pairing"]["message"] == "Paired with host.")
     wait("host", lambda s: s["peer_connections"].get("client"))
@@ -164,6 +167,8 @@ sys.exit(37)
     assert (captured.returncode, captured.stdout, captured.stderr) == (17, b"\x1b[6noutputerror", b""), captured
     with session() as (child, fd, slave):
         ready(slave)
+        os.write(fd, b"""peerhatch status >/dev/null && printf 'TOOLS[%s]\\n' "$PEERHATCH_CALLER_ID"\r""")
+        read_until(fd, re.escape(f"TOOLS[{keys['client']}]".encode()))
         with session("shell", keys["host"][:8]) as (second, second_fd, second_slave):
             ready(second_slave)
             assert call("host", "exec", "client", "--", "printf", "reverse") == "reverse"
@@ -205,6 +210,77 @@ sys.exit(37)
             time.sleep(.05)
     assert host_process.poll() is None
     print("Native shell and command PTYs passed pairing, I/O, resize, exit and disconnect checks.")
+
+
+def check_pipe(cli, ipc):
+    cmd = [cli, "--ipc", ipc("client"), "exec", "--pipe", "host"]
+    payload = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4097
+    errors = bytes(reversed(range(256))) * 351
+    program = """
+import os, sys
+assert sys.argv[1:] == ['two words', '', '--pipe', '$HOME']
+assert not any(os.isatty(fd) for fd in range(3))
+sys.stderr.buffer.write(bytes(reversed(range(256))) * 351)
+sys.stderr.buffer.flush()
+sys.stdout.buffer.write(sys.stdin.buffer.read())
+sys.exit(37)
+"""
+    run = subprocess.run([*cmd, "--", sys.executable, "-c", program, "two words", "", "--pipe", "$HOME"],
+                         input=payload, capture_output=True, timeout=30)
+    assert (run.returncode, run.stdout == payload, run.stderr == errors) == (37, True, True), (
+        run.returncode, len(run.stdout), len(run.stderr), run.stderr[:160])
+    script = ("[Console]::Out.Write('out'); [Console]::Error.Write('err'); exit 7"
+              if os.name == "nt" else "printf out; printf err >&2; exit 7")
+    # A program which ignores stdin must finish even while the calling pipe is open.
+    with subprocess.Popen([*cmd, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as child:
+        assert child.wait(timeout=20) == 7
+        assert (child.stdout.read(), child.stderr.read()) == (b"out", b"err")
+    # A disconnect after stdin EOF also releases a subprocess started by the command.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(15)
+        port = listener.getsockname()[1]
+        job = f"import socket,time; s=socket.create_connection(('127.0.0.1',{port})); time.sleep(30)"
+        launcher = "import subprocess,sys; subprocess.call([sys.executable,'-c',sys.argv[1]])"
+        with subprocess.Popen([*cmd, "--", sys.executable, "-c", launcher, job],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL) as client:
+            try:
+                conn, _ = listener.accept()
+                with conn:
+                    client.kill()
+                    client.wait(10)
+                    conn.settimeout(5)
+                    try:
+                        assert conn.recv(1) == b""
+                    except ConnectionResetError:
+                        pass
+            finally:
+                if client.poll() is None:
+                    client.kill()
+    print("PASS: piped binary I/O, argv, stdin EOF, exit status, early exit and disconnect")
+
+
+def check_session_tools(root, keys, call, cli):
+    host_code = call("host", "pair", "code")[:56]
+    assert host_code != call("client", "pair", "code")[:56]
+
+    def remote(*args):
+        return call("client", "exec", "host", *args)
+
+    assert host_code in remote("--", "peerhatch", "pair", "code")
+    # Install a standalone executable after startup, outside the system PATH.
+    directory = root / "tools" / "bin"
+    directory.mkdir(parents=True)
+    suffix = ".exe" if os.name == "nt" else ""
+    shutil.copy2(Path(cli).with_name("peerhatch" + suffix), directory / ("ph-test" + suffix))
+    assert host_code in remote("--", "ph-test", "pair", "code")
+    assert host_code in call("client", "exec", "--pipe", "host", "--", "ph-test", "pair", "code")
+    caller = "$env:PEERHATCH_CALLER_ID" if os.name == "nt" else '"$PEERHATCH_CALLER_ID"'
+    output = remote("-c", f"echo {caller}; ph-test pair code")
+    assert keys["client"] in output and host_code in output, output
+    print("PASS: bundled CLI, profile extension, host IPC and authenticated caller in remote exec")
 
 
 def check_pairing(root, keys, call, start, target_port, wait):
@@ -618,6 +694,8 @@ def main():
     parser.add_argument("--unpair", action="store_true", help="revoke an online or offline device and its active forwards")
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
     parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
+    parser.add_argument("--session-tools", action="store_true", help="check the tool environment between two unprivileged gateways")
+    parser.add_argument("--pipe-exec", action="store_true", help="check binary command I/O between two unprivileged gateways")
     parser.add_argument("--file-copy", action="store_true", help="copy files and directories between two isolated gateways")
     parser.add_argument("--forwarding", action="store_true", help="exercise shared forwarding and management from both endpoints")
     parser.add_argument("--lifecycle", action="store_true", help="exercise background launch, restart and stop")
@@ -726,6 +804,12 @@ ticket="{ticket}"
         (root / "client.toml").write_text(client_config)
         direct, status = start("client")
         assert not status["forwards"] and not host["forwards"]
+        if args.session_tools:
+            wait("client", lambda s: s["peer_connections"].get("host"))
+            return check_session_tools(root, keys, call, cli)
+        if args.pipe_exec:
+            wait("client", lambda s: s["peer_connections"].get("host"))
+            return check_pipe(cli, ipc)
         if args.file_copy:
             return check_file_copy(root, cli, ipc, keys["host"][:8])
         command = [cli, "--ipc", ipc("client"), "connect", "host"]

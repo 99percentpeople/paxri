@@ -18,3 +18,4 @@ jobs:
       - run: cargo test --locked -p peerhatch-config -p peerhatch-core -p peerhatch-files -p peerhatch-native -p peerhatch-terminal --lib
       - run: cargo build --locked -p peerhatch-cli -p peerhatch-gateway
       - run: python3 scripts/check-gateway.py --file-copy
+      - run: python3 scripts/check-gateway.py --pipe-exec

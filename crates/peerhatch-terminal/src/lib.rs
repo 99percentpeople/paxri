@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod exec;
+pub mod pipe;
 pub mod pty;
 
 pub const MAX_DATA: usize = 32 * 1024;

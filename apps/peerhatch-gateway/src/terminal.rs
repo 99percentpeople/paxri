@@ -1,15 +1,12 @@
-//! One PTY per authenticated terminal stream.
+//! Host paired terminal sessions and piped commands under the gateway account.
+mod pipe;
+mod tools;
+pub(crate) use tools::SessionTools;
 #[cfg(windows)]
 mod windows;
 
 use crate::{STREAM_TIMEOUT, streams::is_paired};
 use anyhow::{Context, Result, bail};
-use std::sync::Arc;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::{Semaphore, watch},
-    time::timeout,
-};
 use peerhatch_config::Config;
 use peerhatch_core::{PeerSession, StreamKind};
 use peerhatch_terminal::{
@@ -17,21 +14,29 @@ use peerhatch_terminal::{
     exec::Invocation,
     pty::{CommandBuilder, Output, Session},
 };
+use std::sync::Arc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{Semaphore, watch},
+    time::timeout,
+};
 
-pub async fn open_pty<S: PeerSession>(
+pub async fn open<S: PeerSession>(
     session: S,
-    size: Size,
+    size: Option<Size>,
     invocation: Option<Invocation>,
 ) -> Result<S::Stream> {
-    size.validate()?;
-    let kind = if invocation.is_some() {
-        StreamKind::Command
-    } else {
-        StreamKind::Terminal
+    let kind = match (size, &invocation) {
+        (Some(_), Some(_)) => StreamKind::Command,
+        (Some(_), None) => StreamKind::Terminal,
+        (None, Some(_)) => StreamKind::Pipe,
+        (None, None) => bail!("missing piped command"),
     };
     timeout(STREAM_TIMEOUT, async {
         let mut stream = session.open(kind).await?;
-        size.write(&mut stream).await?;
+        if let Some(size) = size {
+            size.write(&mut stream).await?;
+        }
         if let Some(command) = &invocation {
             command.write(&mut stream).await?;
         }
@@ -53,9 +58,20 @@ pub async fn open_pty<S: PeerSession>(
     })
     .await
     .context("opening native terminal timed out")?
+    .with_context(|| {
+        if kind == StreamKind::Pipe {
+            "Opening piped command (the remote gateway must support --pipe)"
+        } else {
+            "Opening native terminal"
+        }
+    })
 }
 
-async fn command_for(invocation: Option<Invocation>) -> Result<CommandBuilder> {
+async fn command_for(
+    invocation: Option<Invocation>,
+    tools: &SessionTools,
+    caller_id: &str,
+) -> Result<CommandBuilder> {
     let mut builder = match invocation {
         Some(Invocation::Program { program, args }) => {
             let mut builder = CommandBuilder::new(program);
@@ -80,7 +96,7 @@ async fn command_for(invocation: Option<Invocation>) -> Result<CommandBuilder> {
             shell
         }
     };
-    builder.env("TERM", "xterm-256color");
+    tools.apply(&mut builder, caller_id);
     #[cfg(windows)]
     if let Some(home) = std::env::var_os("USERPROFILE") {
         builder.cwd(home);
@@ -91,13 +107,15 @@ async fn command_for(invocation: Option<Invocation>) -> Result<CommandBuilder> {
 #[derive(Debug)]
 pub(super) struct Terminals {
     config: watch::Receiver<Arc<Config>>,
+    tools: SessionTools,
     slots: Semaphore,
 }
 
 impl Terminals {
-    pub(super) fn new(config: watch::Receiver<Arc<Config>>) -> Self {
+    pub(super) fn new(config: watch::Receiver<Arc<Config>>, tools: SessionTools) -> Self {
         Self {
             config,
+            tools,
             slots: Semaphore::new(16),
         }
     }
@@ -111,39 +129,55 @@ impl Terminals {
         let paired = |cfg: &Config| is_paired(cfg, &id);
         let mut config = self.config.clone();
         let (mut recv, mut send) = tokio::io::split(stream);
-        let size = timeout(STREAM_TIMEOUT, Size::read(&mut recv)).await??;
-        let prepared = if !paired(&config.borrow_and_update()) {
+        let size = if kind == StreamKind::Pipe {
+            None
+        } else {
+            Some(timeout(STREAM_TIMEOUT, Size::read(&mut recv)).await??)
+        };
+        let admission = if !paired(&config.borrow_and_update()) {
             Err(wire::DENIED)
         } else if !crate::account::is_standard_user()? {
             Err(wire::PRIVILEGED)
-        } else if let Ok(slot) = self.slots.try_acquire() {
-            let invocation = if kind == StreamKind::Command {
-                Some(timeout(STREAM_TIMEOUT, Invocation::read(&mut recv)).await??)
-            } else {
-                None
-            };
-            let command = command_for(invocation).await;
-            let latest = config.clone();
-            let peer_id = id.clone();
-            tokio::task::spawn_blocking(move || {
-                let config = latest.borrow();
-                if !is_paired(&config, &peer_id) {
-                    return Err(wire::DENIED);
-                }
-                command
-                    .and_then(|cmd| Session::spawn(cmd, size.into()))
-                    .map_err(|e| {
-                        eprintln!("start native terminal: {e:#}");
-                        wire::UNAVAILABLE
-                    })
-            })
-            .await?
-            .map(|(session, events)| (session, events, slot))
         } else {
-            Err(wire::BUSY)
+            self.slots.try_acquire().map_err(|_| wire::BUSY)
         };
+        let _slot = match admission {
+            Ok(slot) => slot,
+            Err(code) => {
+                send.write_u8(code).await?;
+                send.shutdown().await?;
+                return Ok(());
+            }
+        };
+        let invocation = if kind == StreamKind::Terminal {
+            None
+        } else {
+            Some(timeout(STREAM_TIMEOUT, Invocation::read(&mut recv)).await??)
+        };
+        let command = command_for(invocation, &self.tools, &id).await;
+        let Some(size) = size else {
+            return pipe::serve(command, recv, send, config, &id).await;
+        };
+        let latest = config.clone();
+        let peer_id = id.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let config = latest.borrow();
+            if !is_paired(&config, &peer_id) {
+                return Err(wire::DENIED);
+            }
+            command
+                .and_then(|mut cmd| {
+                    cmd.env("TERM", "xterm-256color");
+                    Session::spawn(cmd, size.into())
+                })
+                .map_err(|e| {
+                    eprintln!("start native terminal: {e:#}");
+                    wire::UNAVAILABLE
+                })
+        })
+        .await?;
         match prepared {
-            Ok((session, output, _slot)) if paired(&config.borrow_and_update()) => {
+            Ok((session, output)) if paired(&config.borrow_and_update()) => {
                 send.write_u8(wire::READY).await?;
                 let input = async {
                     loop {

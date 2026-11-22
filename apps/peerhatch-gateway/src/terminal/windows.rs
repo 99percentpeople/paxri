@@ -9,6 +9,23 @@ use anyhow::{Context, Result};
 use tokio::{fs, process::Command, time::timeout};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+pub(super) fn pipe_job(child: &tokio::process::Child) -> Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+    let handle = child.raw_handle().context("missing process handle")?;
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let job = OwnedHandle::from_raw_handle(job);
+        if AssignProcessToJobObject(job.as_raw_handle(), handle) == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(job)
+    }
+}
+
 fn candidates() -> Vec<PathBuf> {
     let roots: Vec<_> = ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
         .into_iter()
