@@ -2,8 +2,10 @@
 use crate::{
     Dashboard, Input,
     components::{
-        ButtonVariant::Ghost, Icon, SettingsGroup, SettingsSection, SettingsTable, Ui, actions,
-        dock::DockPanel,
+        ButtonVariant::Ghost,
+        Icon, SettingsGroup, SettingsSection, SettingsTable, Ui, actions,
+        dock::{DockNavigation, DockPanel},
+        single_line,
     },
     theme::{SPACE_1, SPACE_2, SPACE_3, SPACE_4},
 };
@@ -125,7 +127,6 @@ impl Dashboard {
         ui: Ui,
         item: Option<SettingsSection>,
         selected: bool,
-        compact: bool,
         count: Option<usize>,
         cx: &Context<Self>,
     ) -> crate::components::Button {
@@ -139,20 +140,18 @@ impl Dashboard {
                 .map(SettingsTable::label)
                 .unwrap_or_else(|| "all".into()),
         );
-        let button = if compact {
-            ui.icon_button(Ghost, id, icon, label)
-        } else {
-            let text = div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(div().truncate().child(label))
-                .when_some(count, |d, n| d.child(ui.muted(n.to_string()).text_xs()));
-            ui.button(Ghost, id, text).row().icon(icon)
-        };
-        button
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_1()
+            .child(single_line(div()).child(label))
+            .when_some(count, |d, n| d.child(ui.muted(n.to_string()).text_xs()));
+        ui.button(Ghost, id, text)
+            .row()
+            .icon(icon)
             .pressed(selected)
             .on_click(cx.listener(move |dashboard, _, _, cx| {
                 let editor = &mut dashboard.settings_editor;
@@ -166,7 +165,7 @@ impl Dashboard {
             }))
     }
 
-    pub(crate) fn settings(&self, ui: Ui, width: Pixels, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn settings(&self, ui: Ui, width: Pixels, cx: &mut Context<Self>) -> DockPanel {
         let editor = &self.settings_editor;
         let searching = !editor.query.is_empty();
         let (category, groups) =
@@ -189,14 +188,10 @@ impl Dashboard {
         let compact = width < px(560.);
         let mut navigation = div()
             .id("settings-navigation")
-            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .flex_1()
             .overflow_y_scroll()
-            .flex_none()
-            .w(px(if compact { 48. } else { 188. }))
-            .px(SPACE_2)
-            .py(SPACE_3)
-            .border_r_1()
-            .border_color(rgb(ui.colors.border))
             .flex()
             .flex_col()
             .gap(SPACE_1);
@@ -205,7 +200,6 @@ impl Dashboard {
                 ui,
                 None,
                 selected.is_none(),
-                compact,
                 Some(count),
                 cx,
             ));
@@ -218,7 +212,6 @@ impl Dashboard {
                 ui,
                 Some(page.section),
                 selected == Some(page.section.table),
-                compact,
                 searching.then(|| page.count()),
                 cx,
             ));
@@ -253,72 +246,47 @@ impl Dashboard {
             }
         }
 
+        let mut navigation = DockNavigation::new("Settings", navigation);
+        if let Some(path) = self.config_path.clone() {
+            navigation = navigation.action(
+                ui.icon_button(
+                    Ghost,
+                    "open-config",
+                    Icon::File,
+                    format!("Open config file · {}", path.display()),
+                )
+                .on_click(cx.listener(move |v, _, _, cx| v.open_config_file(path.clone(), cx))),
+            );
+        }
         let toolbar = div()
             .flex_none()
             .flex()
-            .items_center()
-            .gap(SPACE_2)
+            .justify_center()
             .px(SPACE_4)
             .py(SPACE_3)
             .border_b_1()
             .border_color(rgb(ui.colors.border))
-            .when(!compact, |t| {
-                t.child(
-                    div()
-                        .flex_1()
-                        .min_w(px(164.))
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Settings"),
-                )
-            })
-            .child(
-                div()
-                    .min_w_0()
-                    .w(px(760.))
-                    .when(compact, |field| field.flex_1())
-                    .child(editor.search.clone()),
-            )
-            .when(!compact || self.config_path.is_some(), |t| {
-                t.child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .when(!compact, |side| side.flex_1())
-                        .when_some(self.config_path.clone(), |side, path| {
-                            side.child(
-                                ui.icon_button(
-                                    Ghost,
-                                    "open-config",
-                                    Icon::File,
-                                    format!("Open config file · {}", path.display()),
-                                )
-                                .on_click(cx.listener(
-                                    move |v, _, _, cx| v.open_config_file(path.clone(), cx),
-                                )),
-                            )
-                        }),
-                )
-            });
-        div()
-            .size_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(toolbar)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .child(navigation)
-                    .child(DockPanel::scroll(
-                        "settings-scroll",
-                        editor.scroll.clone(),
-                        content,
-                    )),
-            )
+                    .max_w(px(760.))
+                    .child(editor.search.clone()),
+            );
+        DockPanel::fill(
+            div()
+                .size_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(toolbar)
+                .child(DockPanel::scroll(
+                    "settings-scroll",
+                    editor.scroll.clone(),
+                    content,
+                )),
+        )
+        .with_navigation(navigation)
     }
 
     fn clear_settings_search(

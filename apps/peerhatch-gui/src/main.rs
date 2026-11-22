@@ -62,13 +62,19 @@ struct Dashboard {
     refresh_presence: bool,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     home_scroll: ScrollHandle,
+    devices_pane: Option<pages::DevicesPane>,
+    forward_filter: Option<String>,
+    connect_field: Entity<Input>,
+    listen_field: Entity<Input>,
     settings_editor: pages::SettingsEditor,
     name_field: TextSetting,
     relay_field: TextSetting,
     profile_native: Option<Native>,
     gateway_details: bool,
     pairing_input: Entity<Input>,
+    review_request: Option<String>,
     peer_search: Entity<Input>,
+    peer_filter_open: bool,
     peer_system: Option<peerhatch_control::DevicePlatform>,
     local_code: Entity<Input>,
     copied_feedback: Option<Task<()>>,
@@ -130,6 +136,28 @@ impl Dashboard {
         );
     }
 
+    fn send_from_dialog(
+        &mut self,
+        command: Command,
+        window: &Window,
+        on_success: components::DialogSuccess,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saving {
+            return;
+        }
+        let dialog = window.window_handle();
+        self.request(
+            GatewayRequest {
+                command: Operation::Api(command),
+                on_complete: Some(Box::new(move |result, cx| {
+                    components::Dialog::complete(dialog, result, on_success, cx);
+                })),
+            },
+            cx,
+        );
+    }
+
     fn manage(&mut self, action: GatewayAction, cx: &mut Context<Self>) {
         if self.gateway_action.is_some()
             || self.pending.iter().any(|r| matches!(r.command, Operation::Manage(_)))
@@ -159,6 +187,10 @@ impl Dashboard {
             command,
             on_complete,
         } = request;
+        let saved_peer = match &command {
+            Operation::Api(Command::SaveForward { rule, .. }) => Some(rule.peer.clone()),
+            _ => None,
+        };
         let name_saved = matches!(command, Operation::Api(Command::SetDeviceName { .. }));
         let relay_saved = matches!(
             command,
@@ -285,6 +317,10 @@ impl Dashboard {
                     }
                     Ok(RequestResult::Gateway(status, legacy)) => {
                         view.watch_presence(&status, cx);
+                        if let Some(peer) = saved_peer && view.forward_filter.is_some() {
+                            view.forward_filter = Some(peer);
+                        }
+                        view.reconcile_device_selection(&status);
                         view.profile_native = legacy;
                         if view.local_name.as_ref() != status.display_name() {
                             view.local_name = status.display_name().to_owned().into();
@@ -369,13 +405,17 @@ impl Dashboard {
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
-        let peer_search = Input::new("", "Search devices", cx);
+        let peer_search = Input::search("Search", cx);
         cx.observe(&peer_search, |_, _, cx| cx.notify()).detach();
         let mut view = Self {
             presence_watch: None,
             refresh_presence: false,
             terminal_sessions: BTreeMap::new(),
             home_scroll: ScrollHandle::new(),
+            devices_pane: None,
+            forward_filter: None,
+            connect_field: Input::new("", "127.0.0.1:3000", cx),
+            listen_field: Input::new("", "127.0.0.1:8080", cx),
             settings_editor: pages::SettingsEditor::new(cx),
             name_field: TextSetting::new("", Self::commit_device_name, cx),
             relay_field: TextSetting::new("Automatic public relay", Self::commit_relay_url, cx),
@@ -383,8 +423,10 @@ impl Dashboard {
             gateway_details: false,
             local_code: Input::read_only("", cx),
             copied_feedback: None,
+            review_request: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),
             peer_search,
+            peer_filter_open: false,
             peer_system: None,
             saving: false,
             gateway_action: None,

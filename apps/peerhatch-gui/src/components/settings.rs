@@ -28,6 +28,9 @@ impl SettingsTable {
     }
 
     fn path(self, key: &str) -> Option<String> {
+        if key.is_empty() {
+            return None;
+        }
         match self {
             Self::Root => Some(key.to_owned()),
             Self::Named(table) => Some(format!("{table}.{key}")),

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -33,7 +34,7 @@ def check(binary, sidebar_only=False):
 
     profile = tempfile.TemporaryDirectory(prefix="p2p-tab-test-")
     config = Path(profile.name) / "node.toml"
-    config.write_text('[gateway]\nstartup = "manual"\n', encoding="utf8")
+    config.write_text('version = 1\n[gateway]\nstartup = "manual"\n', encoding="utf8")
     foreground = gui.GetForegroundWindow()
     original = api.GetCursorPos()
     app = subprocess.Popen([str(binary), "--ipc", "tab-test-" + uuid.uuid4().hex, "--config", str(config)],
@@ -157,12 +158,8 @@ def check(binary, sidebar_only=False):
         home_heading = page_heading(home)
         source_size = gui.GetClientRect(home)[2:]
         # A launch from a background terminal can leave the new window inactive.
-        menu = gui.ClientToScreen(home, (source_size[0] - round(152 * dpi), round(20 * dpi)))
-        api.SetCursorPos(menu)
-        api.mouse_event(down, 0, 0)
-        api.mouse_event(up, 0, 0)
-        time.sleep(0.15)
-        api.SetCursorPos((menu[0] - round(70 * dpi), menu[1] + round(42 * dpi)))
+        settings = gui.ClientToScreen(home, (source_size[0] - round(152 * dpi), round(20 * dpi)))
+        api.SetCursorPos(settings)
         api.mouse_event(down, 0, 0)
         api.mouse_event(up, 0, 0)
         time.sleep(0.15)
@@ -171,14 +168,33 @@ def check(binary, sidebar_only=False):
         def home_point(x, y):
             return gui.ClientToScreen(home, (round(x * dpi), round(y * dpi)))
 
-        def focus_top_menu():
-            key(home, win.VK_TAB)  # Selected tab -> new session -> workspace menu.
-            key(home, win.VK_TAB)
+        def choose_left_tabs():
+            # Search the active Settings page, then use its Tab bar position field.
+            width = gui.GetClientRect(home)[2] / dpi
+            center = (width + 220) / 2
+
+            def click(x, y):
+                pos = api.MAKELONG(round(x * dpi), round(y * dpi))
+                gui.PostMessage(home, win.WM_MOUSEMOVE, 0, pos)
+                gui.PostMessage(home, win.WM_LBUTTONDOWN, win.MK_LBUTTON, pos)
+                gui.PostMessage(home, win.WM_LBUTTONUP, 0, pos)
+                time.sleep(.12)
+
+            click(center, 70)
+            for char in "tab_placement":
+                gui.PostMessage(home, win.WM_CHAR, ord(char), 1)
+            time.sleep(.2)
+            click(min(width - 110, center + 260), 254)
+            key(home, win.VK_END)
+            key(home, win.VK_RETURN)
+            deadline = time.monotonic() + 3
+            while tomllib.loads(config.read_text(encoding="utf8")).get("gui", {}).get("tab_placement") != "left":
+                if time.monotonic() >= deadline:
+                    raise AssertionError("Settings did not save the left tab position")
+                time.sleep(.05)
 
         if sidebar_only:
-            focus_top_menu()
-            key(home, win.VK_UP)
-            key(home, win.VK_RETURN)  # Tabs on left.
+            choose_left_tabs()
             probe_y = round(gui.GetClientRect(home)[3] / dpi) - 22
 
             def expect_width(width, hovered=False):
@@ -197,64 +213,24 @@ def check(binary, sidebar_only=False):
                     time.sleep(0.03)
                 raise AssertionError(f"Expected the sidebar divider at {width} logical pixels")
 
-            def selected_tab_rows(compact=False):
-                # This patch covers the selected second tab's left edge in both sidebar layouts.
-                left, top = home_point(2, 77)
-                right, bottom = home_point(40, 115)
-                width, height = right - left, bottom - top
-                with screen_region((left, top), (width, height)) as read:
-                    pixels = read()
-                rail = pixels[:3]
-                x_edges, y_edges = [], []
-                for y in range(height):
-                    for x in range(width):
-                        offset = (y * width + x) * 4
-                        if pixels[offset:offset + 3] != rail:
-                            x_edges.append(x)
-                            y_edges.append(y)
-                if not x_edges:
-                    raise AssertionError("The selected sidebar tab is missing")
-                if compact:
-                    face_width = max(x_edges) - min(x_edges) + 1
-                    face_height = max(y_edges) - min(y_edges) + 1
-                    center = left + (min(x_edges) + max(x_edges) + 1) / 2
-                    if (abs(face_width - 32 * dpi) > 1 or abs(face_height - 32 * dpi) > 1
-                            or abs(center - home_point(22, 96)[0]) > 1):
-                        raise AssertionError(f"Expected a centered 32px square tab, got {face_width}x{face_height} device pixels")
-                return top + min(y_edges), top + max(y_edges)
-
-            def toggle_sidebar():
-                api.SetCursorPos(home_point(20, 20))
-                api.mouse_event(down, 0, 0)
-                api.mouse_event(up, 0, 0)
-                time.sleep(0.12)
-
-            def resize_sidebar(old, new, grab_offset):
+            def resize_sidebar(old, new, grab_offset, expected=None):
                 nonlocal pressed
                 api.SetCursorPos(home_point(old + grab_offset, probe_y - 35))
                 expect_width(old, hovered=True)
                 api.mouse_event(down, 0, 0)
                 pressed = True
                 api.SetCursorPos(home_point(new + grab_offset, probe_y - 35))
-                expect_width(new)
+                expect_width(new if expected is None else expected)
                 api.mouse_event(up, 0, 0)
                 pressed = False
 
-            expect_width(142)
-            resize_sidebar(142, 284, 2)
-            expanded_rows = selected_tab_rows()
-            toggle_sidebar()
-            expect_width(44)
-            assert selected_tab_rows(compact=True) == expanded_rows, "Collapsing the sidebar moved or resized the tab vertically"
-            toggle_sidebar()
-            expect_width(284)
-            assert selected_tab_rows() == expanded_rows, "Expanding the sidebar moved or resized the tab vertically"
-            toggle_sidebar()
-            expect_width(44)
-            resize_sidebar(44, 192, -2)
+            expect_width(220)
+            resize_sidebar(220, 284, 2)
+            resize_sidebar(284, 44, 0, expected=176)
+            resize_sidebar(176, 192, -2)
             api.SetCursorPos(home_point(350, probe_y))
             expect_width(192)
-            print("Passed. The compact tabs are centered squares and the sidebar resized and restored its width.")
+            print("Passed. The sidebar resized in both directions and stopped at its minimum width.")
             return
 
         trailing_x = max(180, min(350, round(gui.GetClientRect(home)[2] / dpi) - 250))
@@ -421,8 +397,8 @@ def check(binary, sidebar_only=False):
                 raise AssertionError(f"Selecting Settings shifted the close glyph by {selected - inactive}px")
 
         def choose_existing_settings(owner):
-            focus_top_menu()
-            key(home, win.VK_DOWN)
+            key(home, win.VK_TAB)  # Selected tab -> new session -> Settings.
+            key(home, win.VK_TAB)
             key(home, win.VK_RETURN)
             end = time.monotonic() + 2
             while time.monotonic() < end:
@@ -561,9 +537,7 @@ def check(binary, sidebar_only=False):
             time.sleep(0.13)
             if bool(gui.IsWindow(detached)) == should_dock or window("PeerHatch") != home:
                 raise AssertionError(f"Unexpected docking result for destination {drop}")
-        focus_top_menu()
-        key(home, win.VK_UP)      # Open Menu on its last item.
-        key(home, win.VK_RETURN)  # Tabs on left
+        choose_left_tabs()
         client_height = round(gui.GetClientRect(home)[3] / dpi)
         middle_y, bottom_y = client_height // 2, client_height - 8
 
@@ -593,7 +567,7 @@ def check(binary, sidebar_only=False):
         api.SetCursorPos(home_point(45, 60))
         api.mouse_event(down, 0, 0)
         pressed = True
-        api.SetCursorPos(home_point(195, 60))
+        api.SetCursorPos(home_point(285, 60))
         detached = wait_window("Settings — PeerHatch", 4)
         check_held_window(detached)
         api.SetCursorPos(home_point(45, bottom_y))
@@ -607,14 +581,14 @@ def check(binary, sidebar_only=False):
         check_sidebar(middle_y, False)
         if gui.IsWindow(detached):
             raise AssertionError("The floating Settings window did not dock in the sidebar")
-        check_close_position(94, 138, 60)
+        check_close_position(94, 216, 60)
         check_sidebar(60)
         # Tear out the second sidebar row. Keep its row until the original
         # press ends, including when the pointer is stationary on release.
         api.SetCursorPos(home_point(45, 94))
         api.mouse_event(down, 0, 0)
         pressed = True
-        api.SetCursorPos(home_point(195, 94))
+        api.SetCursorPos(home_point(285, 94))
         detached = wait_window("Settings — PeerHatch", 4)
         api.SetCursorPos(points[0])
         check_held_window(detached)
@@ -648,7 +622,7 @@ def check(binary, sidebar_only=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/peerhatch-gui.exe"))
-    parser.add_argument("--sidebar-only", action="store_true", help="check sidebar resizing and collapse only")
+    parser.add_argument("--sidebar-only", action="store_true", help="check sidebar resizing and its minimum width")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.exit(2, "This check requires an interactive Windows desktop.\n")

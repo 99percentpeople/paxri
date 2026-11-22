@@ -148,7 +148,7 @@ pub(super) fn forwards(rules: &BTreeMap<String, ForwardStatus>) -> String {
     report.text
 }
 
-pub(super) fn port_access(peer: &str, ports: &PortAccess) -> String {
+pub(super) fn port_access(ports: &PortAccess) -> String {
     let mut report = Report::new();
     let connect = ports
         .connect
@@ -159,7 +159,7 @@ pub(super) fn port_access(peer: &str, ports: &PortAccess) -> String {
         .iter()
         .map(|addr| ["Listen".into(), addr.to_string()]);
     report.table(
-        &format!("Port access for {peer}"),
+        "Gateway port access",
         ["ACCESS", "ADDRESS"],
         connect.chain(listen).collect(),
     );
@@ -185,6 +185,9 @@ pub(super) fn pairing(pairing: &PairingStatus) -> String {
             ["NAME", "SYSTEM", "DEVICE ID"],
             rows,
         );
+    }
+    if !pairing.pending_unpairs.is_empty() {
+        report.line(&format!("Awaiting unpair confirmation: {}", pairing.pending_unpairs.join(", ")));
     }
     if let Some(id) = &pairing.outgoing {
         report.line(&format!("Waiting for approval from {id}"));

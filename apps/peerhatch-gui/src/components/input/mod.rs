@@ -15,7 +15,6 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub type Input = TextInput<false>;
-pub type Textarea = TextInput<true>;
 
 pub(super) struct EditingFinished;
 impl<const MULTILINE: bool> EventEmitter<EditingFinished> for TextInput<MULTILINE> {}

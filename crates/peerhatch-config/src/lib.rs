@@ -16,11 +16,15 @@ pub struct Config {
     pub device_name: Option<String>,
     pub pairing_code: Option<String>,
     #[serde(default)]
+    pub pending_unpairs: BTreeMap<String, PendingUnpair>,
+    #[serde(default)]
     pub gui: gui::GuiSettings,
     #[serde(default)]
     pub gateway: startup::GatewaySettings,
     #[serde(default)]
     pub native: Native,
+    #[serde(default)]
+    pub port_access: PortAccess,
     #[serde(default)]
     pub peers: BTreeMap<String, Peer>,
     #[serde(default, deserialize_with = "tcp_services")]
@@ -30,6 +34,12 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn is_paired(&self, endpoint_id: &str) -> bool {
+        self.peers
+            .values()
+            .any(|peer| peer.endpoint_id.eq_ignore_ascii_case(endpoint_id))
+    }
+
     pub fn resolve_peer(&self, selector: &str) -> anyhow::Result<(&String, &Peer)> {
         peer_id::resolve(&self.peers, selector, |peer| &peer.endpoint_id)
     }
@@ -64,10 +74,20 @@ pub enum NativeChange {
     RelayUrl(Option<String>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingUnpair {
+    pub name: String,
+    pub ticket: String,
+    pub request_id: String,
+    pub pairing_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Peer {
     pub endpoint_id: String,
+    pub pairing_id: Option<String>,
     pub ticket: Option<String>,
     pub platform: Option<DevicePlatform>,
     /// Unix milliseconds of the last pairing or connection state transition observed locally.
@@ -78,8 +98,9 @@ pub struct Peer {
     // Stored by earlier gateways. The paired identity now grants terminal access.
     #[serde(rename = "allow_terminal", default)]
     _legacy_terminal: Option<serde::de::IgnoredAny>,
-    #[serde(default)]
-    pub ports: PortAccess,
+    // Read development profiles without promoting grants made to individual peers.
+    #[serde(default, rename = "ports")]
+    _legacy_ports: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -126,14 +147,14 @@ impl DevicePlatform {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PortAccess {
     pub connect: Vec<String>,
     pub listen: Vec<SocketAddr>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Service {
     pub target: String,
     pub allow_peers: Vec<String>,
@@ -253,13 +274,13 @@ pub fn parse(input: &str) -> Result<Config, String> {
     {
         return Err("native.relay_url requires an HTTP(S) URL with a host".into());
     }
-    for (name, peer) in &mut config.peers {
+    for address in &mut config.port_access.connect {
+        *address = tcp_target(address)?;
+    }
+    for (name, peer) in &config.peers {
         if peer.endpoint_id.len() != 64 || !peer.endpoint_id.bytes().all(|c| c.is_ascii_hexdigit())
         {
             return Err(format!("peers.{name}.endpoint_id requires 64 hex digits"));
-        }
-        for address in &mut peer.ports.connect {
-            *address = tcp_target(address)?;
         }
     }
     for (name, service) in &config.services {

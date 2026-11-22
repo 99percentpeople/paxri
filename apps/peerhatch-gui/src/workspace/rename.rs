@@ -28,8 +28,6 @@ impl Workspace {
             return;
         }
         self.end_rename(EndRename::Blur, cx);
-        self.dock
-            .update(cx, |dock, cx| dock.set_sidebar_collapsed(false, cx));
         let initial = page.label(cx);
         let input = Input::inline(&initial, cx);
         let focus = input.focus_handle(cx);

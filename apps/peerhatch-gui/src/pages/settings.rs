@@ -2,13 +2,14 @@ use super::settings_catalog as catalog;
 use crate::{
     Dashboard,
     components::{
-        Button, ButtonVariant::Secondary, Icon, SettingsGroup, SettingsSection, SettingsTable, Ui,
-        actions, setting_field,
+        Button, ButtonVariant::Secondary, Icon, Select, SettingsGroup, SettingsSection, SettingsTable,
+        Ui, actions, setting_field,
     },
     theme::{self, Appearance, SPACE_1, SPACE_2, SPACE_3},
 };
 use anyhow::Context as _;
 use gpui::{prelude::*, *};
+use peerhatch_config::gui::TabPlacement;
 use peerhatch_cli::gateway::Action;
 use peerhatch_config::startup::Startup;
 use peerhatch_control::{Command, GuiChange};
@@ -62,7 +63,7 @@ fn appearance_preview(mode: Appearance) -> Div {
 
 impl Dashboard {
     fn appearance_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
-        let chosen = theme::current(cx).appearance;
+        let settings = theme::current(cx);
         let cards = actions()
             .justify_end()
             .children(Appearance::ALL.into_iter().map(|mode| {
@@ -76,7 +77,7 @@ impl Dashboard {
                     px(132.),
                     icon.label(mode.label()),
                     appearance_preview(mode),
-                    chosen == mode,
+                    settings.appearance == mode,
                 )
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.send(
@@ -89,6 +90,21 @@ impl Dashboard {
             }));
         let mut group = SettingsGroup::new(catalog::APPEARANCE);
         group.setting(catalog::THEME, cards);
+        let position = Select::new(
+            "tab-placement",
+            settings.tab_placement,
+            cx.listener(|view, placement: &TabPlacement, _, cx| {
+                view.send(
+                    Command::SetGui {
+                        change: GuiChange::TabPlacement(*placement),
+                    },
+                    cx,
+                );
+            }),
+        )
+        .option_with_icon(TabPlacement::Top, "Top", Icon::TabsOnTop)
+        .option_with_icon(TabPlacement::Left, "Left", Icon::TabsOnLeft);
+        group.setting(catalog::TAB_PLACEMENT, setting_field(position));
         group
     }
 
@@ -279,6 +295,10 @@ impl Dashboard {
             Box::new(move || self.network_settings(ui, cx)),
         ));
         sources.push((
+            catalog::PORT_ACCESS,
+            Box::new(move || self.port_access_settings(ui, cx)),
+        ));
+        sources.push((
             catalog::APPEARANCE,
             Box::new(move || self.appearance_settings(ui, cx)),
         ));
@@ -286,21 +306,10 @@ impl Dashboard {
             catalog::TERMINAL,
             Box::new(move || self.terminal_settings(ui, cx)),
         ));
-        if let Some(status) = &self.status
-            && !status.services.is_empty()
-        {
-            sources.push((
-                catalog::SERVICES,
-                Box::new(move || {
-                    let mut services = SettingsGroup::new(catalog::SERVICES);
-                    for (name, target) in &status.services {
-                        let key = format!("{}.target", toml_edit::Key::new(name));
-                        services.value(&key, name, target, ui);
-                    }
-                    services
-                }),
-            ));
-        }
+        sources.push((
+            catalog::SERVICES,
+            Box::new(move || self.published_services(ui, cx)),
+        ));
         sources.push((
             catalog::RUNTIME,
             Box::new(move || self.runtime_settings(ui, cx)),

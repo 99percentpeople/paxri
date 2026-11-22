@@ -8,6 +8,12 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
+use peerhatch_config::Config;
+use peerhatch_core::{
+    PeerSession, StreamKind,
+    connection::{PathKind, PeerConnection, unix_time_ms},
+    session::{IncomingStream, PROTOCOL},
+};
 use std::{
     collections::BTreeMap,
     pin::Pin,
@@ -19,12 +25,6 @@ use tokio::{
     sync::{Mutex as AsyncMutex, Semaphore, mpsc, watch},
     task::JoinSet,
     time::timeout,
-};
-use peerhatch_config::Config;
-use peerhatch_core::{
-    PeerSession, StreamKind,
-    connection::{PathKind, PeerConnection, unix_time_ms},
-    session::{IncomingStream, PROTOCOL},
 };
 
 #[derive(Clone, Debug)]
@@ -80,6 +80,15 @@ impl AsyncWrite for NativeStream {
 }
 
 impl NativeSession {
+    pub(super) fn add_paths(&self, address: &mut EndpointAddr) {
+        address.addrs.extend(
+            self.conn
+                .paths()
+                .iter()
+                .map(|path| path.remote_addr().clone()),
+        );
+    }
+
     fn stream(&self, kind: StreamKind, rx: RecvStream, tx: SendStream) -> NativeStream {
         if kind == StreamKind::Files {
             // Give queued terminal input and redraws precedence over bulk file bytes.
@@ -208,16 +217,29 @@ impl Connections {
             headers: Arc::new(Semaphore::new(256)),
         }
     }
-    fn slot(&self, id: EndpointId) -> Arc<Slot> {
-        self.slots
+    fn paired_slot(&self, id: EndpointId) -> Result<Arc<Slot>> {
+        let grants = self.config.borrow();
+        anyhow::ensure!(grants.is_paired(&id.to_string()), "peer not paired");
+        Ok(self
+            .slots
             .lock()
             .expect("peer sessions")
             .entry(id)
             .or_default()
-            .clone()
+            .clone())
     }
     pub(super) fn live(&self, id: EndpointId) -> Option<NativeSession> {
         self.slots.lock().expect("peer sessions").get(&id)?.live()
+    }
+
+    pub(super) fn forget(&self, id: EndpointId) {
+        let slot = self.slots.lock().expect("peer sessions").remove(&id);
+        if let Some(session) = slot.and_then(|slot| slot.selected.send_replace(None)) {
+            session.conn.close(1u32.into(), b"device unpaired");
+        }
+        self.changes.0.send_modify(|times| {
+            times.remove(&id.to_string());
+        });
     }
 
     pub(super) fn snapshot(&self) -> BTreeMap<EndpointId, PeerConnection> {
@@ -233,7 +255,7 @@ impl Connections {
         ep: &Endpoint,
         addr: EndpointAddr,
     ) -> Result<NativeSession> {
-        let slot = self.slot(addr.id);
+        let slot = self.paired_slot(addr.id)?;
         if let Some(s) = slot.live() {
             return Ok(s);
         }
@@ -270,18 +292,13 @@ impl Connections {
 
     async fn admit(&self, conn: Connection) -> Result<()> {
         let remote = conn.remote_id();
-        let remote_text = remote.to_string();
-        if !self
-            .config
-            .borrow()
-            .peers
-            .values()
-            .any(|p| p.endpoint_id.eq_ignore_ascii_case(&remote_text))
-        {
-            conn.close(1u32.into(), b"peer not paired");
-            anyhow::bail!("peer not paired");
-        }
-        let slot = self.slot(remote);
+        let slot = match self.paired_slot(remote) {
+            Ok(slot) => slot,
+            Err(error) => {
+                conn.close(1u32.into(), b"peer not paired");
+                return Err(error);
+            }
+        };
         // Exactly one end serializes admission. Taking locks at both ends could deadlock
         // when each end simultaneously dials and accepts a different candidate.
         let selection = async {
@@ -299,7 +316,7 @@ impl Connections {
                 tx.write_all(&token).await?;
                 tx.finish()?;
                 match rx.read_u8().await? {
-                    0 => self.install(&slot, conn.clone(), token),
+                    0 => self.install(&slot, conn.clone(), token)?,
                     1 if previous.is_some() => conn.close(0u32.into(), b"session already selected"),
                     _ => anyhow::bail!("invalid peer session acknowledgement"),
                 }
@@ -319,7 +336,7 @@ impl Connections {
                 if !reuse {
                     // Publish before acknowledging: a simultaneous dial at the selector can
                     // only propose this token after we have made it usable in both directions.
-                    self.install(&slot, conn.clone(), token);
+                    self.install(&slot, conn.clone(), token)?;
                 }
                 tx.write_all(&[u8::from(reuse)]).await?;
                 tx.finish()?;
@@ -340,7 +357,20 @@ impl Connections {
         result
     }
 
-    fn install(&self, slot: &Arc<Slot>, conn: Connection, token: [u8; 16]) {
+    fn install(&self, slot: &Arc<Slot>, conn: Connection, token: [u8; 16]) -> Result<()> {
+        // Hold the grant through publishing the session. Revocation either sees and
+        // closes this connection or wins before a pending handshake can publish it.
+        let grants = self.config.borrow();
+        anyhow::ensure!(
+            grants.is_paired(&conn.remote_id().to_string())
+                && self
+                    .slots
+                    .lock()
+                    .expect("peer sessions")
+                    .get(&conn.remote_id())
+                    .is_some_and(|current| Arc::ptr_eq(current, slot)),
+            "peer no longer paired"
+        );
         let session = NativeSession {
             conn,
             token,
@@ -353,6 +383,7 @@ impl Connections {
         if let Some(old) = old {
             old.conn.close(0u32.into(), b"replaced session")
         }
+        drop(grants);
         super::addresses::exchange(
             self.endpoint.clone(),
             session.conn.clone(),
@@ -388,6 +419,7 @@ impl Connections {
             }
             slot.clear(&session, &changes);
         });
+        Ok(())
     }
 }
 

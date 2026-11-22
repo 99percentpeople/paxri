@@ -23,7 +23,7 @@ impl DropdownState {
         state
     }
 
-    pub(super) fn local(id: ElementId, window: &mut Window, cx: &mut App) -> Entity<Self> {
+    pub(crate) fn local(id: ElementId, window: &mut Window, cx: &mut App) -> Entity<Self> {
         window.use_keyed_state(id, cx, Self::init)
     }
 
@@ -328,21 +328,23 @@ impl DropdownContent {
         let outside = state.clone();
         let menu = state.read(cx);
         let count = self.items.len();
-        let mut width = px(234.);
         let mut height = (viewport.height - px(48.)).max(px(32.));
         let mut offset = SPACE_1;
+        let mut list = ui
+            .popover("content")
+            .flex_none()
+            .whitespace_nowrap()
+            .max_w((viewport.width - popup_margin(window) * 2.).max(px(1.)));
         if layout == DropdownLayout::Field
             && let Some(trigger) = menu.trigger_bounds
         {
             let placement = menu.field_placement(trigger, count, window);
-            width = trigger.size.width;
+            list = list.w(trigger.size.width);
             height = placement.height;
             offset = placement.top - trigger.bottom();
         }
-        let mut list = ui
-            .popover("content")
+        list = list
             .track_scroll(&menu.scroll)
-            .w(width.min(viewport.width - px(12.)).max(px(1.)))
             .max_h(height)
             .on_mouse_down_out(move |_, _, cx| outside.update(cx, DropdownState::dismiss));
         if layout == DropdownLayout::Field {

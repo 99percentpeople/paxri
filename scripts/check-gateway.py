@@ -129,7 +129,7 @@ def check_native_terminal(root, keys, call, start, cli, ipc, wait):
         assert not marker.exists()
     call("host", "pair", "accept", keys["client"])
     wait("client", lambda s: s["pairing"]["message"] == "Paired with host.")
-    assert not json.loads(call("host", "status", "--json"))["port_access"]
+    assert not any(json.loads(call("host", "status", "--json"))["gateway_port_access"].values())
     wait("host", lambda s: s["peer_connections"].get("client"))
     assert call("host", "exec", keys["client"][:8].upper(), "--", "printf", "paired") == "paired"
     # Launch the foreground program directly, including an empty argument and a literal shell metacharacter.
@@ -308,13 +308,13 @@ def check_pairing(root, keys, call, start, target_port, wait):
         assert links[0]["path"] == "direct" and links[0]["address"] and links[0]["rtt_ms"] is not None, links
     rejected("host", "status", "missing", "--json")
     assert status("client")["peer_platforms"] == {"Studio-2": platform}
-    assert not status("host")["port_access"] and not status("client")["port_access"]
+    assert not any(status("host")["gateway_port_access"].values()) and not any(status("client")["gateway_port_access"].values())
     call("spare", "pair", "join", old_code)
     wait("spare", lambda s: not s["pairing"]["outgoing"] and "invalid" in (s["pairing"]["message"] or "").lower())
     assert not status("spare")["peers"]
 
-    call("host", "port-access", "set", keys["client"][:8], "--connect", str(target_port))
-    assert str(target_port) in call("host", "port-access", "show", keys["client"])
+    call("host", "port-access", "set", "--connect", str(target_port))
+    assert str(target_port) in call("host", "port-access", "show")
     call("client", "forward", "add", "echo", "--peer", host_short, "--listen", "0", "--target", str(target_port))
     assert status("client")["forwards"]["echo"]["peer"] == "Studio-2"
     port = int(status("client")["forwards"]["echo"]["bound"].rsplit(":", 1)[1])
@@ -348,7 +348,7 @@ def check_pairing(root, keys, call, start, target_port, wait):
             assert f'platform = "{platform}"' in path.read_text()
     assert status("client")["peers"] == {"Studio": spare, "Studio-2": keys["host"]}
     assert status("client")["forwards"]["echo"]["peer"] == "Studio-2"
-    assert status("host")["port_access"]["Laptop"]["connect"] == [f"127.0.0.1:{target_port}"]
+    assert status("host")["gateway_port_access"]["connect"] == [f"127.0.0.1:{target_port}"]
     assert call("host", "pair", "code") == code
     # Even direct-only devices can use the previously copied code after the issuer restarts.
     call("spare", "pair", "join", code)
@@ -457,14 +457,169 @@ def check_lifecycle(client):
     print("Background gateway lifecycle passed.")
 
 
+def check_gateway_port_access(root, call, start, rule_state, target_port):
+    peers = ("first", "second", "unpaired")
+    ids = {name: call(name, "identity", str(root / (name + ".key"))) for name in peers}
+    address = f"127.0.0.1:{target_port}"
+    host_file = root / "host.toml"
+    host_file.write_text(
+        f'version=1\n[peers.first]\nendpoint_id="{ids["first"]}"\nports.connect=["{address}"]\n'
+        f'[peers.second]\nendpoint_id="{ids["second"]}"\n')
+    host_process, host = start("host")
+    empty = {"connect": [], "listen": []}
+    assert host["gateway_port_access"] == empty
+
+    def greeting(bound):
+        ip, port = bound.rsplit(":", 1)
+        with socket.create_connection((ip, int(port)), timeout=8) as connection:
+            try:
+                with connection.makefile("rb") as reply:
+                    return reply.readline()
+            except ConnectionResetError:
+                return b""
+
+    listeners = {}
+    for name in peers:
+        (root / (name + ".toml")).write_text(
+            f'version=1\n[peers.host]\nendpoint_id="{host["device_id"]}"\nticket="{host["ticket"]}"\n')
+        start(name)
+        call(name, "forward", "add", "pull", "--peer", "host", "--listen", "0", "--target", address)
+        listeners[name] = rule_state(name, "pull", lambda rule: rule["bound"])["bound"]
+    assert greeting(listeners["first"]) == b"", "Legacy per-device grant became active"
+
+    call("host", "port-access", "set", "--connect", str(target_port), "--listen", "0")
+    assert address in call("host", "port-access", "show")
+    reverse = {}
+    for name in peers[:2]:
+        assert greeting(listeners[name]) == b"ready\n", name
+        call(name, "forward", "add", "push", "--remote", "--peer", "host", "--listen", "0", "--target", address)
+        reverse[name] = rule_state(name, "push", lambda rule: rule["bound"])["bound"]
+        assert greeting(reverse[name]) == b"ready\n", name
+    assert greeting(listeners["unpaired"]) == b"", "Unpaired identity could reach a local target"
+    call("unpaired", "forward", "add", "push", "--remote", "--peer", "host", "--listen", "0", "--target", address)
+    rule_state("unpaired", "push", lambda rule: not rule["bound"] and
+               any(reason in (rule["error"] or "") for reason in ("DENIED", "peer not paired")))
+
+    call("host", "port-access", "set")
+    for name in peers[:2]:
+        rule_state(name, "push", lambda rule: "DENIED" in (rule["error"] or ""))
+        ip, port = reverse[name].rsplit(":", 1)
+        with socket.socket() as probe:
+            probe.settimeout(2)
+            assert probe.connect_ex((ip, int(port))) != 0, "Revoked listener still accepts connections"
+        assert greeting(listeners[name]) == b"", name
+    assert json.loads(call("host", "status", "--json"))["gateway_port_access"] == empty
+    call("host", "port-access", "set", "--connect", str(target_port), "--listen", "0")
+    host_process.terminate()
+    host_process.wait(timeout=12)
+    _, restarted = start("host")
+    assert restarted["gateway_port_access"] == {"connect": [address], "listen": ["127.0.0.1:0"]}
+    print("PASS: legacy grants stay closed, two paired peers share TCP and reverse grants, "
+          "unpaired TCP and reverse requests denied, grants persist on restart and revocation reaches both peers")
+
+
+def check_unpair(root, keys, call, start, wait, echo_port):
+    address = f"127.0.0.1:{echo_port}"
+    spare = call("spare", "identity", str(root / "spare.key"))
+    (root / "host.toml").write_text(
+        f'version=1\ndevice_name="Host"\n[peers.client]\nendpoint_id="{keys["client"]}"\n'
+        f'[port_access]\nlisten=["127.0.0.1:0"]\n[services.echo]\ntarget="{address}"\nallow_peers=["client"]\n')
+    host_process, host = start("host")
+    peer = f'endpoint_id="{keys["host"]}"\nticket="{host["ticket"]}"\n'
+    (root / "client.toml").write_text(
+        f'version=1\ndevice_name="Client"\n[peers.host]\n{peer}[peers.other-name]\n{peer}'
+        f'[peers.spare]\nendpoint_id="{spare}"\n[port_access]\nconnect=["{address}"]\n'
+        f'[services.shared]\ntarget="{address}"\nallow_peers=["host","spare","other-name"]\n'
+        '[forwards.pull]\npeer="host"\nlisten="127.0.0.1:0"\nservice="echo"\n'
+        f'[forwards.push]\npeer="other-name"\ndirection="remote"\nlisten="127.0.0.1:0"\ntarget="{address}"\n')
+    client, _ = start("client")
+    rules = wait("client", lambda s: all(r["bound"] for r in s["forwards"].values()))["forwards"]
+    addresses = [(ip, int(port)) for ip, port in (r["bound"].rsplit(":", 1) for r in rules.values())]
+    with contextlib.ExitStack() as stack:
+        flows = [stack.enter_context(socket.create_connection(addr, timeout=8)) for addr in addresses]
+        for flow in flows:
+            flow.sendall(b"x")
+            assert flow.recv(1) == b"x"
+        assert "both devices" in call("client", "pair", "remove", "other-name")
+        for flow in flows:
+            try:
+                assert flow.recv(1) == b"", "An unpaired connection still carries data"
+            except ConnectionResetError:
+                pass
+    def cleaned(state):
+        assert state["peers"] == {"spare": spare} and state["forwards"] == {}
+        assert state["service_allow_peers"] == {"shared": ["spare"]}
+        assert state["gateway_port_access"]["connect"] == [address]
+    cleaned(json.loads(call("client", "status", "--json")))
+    for addr in addresses:
+        with socket.socket() as probe:
+            probe.settimeout(2)
+            assert probe.connect_ex(addr) != 0, "Forward still listening"
+    client.terminate()
+    client.wait(timeout=10)
+    client, restarted = start("client")
+    cleaned(restarted)
+    remote = json.loads(call("host", "status", "--json"))
+    assert not remote["peers"] and remote["service_allow_peers"] == {"echo": []}
+    code = remote["pairing"]["code"]
+
+    def pair_again():
+        call("client", "pair", "join", code)
+        wait("host", lambda s: s["pairing"]["incoming"])
+        call("host", "pair", "accept", keys["client"])
+        wait("client", lambda s: s["peers"].get("Host") == keys["host"])
+
+    pair_again()
+    host_process.terminate()
+    host_process.wait(timeout=10)
+    # A cold client knows the peer is offline without waiting for QUIC idle expiry.
+    client.terminate()
+    client.wait(timeout=10)
+    client, _ = start("client")
+    assert "locally" in call("client", "pair", "remove", keys["host"][:8])
+    client.terminate()
+    client.wait(timeout=10)
+    client, state = start("client")
+    assert state["pairing"]["pending_unpairs"] == ["Host"] and "Host" not in state["peers"]
+    # Keep the old notice to simulate a late retry after another approved pairing.
+    saved_notice = (root / "client.toml").read_bytes()
+    start("host")
+
+    def wait_confirmation():
+        deadline = time.monotonic() + 70
+        while time.monotonic() < deadline:
+            if not json.loads(call("client", "status", "--json"))["pairing"].get("pending_unpairs"):
+                return
+            time.sleep(.4)
+        raise AssertionError("Peer did not confirm the saved unpair notice")
+
+    wait_confirmation()
+    assert not json.loads(call("host", "status", "--json"))["peers"]
+    pair_again()
+    client.terminate()
+    client.wait(timeout=10)
+    (root / "client.toml").write_bytes(saved_notice)
+    start("client")
+    wait_confirmation()
+    assert json.loads(call("host", "status", "--json"))["peers"] == {"Client": keys["client"]}
+    # This peer is offline and has no ticket.
+    call("client", "pair", "remove", spare[:8])
+    status = json.loads(call("client", "status", "--json"))
+    assert not status["peers"] and status["service_allow_peers"] == {"shared": []}
+    print("PASS: unpair closes live TCP in both directions, releases listeners, removes all identity aliases, "
+          "syncs both gateways, retries offline across restart, preserves a newer pairing and accepts a short ID")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
     parser.add_argument("--client", choices=("peerhatch", "peerhatch-gui"), default="peerhatch",
                         help="client executable to use for gateway commands")
+    parser.add_argument("--unpair", action="store_true", help="revoke an online or offline device and its active forwards")
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
     parser.add_argument("--native-terminal", action="store_true", help="exercise a native PTY between two local Linux gateways")
     parser.add_argument("--file-copy", action="store_true", help="copy files and directories between two isolated gateways")
+    parser.add_argument("--port-access", action="store_true", help="exercise global TCP permissions across distinct paired identities")
     parser.add_argument("--lifecycle", action="store_true", help="exercise background launch, restart and stop")
     args = parser.parse_args()
     if args.native_terminal and (not sys.platform.startswith("linux") or os.geteuid() == 0):
@@ -542,6 +697,10 @@ def main():
                     time.sleep(0.1)
             raise RuntimeError(f"{node} IPC did not become ready")
 
+        if args.unpair:
+            return check_unpair(root, keys, call, start, wait, streaming.server_address[1])
+        if args.port_access:
+            return check_gateway_port_access(root, call, start, rule_state, target.server_address[1])
         if args.native_terminal:
             check_native_terminal(root, keys, call, start, cli, ipc, wait)
             return
@@ -662,7 +821,7 @@ service="private"
                 assert conn.recv(1) == b""
             call("client", "forward", "add", "push", "--remote", "--peer", "host", "--listen", "0", "--target", target_port)
             rule_state("client", "push", lambda f: "DENIED" in (f["error"] or ""))
-            call("host", "port-access", "set", "client", "--listen", "0", "--connect", target_port)
+            call("host", "port-access", "set", "--listen", "0", "--connect", target_port)
             reverse = rule_state("client", "push", lambda f: f["bound"])
             assert reverse["direction"] == "remote" and reverse["bound"].startswith("127.0.0.1:")
             with connect(state, "pull") as conn, conn.makefile("rb") as replies:
@@ -700,7 +859,7 @@ service="private"
                 assert replies.read() == b"nepo llits"
             call("client", "forward", "resume", "push")
             rule_state("client", "push", lambda f: f["bound"])
-            call("host", "port-access", "set", "client")
+            call("host", "port-access", "set")
             rule_state("client", "push", lambda f: "DENIED" in (f["error"] or ""))
             call("client", "forward", "remove", "push")
             call("client", "forward", "remove", "pull")

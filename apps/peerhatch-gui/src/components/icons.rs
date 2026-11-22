@@ -21,16 +21,19 @@ pub enum Icon {
     Search,
     Close,
     Server,
-    Menu,
+    Ellipsis,
+    Pencil,
+    Pause,
+    Play,
+    Trash,
     ChevronDown,
     ChevronUp,
     ChevronRight,
     TabsOnLeft,
-    CollapseSidebar,
-    ExpandSidebar,
     TabsOnTop,
     Terminal,
     Plus,
+    Forward,
 }
 
 impl Icon {
@@ -62,6 +65,13 @@ impl Icon {
             (6.5, 8.5),
             (1.5, 2.),
         ];
+        const fn dot(x: f32) -> [(f32, f32); 8] {
+            [
+                (x - 0.5, 6.75), (x + 0.5, 6.75), (x + 1.25, 7.5), (x + 1.25, 8.5),
+                (x + 0.5, 9.25), (x - 0.5, 9.25), (x - 1.25, 8.5), (x - 1.25, 7.5),
+            ]
+        }
+        const ELLIPSIS: &[&[(f32, f32)]] = &[&dot(3.), &dot(8.), &dot(13.)];
         let strokes: &[&[(f32, f32)]] = match self {
             Self::Home => &[
                 &[(1., 7.4), (8., 1.8), (15., 7.4)],
@@ -198,6 +208,10 @@ impl Icon {
                 (11.6, 12.3),
                 (12.8, 10.7),
             ]],
+            Self::Forward => &[
+                &[(2., 5.), (14., 5.), (11., 2.)],
+                &[(14., 11.), (2., 11.), (5., 14.)],
+            ],
             Self::Copy => &[
                 &[(6., 6.), (14., 6.), (14., 14.), (6., 14.), (6., 6.)],
                 &[(9.8, 4.), (9.8, 2.), (2., 2.), (2., 9.8), (4., 9.8)],
@@ -265,25 +279,23 @@ impl Icon {
                 &[(12.5, 11.), (15., 11.)],
                 &[(9., 9.), (12.5, 9.), (12.5, 13.), (9., 13.), (9., 9.)],
             ],
-            Self::Menu => &[
-                &[(2., 3.5), (14., 3.5)],
-                &[(2., 8.), (14., 8.)],
-                &[(2., 12.5), (14., 12.5)],
+            Self::Ellipsis => ELLIPSIS,
+            Self::Pencil => &[
+                &[(2., 14.), (3., 10.), (11., 2.), (14., 5.), (6., 13.), (2., 14.)],
+                &[(9., 4.), (12., 7.)],
+            ],
+            Self::Pause => &[&[(5.5, 3.), (5.5, 13.)], &[(10.5, 3.), (10.5, 13.)]],
+            Self::Play => &[&[(4., 2.5), (13., 8.), (4., 13.5), (4., 2.5)]],
+            Self::Trash => &[
+                &[(2., 4.5), (14., 4.5)],
+                &[(5.5, 4.5), (5.5, 2.), (10.5, 2.), (10.5, 4.5)],
+                &[(3.5, 4.5), (4.5, 14.), (11.5, 14.), (12.5, 4.5)],
+                &[(6.5, 7.), (6.8, 11.5)], &[(9.5, 7.), (9.2, 11.5)],
             ],
             Self::ChevronDown => &[&[(3.5, 6.), (8., 10.5), (12.5, 6.)]],
             Self::ChevronUp => &[&[(3.5, 10.), (8., 5.5), (12.5, 10.)]],
             Self::ChevronRight => &[&[(6., 3.5), (10.5, 8.), (6., 12.5)]],
             Self::TabsOnLeft => &[FRAME, &[(5.5, 2.5), (5.5, 13.5)]],
-            Self::CollapseSidebar => &[
-                FRAME,
-                &[(5.5, 2.5), (5.5, 13.5)],
-                &[(11.5, 5.5), (9., 8.), (11.5, 10.5)],
-            ],
-            Self::ExpandSidebar => &[
-                FRAME,
-                &[(5.5, 2.5), (5.5, 13.5)],
-                &[(9., 5.5), (11.5, 8.), (9., 10.5)],
-            ],
             Self::TabsOnTop => &[FRAME, &[(1.5, 6.), (14.5, 6.)]],
             Self::Terminal => &[
                 &[(2., 3.5), (6.5, 8.), (2., 12.5)],
@@ -296,7 +308,7 @@ impl Icon {
             move |bounds, _, window, _| {
                 let scale = size / 16.;
                 let mut path = match self {
-                    Self::Windows => PathBuilder::fill(),
+                    Self::Windows | Self::Ellipsis => PathBuilder::fill(),
                     _ => PathBuilder::stroke(px(1.4 * scale)),
                 };
                 for stroke in strokes {

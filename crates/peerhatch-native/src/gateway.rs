@@ -74,6 +74,20 @@ impl NativeTransport {
             .insert(name, ticket.into());
     }
 
+    pub fn peer_ticket(&self, name: &str) -> Result<EndpointTicket> {
+        let mut addr = self.peers.read().expect("peer map").get(name).cloned().context("Unknown device address")?;
+        if let Some(session) = self.connections.live(addr.id) {
+            session.add_paths(&mut addr);
+        }
+        Ok(EndpointTicket::new(addr))
+    }
+
+    /// Called after publishing the configuration without this identity.
+    pub fn forget_peer(&self, id: EndpointId) {
+        self.peers.write().expect("peer map").retain(|_, address| address.id != id);
+        self.connections.forget(id);
+    }
+
     pub async fn initial_pairing_ticket(&self, direct_only: bool) -> Result<EndpointTicket> {
         crate::ticket(&self.endpoint, direct_only).await
     }
@@ -82,6 +96,7 @@ impl NativeTransport {
         pairing::Contact {
             name,
             ticket: EndpointTicket::new(self.endpoint.addr()),
+            supports_unpair: true,
             platform: Some(peerhatch_config::DevicePlatform::current()),
         }
     }

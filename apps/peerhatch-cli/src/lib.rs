@@ -96,7 +96,7 @@ pub enum Command {
         #[arg(trailing_var_arg = true, num_args = 1.., required_unless_present = "script", value_names = ["PROGRAM", "ARG"])]
         argv: Vec<String>,
     },
-    /// Manage the TCP addresses a peer may connect to or listen on here
+    /// Manage the TCP addresses paired devices may connect to or listen on here
     PortAccess {
         #[command(subcommand)]
         action: PortAction,

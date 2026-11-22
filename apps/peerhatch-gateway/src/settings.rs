@@ -1,10 +1,30 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, ensure};
-use toml_edit::{Array, DocumentMut, Table, TableLike, value};
 use peerhatch_config::file::subtable;
 use peerhatch_config::{Config, Destination, DevicePlatform, Direction};
 use peerhatch_control::Command;
+use toml_edit::{Array, DocumentMut, Table, TableLike, value};
+
+pub(super) enum PeerUpdate<'a> {
+    Address,
+    Pair(Option<&'a str>),
+}
+
+fn clear_pending(doc: &mut DocumentMut, id: &str) {
+    if let Some(table) = doc
+        .get_mut("pending_unpairs")
+        .and_then(|v| v.as_table_like_mut())
+    {
+        table.remove(id);
+        if table.is_empty() {
+            doc.remove("pending_unpairs");
+        }
+    }
+}
 
 pub struct SettingsFile {
     pub path: PathBuf,
@@ -37,6 +57,7 @@ impl SettingsFile {
         id: &str,
         ticket: &str,
         platform: Option<DevicePlatform>,
+        change: PeerUpdate<'_>,
     ) -> Result<(String, Config)> {
         let mut doc: DocumentMut = self.text.parse()?;
         let peers = subtable(doc.as_table_mut(), "peers")?;
@@ -61,6 +82,68 @@ impl SettingsFile {
                 peer.insert("platform", value(platform.as_str()));
             }
         }
+        if let PeerUpdate::Pair(generation) = change {
+            match generation {
+                Some(id) => {
+                    peer.insert("pairing_id", value(id));
+                }
+                None => {
+                    peer.remove("pairing_id");
+                }
+            }
+            clear_pending(&mut doc, &id.to_ascii_lowercase());
+        }
+        checked_document(doc)
+    }
+
+    pub fn prepare_unpair(
+        &self,
+        aliases: &BTreeSet<&str>,
+        forwards: &[String],
+        pending: Option<(&str, &peerhatch_config::PendingUnpair)>,
+    ) -> Result<(String, Config)> {
+        let mut doc: DocumentMut = self.text.parse()?;
+        let peers = subtable(doc.as_table_mut(), "peers")?;
+        for alias in aliases {
+            ensure!(
+                peers.remove(alias).is_some(),
+                "Unknown paired device {alias}"
+            );
+        }
+        if !forwards.is_empty() {
+            let rules = subtable(doc.as_table_mut(), "forwards")?;
+            for name in forwards {
+                rules.remove(name);
+            }
+        }
+        if let Some(services) = doc.get_mut("services").and_then(|s| s.as_table_like_mut()) {
+            for (_, service) in services.iter_mut() {
+                if let Some(grants) = service
+                    .get_mut("allow_peers")
+                    .and_then(|p| p.as_array_mut())
+                {
+                    grants.retain(|v| !v.as_str().is_some_and(|name| aliases.contains(name)));
+                }
+            }
+        }
+        if let Some((id, notice)) = pending {
+            let queue = subtable(doc.as_table_mut(), "pending_unpairs")?;
+            let entry = subtable(queue, id)?;
+            entry.insert("request_id", value(&notice.request_id));
+            entry.insert("ticket", value(&notice.ticket));
+            entry.insert("name", value(&notice.name));
+            if let Some(generation) = &notice.pairing_id {
+                entry.insert("pairing_id", value(generation));
+            } else {
+                entry.remove("pairing_id");
+            }
+        }
+        checked_document(doc)
+    }
+
+    pub fn confirm_unpair(&self, id: &str) -> Result<(String, Config)> {
+        let mut doc: DocumentMut = self.text.parse()?;
+        clear_pending(&mut doc, id);
         checked_document(doc)
     }
 
@@ -84,12 +167,11 @@ impl SettingsFile {
                     doc.remove("device_name");
                 }
             },
-            Command::SetPortAccess { peer, ports } => {
-                let peer = peer_table(&mut doc, peer)?;
+            Command::SetGatewayPortAccess { ports, .. } => {
                 if ports.connect.is_empty() && ports.listen.is_empty() {
-                    peer.remove("ports");
+                    doc.remove("port_access");
                 } else {
-                    let access = subtable(peer, "ports")?;
+                    let access = subtable(doc.as_table_mut(), "port_access")?;
                     access.insert(
                         "connect",
                         value(ports.connect.iter().map(String::as_str).collect::<Array>()),
@@ -105,6 +187,51 @@ impl SettingsFile {
                         ),
                     );
                 }
+            }
+            Command::SaveService {
+                name,
+                expected,
+                rename_to,
+                service,
+            } => {
+                let destination = rename_to.as_ref().unwrap_or(name);
+                ensure!(
+                    !destination.trim().is_empty() && !destination.chars().any(char::is_control),
+                    "Enter a single-line service name"
+                );
+                let services = subtable(doc.as_table_mut(), "services")?;
+                if expected.is_none() || destination != name {
+                    ensure!(
+                        !services.contains_key(destination),
+                        "Service {destination} already exists"
+                    );
+                }
+                if destination != name {
+                    ensure!(
+                        expected.is_some(),
+                        "Only an existing service can be renamed"
+                    );
+                    let entry = services
+                        .remove(name)
+                        .with_context(|| format!("Unknown service {name}"))?;
+                    services.insert(destination, entry);
+                }
+                let entry = subtable(services, destination)?;
+                entry.insert("target", value(&service.target));
+                entry.insert(
+                    "allow_peers",
+                    value(
+                        service
+                            .allow_peers
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Array>(),
+                    ),
+                );
+            }
+            Command::RemoveService { name, .. } => {
+                let services = subtable(doc.as_table_mut(), "services")?;
+                ensure!(services.remove(name).is_some(), "Unknown service {name}");
             }
             Command::SaveForward {
                 name,
@@ -212,7 +339,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn pairing_with_older_peers_preserves_saved_platform_and_grants() -> Result<()> {
+    fn pairing_with_older_peers_preserves_platform_without_promoting_legacy_grants() -> Result<()> {
         let id = "ab".repeat(32);
         let file = SettingsFile {
             path: PathBuf::new(),
@@ -225,7 +352,8 @@ mod tests {
             Some(DevicePlatform::Unknown),
             Some(DevicePlatform::Web),
         ] {
-            let (_, cfg) = file.prepare_peer("lab", &id, "updated-ticket", reported)?;
+            let (_, cfg) =
+                file.prepare_peer("lab", &id, "updated-ticket", reported, PeerUpdate::Address)?;
             let peer = &cfg.peers["lab"];
             let expected = if reported == Some(DevicePlatform::Web) {
                 DevicePlatform::Web
@@ -233,8 +361,67 @@ mod tests {
                 DevicePlatform::MacOs
             };
             assert_eq!(peer.platform, Some(expected));
-            assert_eq!(peer.ports.connect, ["127.0.0.1:8080"]);
+            assert!(cfg.port_access.connect.is_empty());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn published_service_edits_preserve_other_rules_and_validate_selected_peers() -> Result<()> {
+        use peerhatch_control::Service;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test.toml");
+        let original = format!(
+            "# custom configuration\nversion=1\nservices={{ other = {{ target='localhost:3000', allow_peers=[] }} }}\n[peers.lab]\nendpoint_id='{}'\n[forwards.web]\npeer='lab'\nlisten='127.0.0.1:0'\nservice='other'\n",
+            "ab".repeat(32)
+        );
+        fs::write(&path, &original)?;
+        let mut file = SettingsFile {
+            path: path.clone(),
+            text: original,
+        };
+        let mut service = Service {
+            target: "localhost:8000".into(),
+            allow_peers: vec![],
+        };
+        let create = |service: &Service| Command::SaveService {
+            name: "dev.web".into(),
+            rename_to: None,
+            expected: None,
+            service: service.clone(),
+        };
+        let (text, cfg) = file.prepare(&create(&service))?;
+        assert_eq!(cfg.services["dev.web"], service);
+        file.persist(text)?;
+        assert!(file.prepare(&create(&service)).is_err());
+        let initial = service.clone();
+        let edit = |to: &str, service: &Service| Command::SaveService {
+            name: "dev.web".into(),
+            rename_to: Some(to.into()),
+            expected: Some(initial.clone()),
+            service: service.clone(),
+        };
+        service.allow_peers.push("missing".into());
+        assert!(file.prepare(&edit("renamed", &service)).is_err());
+        service.allow_peers = vec!["lab".into()];
+        service.target = "[::1]:8080".into();
+        assert!(file.prepare(&edit("other", &service)).is_err());
+        let (text, cfg) = file.prepare(&edit("renamed", &service))?;
+        assert!(!cfg.services.contains_key("dev.web"));
+        assert_eq!(cfg.services["renamed"], service);
+        file.persist(text)?;
+        let (text, _) = file.prepare(&Command::RemoveService {
+            name: "renamed".into(),
+            expected: service,
+        })?;
+        file.persist(text)?;
+        let saved = fs::read_to_string(path)?;
+        assert!(saved.contains("# custom configuration"));
+        let cfg = peerhatch_config::parse(&saved).map_err(anyhow::Error::msg)?;
+        assert_eq!(cfg.services.keys().collect::<Vec<_>>(), ["other"]);
+        assert_eq!(cfg.forwards["web"].destination.address(), "other");
+        assert!(cfg.port_access.connect.is_empty());
         Ok(())
     }
 

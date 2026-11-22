@@ -2,6 +2,7 @@ version = 1
 
 [gui]
 appearance = "system"
+tab_placement = "top" # top or left
 
 [gui.terminal]
 scheme = "follow-app"

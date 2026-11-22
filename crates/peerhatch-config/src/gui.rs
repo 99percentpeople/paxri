@@ -11,6 +11,20 @@ pub enum Appearance {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabPlacement {
+    #[default]
+    Top,
+    Left,
+}
+
+impl TabPlacement {
+    fn is_top(&self) -> bool {
+        *self == Self::Top
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TerminalScheme {
     #[default]
@@ -75,6 +89,8 @@ impl Default for TerminalAppearance {
 #[serde(default, deny_unknown_fields)]
 pub struct GuiSettings {
     pub appearance: Appearance,
+    #[serde(skip_serializing_if = "TabPlacement::is_top")]
+    pub tab_placement: TabPlacement,
     pub terminal: TerminalAppearance,
 }
 
@@ -82,6 +98,7 @@ pub struct GuiSettings {
 #[serde(rename_all = "snake_case")]
 pub enum GuiChange {
     Appearance(Appearance),
+    TabPlacement(TabPlacement),
     Scheme(TerminalScheme),
     CursorShape(CursorShape),
     BlinkCursor(bool),

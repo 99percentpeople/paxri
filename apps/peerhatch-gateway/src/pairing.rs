@@ -1,5 +1,10 @@
-use super::Gateway;
+use super::{Gateway, settings::PeerUpdate};
 use anyhow::{Context, Result, ensure};
+use peerhatch_control::{PairingPeer, PairingStatus};
+use peerhatch_native::{
+    EndpointTicket,
+    gateway::pairing::{Contact, Decision, Invitation, JoinRequest},
+};
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -9,13 +14,8 @@ use tokio::{
     sync::{Mutex, oneshot},
     task::AbortHandle,
 };
-use peerhatch_control::{PairingPeer, PairingStatus};
-use peerhatch_native::{
-    EndpointTicket,
-    gateway::pairing::{Contact, Decision, Incoming, Invitation},
-};
 
-fn random_id() -> Result<String> {
+pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("Generate pairing identifier: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -52,10 +52,19 @@ impl Pairings {
         self.replies.retain(|_, (until, _)| *until > Instant::now());
     }
 
-    pub(super) fn status(&mut self, code: Option<&str>) -> PairingStatus {
+    pub(super) fn status(&mut self, config: &peerhatch_config::Config) -> PairingStatus {
         self.prune();
         PairingStatus {
-            code: code.filter(|_| self.token.is_some()).map(str::to_owned),
+            pending_unpairs: config
+                .pending_unpairs
+                .values()
+                .map(|p| p.name.clone())
+                .collect(),
+            code: config
+                .pairing_code
+                .as_deref()
+                .filter(|_| self.token.is_some())
+                .map(str::to_owned),
             incoming: self
                 .pending
                 .iter()
@@ -71,9 +80,9 @@ impl Pairings {
         }
     }
 
-    pub(super) fn receive(&mut self, incoming: Incoming) {
+    pub(super) fn receive(&mut self, incoming: JoinRequest) {
         self.prune();
-        let Incoming {
+        let JoinRequest {
             token,
             peer,
             reply,
@@ -101,6 +110,22 @@ impl Pairings {
             let _ = reply.send(Decision::Rejected(
                 "A request from this device is already pending".into(),
             ));
+        }
+    }
+
+    pub(super) fn forget(&mut self, id: &str) {
+        if let Some(request) = self.pending.remove(id) {
+            for reply in request.replies {
+                let _ = reply.send(Decision::Rejected("Device unpaired".into()));
+            }
+        }
+        self.replies.retain(|(peer, _), _| peer != id);
+        if self
+            .outgoing
+            .as_ref()
+            .is_some_and(|request| request.id == id)
+        {
+            let _ = self.cancel();
         }
     }
 
@@ -169,7 +194,9 @@ impl Gateway {
         if peer.ticket.as_ref() == Some(&text) {
             return Ok(());
         }
-        let (updated, config) = self.file.prepare_peer(&name, &id, &text, None)?;
+        let (updated, config) =
+            self.file
+                .prepare_peer(&name, &id, &text, None, PeerUpdate::Address)?;
         self.file.persist(updated)?;
         self.transport.set_peer(name, ticket);
         self.apply_config(config);
@@ -185,7 +212,7 @@ impl Gateway {
         self.transport.contact(name)
     }
 
-    fn save_peer(&mut self, peer: &Contact) -> Result<String> {
+    fn save_peer(&mut self, peer: &Contact, request_id: &str) -> Result<String> {
         let id = peer.id().to_string();
         ensure!(id != self.transport.id(), "Cannot pair with this device");
         let peers = &self.config.peers;
@@ -205,9 +232,13 @@ impl Gateway {
             }
             alias
         };
-        let (text, config) =
-            self.file
-                .prepare_peer(&alias, &id, &peer.ticket.to_string(), peer.platform)?;
+        let (text, config) = self.file.prepare_peer(
+            &alias,
+            &id,
+            &peer.ticket.to_string(),
+            peer.platform,
+            PeerUpdate::Pair(peer.supports_unpair.then_some(request_id)),
+        )?;
         self.file.persist(text)?;
         self.transport.set_peer(alias.clone(), peer.ticket.clone());
         self.apply_config(config);
@@ -230,7 +261,8 @@ impl Gateway {
             .peer
             .clone();
         let (decision, message) = if accept {
-            let alias = self.save_peer(&peer)?;
+            let generation = self.pairing.pending[id].request_id.clone();
+            let alias = self.save_peer(&peer, &generation)?;
             (
                 Decision::Accepted(self.contact()),
                 format!("Paired with {alias}."),
@@ -284,7 +316,7 @@ impl Gateway {
                 return;
             }
             let message = match result.and_then(|decision| match decision {
-                Decision::Accepted(peer) => g.save_peer(&peer),
+                Decision::Accepted(peer) => g.save_peer(&peer, &attempt),
                 Decision::Rejected(reason) => anyhow::bail!("{reason}"),
             }) {
                 Ok(alias) => format!("Paired with {alias}."),

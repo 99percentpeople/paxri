@@ -162,6 +162,7 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
         let ser = ValueSerializer::new();
         let (table, key, mut value) = match change {
             GuiChange::Appearance(v) => (gui, "appearance", v.serialize(ser)?),
+            GuiChange::TabPlacement(v) => (gui, "tab_placement", v.serialize(ser)?),
             GuiChange::Scheme(v) => (subtable(gui, "terminal")?, "scheme", v.serialize(ser)?),
             GuiChange::CursorShape(v) => (
                 subtable(gui, "terminal")?,

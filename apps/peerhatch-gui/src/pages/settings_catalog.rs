@@ -5,6 +5,11 @@ pub(super) const DEVICE: SettingsSection =
     SettingsSection::new(SettingsTable::Root, "This device", Icon::Monitor);
 pub(super) const GATEWAY: SettingsSection =
     SettingsSection::new(SettingsTable::Named("gateway"), "Gateway", Icon::Server);
+pub(super) const PORT_ACCESS: SettingsSection = SettingsSection::new(
+    SettingsTable::Named("port_access"),
+    "Port access",
+    Icon::Server,
+);
 pub(super) const NETWORK: SettingsSection =
     SettingsSection::new(SettingsTable::Named("native"), "Network", Icon::Globe);
 pub(super) const APPEARANCE: SettingsSection =
@@ -27,10 +32,18 @@ pub(super) const INTERFACE: SettingsSection =
 
 pub(super) fn page_for(section: SettingsSection) -> SettingsSection {
     let table = section.table.top_level();
-    [DEVICE, GATEWAY, NETWORK, INTERFACE, SERVICES, RUNTIME]
-        .into_iter()
-        .find(|page| page.table == table)
-        .unwrap_or(SettingsSection { table, ..section })
+    [
+        DEVICE,
+        GATEWAY,
+        NETWORK,
+        PORT_ACCESS,
+        INTERFACE,
+        SERVICES,
+        RUNTIME,
+    ]
+    .into_iter()
+    .find(|page| page.table == table)
+    .unwrap_or(SettingsSection { table, ..section })
 }
 
 pub(super) const DEVICE_NAME: SettingSpec = SettingSpec::new(
@@ -68,6 +81,12 @@ pub(super) const THEME: SettingSpec = SettingSpec::new(
     "Theme",
     "Use the system appearance or choose a light or dark theme.",
     "",
+);
+pub(super) const TAB_PLACEMENT: SettingSpec = SettingSpec::new(
+    "tab_placement",
+    "Tab bar position",
+    "Show workspace tabs across the top or along the left of each window.",
+    "layout sidebar vertical horizontal",
 );
 pub(super) const SCHEME: SettingSpec = SettingSpec::new(
     "scheme",

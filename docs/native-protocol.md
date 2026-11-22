@@ -11,8 +11,11 @@ Each computer owns one version 1 TOML file. For a working pair of service and li
 | `version` | Integer `1` |
 | `device_name` | Display name, defaulting to the computer name |
 | `pairing_code` | Persistent invitation maintained by the gateway |
+| `peers.<alias>.pairing_id` | Approval request ID for pairings established by two gateways with unpair support |
+| `pending_unpairs.<device-id>` | Gateway-managed notice awaiting acknowledgement, with the peer ticket and pairing generation |
 | `gateway.startup` | `manual`, `gui`, `login`, or `system`. Use the GUI or CLI to also update OS registration |
 | `gui.appearance` | `system` (default), `light`, or `dark` |
+| `gui.tab_placement` | Position of the workspace tab bar in all windows, `top` (default) or `left` |
 | `gui.terminal.scheme` | `follow-app` (default), `light`, `dark`, or `midnight` |
 | `gui.terminal.cursor_shape`, `blink_cursor` | `underline` (default), `bar`, or `block`. Blinking defaults to false |
 | `native.relay_url` | Optional HTTP(S) relay. Use HTTPS for a public deployment |
@@ -21,11 +24,21 @@ Each computer owns one version 1 TOML file. For a working pair of service and li
 | `peers.<alias>.endpoint_id`, `ticket` | 64 hex digits identifying the device and its optional addressing ticket |
 | `peers.<alias>.platform` | Reported OS, including `windows`, `linux`, `macos`, or `web`. Unrecognized values display as unknown |
 | `peers.<alias>.last_status_change_ms` | Last recorded pairing or connection transition, used by the device list |
-| `peers.<alias>.ports.connect`, `ports.listen` | TCP destinations the peer can reach here and addresses it can listen on here. Both lists start empty |
+| `port_access.connect`, `port_access.listen` | TCP destinations all paired peers can reach here and addresses they can listen on here. Both lists start empty |
 | `services.<name>.target`, `allow_peers` | Local TCP destination and the aliases allowed to open it |
 | `forwards.<name>.listen`, `direction` | Listen address and `local` (default) or `remote` |
 | `forwards.<name>.peer` | Paired device that owns the other end |
 | `forwards.<name>.service` or `target` | Named service for a local listener or explicit TCP destination. Choose one |
+
+Set these lists on the computer that receives the connection or listen request. For example:
+
+```toml
+[port_access]
+connect = ["127.0.0.1:3000"]
+listen = ["127.0.0.1:8080"]
+```
+
+Use `peerhatch port-access show` to inspect both lists. `peerhatch port-access set` replaces both lists, and omitting both options clears them. Development profiles with old `peers.<alias>.ports` entries still open. Those entries grant no access in the new gateway. Add an address to the global lists only if all paired devices should be allowed to use it. Named services retain their own `allow_peers` lists.
 
 A listen address can be a loopback address, a particular interface, `0.0.0.0` or `[::]`. Port zero asks the OS for an available port. A bare port in the CLI uses IPv4 loopback. The running gateway reports the actual bound address.
 
@@ -36,6 +49,8 @@ Pairing uses the separate ALPN `p2p-tunnel/pair/1`. The code `p2p1.<endpoint tic
 The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases and permissions. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. New peers can use PTY and files and begin with empty TCP allowlists.
 
 On an established connection, each peer can open a unidirectional stream to announce updated addressing tickets. Version byte `1` precedes the sequence of UTF-8 tickets, each with a big-endian `u16` length of at most 8192 bytes. The receiver verifies the device ID before updating its cache.
+
+Unpairing commits a local revocation and its pending notification in one settings write, closes the shared session, and releases the affected listeners. The gateway sends `{"unpair":{"pairing_id":"…"}}` on the independent pairing protocol so confirmation can finish after application streams have closed. The recipient can revoke only the authenticated caller and acknowledges after its settings are saved. Already-absent peers acknowledge idempotently. Re-approval establishes a new request ID and cancels old outgoing notices. A recipient retains its newer pairing if it receives an earlier generation. Offline notices survive restarts and are retried using the saved peer address.
 
 A gateway announces its availability to paired peers by establishing the shared session when it starts, learns a new pairing or address, or regains local network or relay connectivity. Each side observes admission and closure on the same connection. A lost connection triggers a reconnect attempt. An offline peer can announce itself when it comes back. Announcements use at most four concurrent dials and open no terminal or application stream.
 
@@ -54,11 +69,13 @@ The peer with the lexicographically smaller public key serializes connection sel
 
 ## TCP opening, permissions, and EOF
 
-On a type 1 stream the initiator immediately sends a big-endian `u32` byte length and 1–4096 bytes of UTF-8 JSON. For example, `{"type":"OPEN","service":"dev-web"}` opens a named service. `{"type":"OPEN_TCP","target":"127.0.0.1:3000"}` opens a target authorized in `ports.connect` or explicitly published to this peer. Device-information requests are also authenticated.
+On a type 1 stream the initiator immediately sends a big-endian `u32` byte length and 1–4096 bytes of UTF-8 JSON. For example, `{"type":"OPEN","service":"dev-web"}` opens a named service. `{"type":"OPEN_TCP","target":"127.0.0.1:3000"}` opens a target authorized in `port_access.connect` or explicitly published to this peer. Device-information requests are also authenticated.
+
+A paired gateway can send `{"type":"LIST_SERVICES"}` on the same stream kind. The publisher returns `{"type":"SERVICES","names":["dev-web"]}` with names sorted by key, filtered using the same authenticated device ID and service allowlist as `OPEN`. An empty list is a successful reply. An unpaired caller receives `DENIED`. The catalog reply uses the same length prefix and allows up to 512 KiB of JSON. An oversized catalog returns `CATALOG_TOO_LARGE`. Older publishers return `INVALID_REQUEST`. Each later `OPEN` checks the current permissions again.
 
 The host looks up the authenticated device and opens the approved TCP destination. It responds with `{"type":"OK"}` or `{"type":"ERROR","code":"DENIED"}` using the same framing. Other errors are `TARGET_REFUSED`, `TARGET_TIMEOUT`, `TARGET_UNREACHABLE`, and `INVALID_REQUEST`. Unknown and unauthorized services both return `DENIED`. After `OK`, exchange raw bytes. TCP EOF finishes only that sending direction. Preserve buffered bytes following the handshake and allow the reverse direction to complete.
 
-A type 4 request carries length-prefixed JSON with a `listen` address and a random 16-byte `id`. After checking `ports.listen`, the host replies with `bound` or `error` and keeps the control stream open. Each accepted TCP socket starts a type 5 stream with the raw 16-byte ID. The initiator checks the peer and active ID before connecting its local target. Closing the control stream releases the port. Removing authorization also releases the listener. Existing streams can finish. Persisted rules retry after a disconnect.
+A type 4 request carries length-prefixed JSON with a `listen` address and a random 16-byte `id`. After checking the authenticated peer and `port_access.listen`, the host replies with `bound` or `error` and keeps the control stream open. Each accepted TCP socket starts a type 5 stream with the raw 16-byte ID. The initiator checks the peer and active ID before connecting its local target. Closing the control stream releases the port. Removing authorization also releases the listener. Existing streams can finish. Persisted rules retry after a disconnect.
 
 ## Native PTY
 

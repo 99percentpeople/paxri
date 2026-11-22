@@ -5,7 +5,6 @@ use crate::components::{
     dock::{DockDrag, DockLayout, DockPanel, DockPlacement, DockSettings, DockState, DockTabs},
     observe_window_focus, tooltip,
 };
-use crate::pages::device::DeviceSettings;
 
 mod dock;
 mod drag;
@@ -31,10 +30,6 @@ const WORKSPACE_SIZE: Size<Pixels> = size(px(990.), px(720.));
 enum Page {
     Home,
     Settings,
-    Device {
-        peer: SharedString,
-        view: Entity<DeviceSettings>,
-    },
     Terminal {
         peer: SharedString,
         number: usize,
@@ -68,25 +63,22 @@ impl Page {
         match self {
             Self::Home => "PeerHatch".into(),
             Self::Settings => "Settings — PeerHatch".into(),
-            Self::Device { peer, .. } => format!("{peer} — Device settings").into(),
             Self::Terminal { peer, number, .. } => format!("{peer} — Terminal {number}").into(),
         }
     }
 
-    fn icon(&self, cx: &App) -> Icon {
+    fn icon(&self) -> Icon {
         match self {
             Self::Home => Icon::Home,
             Self::Settings => Icon::Settings,
-            Self::Device { view, .. } => Icon::device(view.read(cx).platform(cx)),
             Self::Terminal { .. } => Icon::Terminal,
         }
     }
 
     fn label(&self, cx: &App) -> SharedString {
         match self {
-            Self::Home => "Home".into(),
+            Self::Home => "Devices".into(),
             Self::Settings => "Settings".into(),
-            Self::Device { peer, .. } => peer.clone(),
             Self::Terminal { peer, title, .. } => title.read(cx).label(peer),
         }
     }
@@ -98,11 +90,10 @@ impl Page {
         selected: bool,
         close: impl IntoElement,
         label: impl IntoElement,
-        cx: &App,
     ) -> Div {
         ui.tab(
             settings,
-            self.icon(cx),
+            self.icon(),
             label,
             selected,
             (*self != Self::Home).then_some(close),
@@ -111,9 +102,8 @@ impl Page {
 
     fn element_id(&self) -> ElementId {
         match self {
-            Self::Device { view, .. } => ("device-tab", view.entity_id()).into(),
             Self::Terminal { view, .. } => ("terminal-tab", view.entity_id()).into(),
-            Self::Home => "Home".into(),
+            Self::Home => "Devices".into(),
             Self::Settings => "Settings".into(),
         }
     }
@@ -138,7 +128,6 @@ pub(super) struct Workspace {
     tabs: Vec<Page>,
     active: Page,
     dock: Entity<DockState<Page>>,
-    menu: Entity<DropdownState>,
     session_menu: Entity<DropdownState>,
     rename: Option<TabRename>,
     tab_focus: FocusHandle,
@@ -160,7 +149,7 @@ impl Workspace {
         Self::open(
             dashboard,
             Page::Home,
-            DockSettings::default(),
+            DockSettings::default().with_placement(theme::current(cx).tab_placement),
             WorkspaceWindow::Initial,
             cx,
         )
@@ -204,9 +193,19 @@ impl Workspace {
             chrome::hide_system_buttons(w);
             cx.new(|cx| {
                 cx.observe(&dashboard, |_, _, cx| cx.notify()).detach();
-                let menu = DropdownState::new(w, cx);
-                menu.read(cx).focus_handle(cx).focus(w);
+                cx.observe_global_in::<theme::Preferences>(w, |v: &mut Self, w, cx| {
+                    let placement = theme::current(cx).tab_placement;
+                    if v.dock.read(cx).placement() != placement {
+                        v.cancel_tab_drag(w, cx);
+                        v.settle_tab(cx);
+                        v.dock.update(cx, |dock, cx| {
+                            dock.set_placement(placement, &v.active, cx)
+                        });
+                    }
+                })
+                .detach();
                 let tab_focus = cx.focus_handle().tab_stop(true);
+                tab_focus.focus(w);
                 observe_window_focus(w, &tab_focus, cx);
                 cx.observe_window_activation(w, |v: &mut Self, w, cx| {
                     if !w.is_window_active() {
@@ -222,7 +221,6 @@ impl Workspace {
                     tabs: vec![page.clone()],
                     active: page,
                     dock: DockState::new(settings, w, cx),
-                    menu,
                     session_menu: DropdownState::new(w, cx),
                     rename: None,
                     tab_focus,
@@ -279,7 +277,7 @@ impl Workspace {
             self.dashboard.update(cx, |d, cx| d.inspect_startup(cx));
         }
         self.active = page;
-        self.dismiss_menus(cx);
+        self.session_menu.update(cx, DropdownState::dismiss);
         cx.notify();
     }
 
@@ -335,25 +333,6 @@ impl Workspace {
         self.refresh_title(w);
     }
 
-    pub(crate) fn open_device(&mut self, peer: &str, w: &mut Window, cx: &mut Context<Self>) {
-        let matches =
-            |page: &Page| matches!(page, Page::Device { peer: name, .. } if name.as_ref() == peer);
-        if let Some(page) = self.tabs.iter().find(|p| matches(p)).cloned() {
-            self.focus_tab(page, w, cx);
-            return;
-        }
-        if let Some(other) = self.other_window_with(w, cx, matches)
-            && other
-                .update(cx, |v, w, cx| v.open_device(peer, w, cx))
-                .is_ok()
-        {
-            return;
-        }
-        let peer: SharedString = peer.to_owned().into();
-        let view = DeviceSettings::new(peer.clone(), self.dashboard.clone(), cx);
-        self.show_page(Page::Device { peer, view }, w, cx);
-    }
-
     fn terminal_exited(view: Entity<terminal::Terminal>, _: &terminal::ShellExited, cx: &mut App) {
         // A tab can change windows while its shell is running.
         for window in cx
@@ -391,7 +370,7 @@ impl Workspace {
     fn take_tab(&mut self, page: &Page, w: &mut Window, cx: &mut Context<Self>) {
         self.dragged_tab = None;
         self.tab_indent = px(0.);
-        self.dismiss_menus(cx);
+        self.session_menu.update(cx, DropdownState::dismiss);
         self.remove_tab(page, w, cx);
     }
 
@@ -505,7 +484,7 @@ impl Workspace {
             let close =
                 ui.tab_close_button(cx.listener(move |v, _, w, cx| v.close_tab(&closing, w, cx)));
             let tab = page
-                .tab(ui, settings, self.active == *page, close, label, cx)
+                .tab(ui, settings, self.active == *page, close, label)
                 .id(page.element_id())
                 .when(*page != Page::Home, |tab| {
                     tab.on_mouse_down(
@@ -566,22 +545,10 @@ impl Workspace {
     }
 
     fn active_panel(&self, ui: Ui, viewport: Pixels, cx: &mut Context<Self>) -> DockPanel {
-        let workspace = cx.weak_entity();
+        let width = self.dock.read(cx).settings().page_width(viewport);
         match &self.active {
-            Page::Home => DockPanel::scroll(
-                "home-scroll",
-                self.dashboard.read(cx).home_scroll.clone(),
-                self.dashboard.update(cx, |d, cx| d.home(ui, workspace, cx)),
-            ),
-            Page::Settings => {
-                let width = self.dock.read(cx).settings().panel_width(viewport);
-                DockPanel::fill(self.dashboard.update(cx, |d, cx| d.settings(ui, width, cx)))
-            }
-            Page::Device { view, .. } => DockPanel::scroll(
-                ("device-scroll", view.entity_id()),
-                view.read(cx).scroll.clone(),
-                view.clone(),
-            ),
+            Page::Home => self.dashboard.update(cx, |d, cx| d.home(ui, width, cx)),
+            Page::Settings => self.dashboard.update(cx, |d, cx| d.settings(ui, width, cx)),
             // A new Win32 window is still cloaked while its client size is
             // being set. Laying out the PTY here would resize the live session.
             #[cfg(windows)]
@@ -607,7 +574,8 @@ impl Render for Workspace {
         let error = self.dashboard.read(cx).action_error.clone();
         let tabs = self.tab_bar(ui, window, cx);
         let panel = self.active_panel(ui, window.viewport_size().width, cx);
-        DockLayout::new(tabs, panel, self.workspace_menu(ui, cx))
+        let dock = DockLayout::new("peerhatch", tabs, panel, self.titlebar_actions(ui, cx));
+        let dock = dock
             .when(self.active == Page::Settings, |dock| {
                 let search = self.dashboard.read(cx).settings_editor.search.clone();
                 dock.capture_key_down(move |event, window, cx| {
@@ -637,7 +605,6 @@ impl Render for Workspace {
                         true,
                         ui.tab_close(),
                         drag.page.label(cx),
-                        cx,
                     ),
                 )
             })
@@ -647,6 +614,7 @@ impl Render for Workspace {
                     w.prevent_default();
                     cx.stop_propagation();
                 }
-            }))
+            }));
+        crate::components::Dialog::guard_owner(dock, window, ui, cx)
     }
 }

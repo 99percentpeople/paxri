@@ -18,6 +18,7 @@ use peerhatch_native::gateway::NativeTransport;
 mod reverse;
 mod streams;
 mod terminal;
+mod unpair;
 use reverse::{BindingState, RemoteForward, Routes};
 const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -219,8 +220,28 @@ impl Gateway {
 
     async fn change_settings(&mut self, mut change: Command) -> Result<()> {
         // Store the configured alias while holding the same lock as the settings write.
-        if let Command::SetPortAccess { peer, .. }
-        | Command::SaveForward {
+        if let Command::SetGatewayPortAccess {
+            expected: Some(previous),
+            ..
+        } = &change
+        {
+            anyhow::ensure!(
+                *previous == self.config.port_access,
+                "Port access changed. Review the current lists and retry."
+            );
+        }
+        match &change {
+            Command::SaveService { name, expected, .. } => anyhow::ensure!(
+                self.config.services.get(name) == expected.as_ref(),
+                "Service {name} already exists or has changed. Reopen the form and retry."
+            ),
+            Command::RemoveService { name, expected } => anyhow::ensure!(
+                self.config.services.get(name) == Some(expected),
+                "Service {name} changed or was removed. Review the current list and retry."
+            ),
+            _ => {}
+        }
+        if let Command::SaveForward {
             rule: Forward { peer, .. },
             ..
         } = &mut change
@@ -313,16 +334,11 @@ impl Gateway {
             ipc_path: None,
             config_path: Some(self.file.path.clone()),
             gui: local.map_or_else(|| config.gui.clone(), |p| p.gui),
-            pairing: self.pairing.status(config.pairing_code.as_deref()),
+            pairing: self.pairing.status(config),
             device_id: self.transport.id(),
             computer_name: gethostname::gethostname().to_string_lossy().into_owned(),
             device_name: config.device_name.clone(),
-            port_access: config
-                .peers
-                .iter()
-                .filter(|(_, p)| !p.ports.connect.is_empty() || !p.ports.listen.is_empty())
-                .map(|(name, p)| (name.clone(), p.ports.clone()))
-                .collect(),
+            gateway_port_access: Some(config.port_access.clone()),
             ticket,
             peer_connections: Some(self.transport.connections()),
             peer_last_status_change_ms: self.peer_change_times(),
@@ -336,6 +352,12 @@ impl Gateway {
                 .iter()
                 .map(|(name, p)| (name.clone(), p.endpoint_id.clone()))
                 .collect(),
+            service_allow_peers: Some(
+                config.services
+                    .iter()
+                    .map(|(name, service)| (name.clone(), service.allow_peers.clone()))
+                    .collect(),
+            ),
             services: config
                 .services
                 .iter()
@@ -386,6 +408,7 @@ async fn handle_client(
     // Resolve only outgoing local requests. Transport authentication and incoming
     // stream authorization continue to use the complete public key.
     if let Command::CheckPeer { peer }
+    | Command::ListPeerServices { peer }
     | Command::Connect { peer, .. }
     | Command::OpenTerminal { peer, .. }
     | Command::Exec { peer, .. }
@@ -439,6 +462,18 @@ async fn handle_client(
                 } => result,
             }
         }
+        Command::ListPeerServices { peer } => {
+            use tokio::io::AsyncReadExt;
+            let transport = gateway.lock().await.transport.clone();
+            let result = tokio::select! {
+                _ = socket.read_u8() => return Ok(()),
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(25),
+                    peerhatch_core::list_services(&*transport, &peer),
+                ) => result.with_context(|| format!("Loading services from {peer} timed out")).and_then(|r| r),
+            };
+            peerhatch_control::respond(&mut socket, result).await
+        }
         Command::CheckPeer { peer } => {
             let transport = gateway.lock().await.transport.clone();
             let result = match tokio::time::timeout(
@@ -465,6 +500,10 @@ async fn handle_client(
             let result = peerhatch_config::file::set_gui(&state.file.path, change, false)
                 .map(|_| state.status());
             drop(state);
+            peerhatch_control::respond(&mut socket, result).await
+        }
+        Command::Unpair { peer, expected_id } => {
+            let result = unpair::remove(&gateway, &peer, expected_id.as_deref()).await;
             peerhatch_control::respond(&mut socket, result).await
         }
         Command::RefreshPairingCode
@@ -506,8 +545,10 @@ async fn handle_client(
         }
         Command::SaveForward { .. }
         | Command::RemoveForward { .. }
+        | Command::SaveService { .. }
+        | Command::RemoveService { .. }
         | Command::SetDeviceName { .. }
-        | Command::SetPortAccess { .. } => {
+        | Command::SetGatewayPortAccess { .. } => {
             let result = {
                 let mut gateway = gateway.lock().await;
                 gateway
@@ -682,6 +723,7 @@ async fn run(
     let gateway = Arc::new(Mutex::new(gateway));
     let management = Arc::new(Semaphore::new(32));
     clients.spawn(platforms::fill_missing(gateway.clone()));
+    clients.spawn(unpair::retry_pending(gateway.clone()));
     tokio::pin!(stop);
     let (shutdown, mut requests) = tokio::sync::mpsc::channel(1);
     let shutdown = options.user_managed.then_some(shutdown);
@@ -699,7 +741,21 @@ async fn run(
                     eprintln!("Saving peer addresses: {err:#}");
                 }
             }
-            Some(request) = pair_requests.recv() => gateway.lock().await.pairing.receive(request),
+            Some(request) = pair_requests.recv() => {
+                use peerhatch_native::gateway::pairing::Incoming;
+                let mut state = gateway.lock().await;
+                match request {
+                    Incoming::Join(join) => state.pairing.receive(join),
+                    Incoming::Unpair { authenticated_id, pairing_id, reply } => {
+                        let result = state.receive_unpair(&authenticated_id, pairing_id.as_deref()).await;
+                        let _ = reply.send(result.map_err(|e| {
+                            eprintln!("Unpairing {authenticated_id}: {e:#}");
+                            "Could not save the unpair request".into()
+                        }));
+                    }
+                }
+            }
+
             accepted = async {
                 let slot = management.clone().acquire_owned().await?;
                 Ok::<_, anyhow::Error>((control.accept().await?, slot))

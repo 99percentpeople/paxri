@@ -2,7 +2,7 @@ use std::{fs, sync::Barrier, thread};
 
 use peerhatch_config::{
     file::{read_gui, save_gateway, set_gui, set_startup},
-    gui::{Appearance, CursorShape, GuiChange, GuiSettings, TerminalScheme},
+    gui::{Appearance, CursorShape, GuiChange, GuiSettings, TabPlacement, TerminalScheme},
     parse,
     startup::Startup,
 };
@@ -19,7 +19,9 @@ fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {
     .unwrap();
     let first = set_gui(&file, GuiChange::Appearance(Appearance::Dark), false).unwrap();
     assert_eq!(first.appearance, Appearance::Dark);
+    assert_eq!(first.tab_placement, TabPlacement::Top);
     for change in [
+        GuiChange::TabPlacement(TabPlacement::Left),
         GuiChange::Scheme(TerminalScheme::Midnight),
         GuiChange::CursorShape(CursorShape::Bar),
         GuiChange::FontFamily("Cascadia Mono".to_owned()),
@@ -34,6 +36,7 @@ fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {
     let gui = parse(&text).unwrap().gui;
     assert_eq!(read_gui(&file).unwrap(), gui);
     assert_eq!(gui.appearance, Appearance::Dark);
+    assert_eq!(gui.tab_placement, TabPlacement::Left);
     assert_eq!(gui.terminal.scheme, TerminalScheme::Midnight);
     assert_eq!(gui.terminal.cursor_shape, CursorShape::Bar);
     assert!(gui.terminal.blink_cursor);

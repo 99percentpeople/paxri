@@ -4,25 +4,12 @@ use gpui::{prelude::*, *};
 
 const DETACH_DISTANCE: Pixels = px(24.);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DockPlacement {
-    Top,
-    Left,
-}
+pub use peerhatch_config::gui::TabPlacement as DockPlacement;
 
-impl DockPlacement {
-    pub fn other(self) -> Self {
-        match self {
-            Self::Top => Self::Left,
-            Self::Left => Self::Top,
-        }
-    }
-
-    fn axis(self) -> Axis {
-        match self {
-            Self::Top => Axis::Horizontal,
-            Self::Left => Axis::Vertical,
-        }
+fn tab_axis(placement: DockPlacement) -> Axis {
+    match placement {
+        DockPlacement::Top => Axis::Horizontal,
+        DockPlacement::Left => Axis::Vertical,
     }
 }
 
@@ -96,7 +83,7 @@ impl<K: PartialEq + 'static> DockState<K> {
         };
         self.bounds(key).map_or(px(0.), |slot| {
             (slot.origin - first.origin)
-                .along(self.settings.placement.axis())
+                .along(tab_axis(self.settings.placement))
                 .max(px(0.))
         })
     }
@@ -113,7 +100,7 @@ impl<K: PartialEq + 'static> DockState<K> {
     }
 
     pub fn insertion(&self, cursor: Point<Pixels>) -> Option<usize> {
-        let axis = self.settings.placement.axis();
+        let axis = tab_axis(self.settings.placement);
         if self.tabs.is_empty()
             || cursor.x < self.zone.left()
             || cursor.x >= self.zone.right()
@@ -155,7 +142,7 @@ impl<K: Clone + PartialEq + 'static> DockDrag<K> {
     }
 
     pub fn projected(&self, mut bounds: Bounds<Pixels>, layout: &DockState<K>) -> Bounds<Pixels> {
-        let axis = layout.settings.placement.axis();
+        let axis = tab_axis(layout.settings.placement);
         let desired = (self.cursor - self.grab_in(bounds)).along(axis);
         let strip_start = layout.zone.origin.along(axis);
         let end =
@@ -221,7 +208,7 @@ impl<K: Clone + PartialEq + 'static> DockDrag<K> {
         let Some(slot) = layout.bounds(&self.page) else {
             return layout.insertion(self.cursor);
         };
-        let axis = layout.settings.placement.axis();
+        let axis = tab_axis(layout.settings.placement);
         let projected = self.projected(slot, layout);
         // Cross a neighbour's midpoint with the leading edge of the moving tab,
         // including when the two tabs have different widths.

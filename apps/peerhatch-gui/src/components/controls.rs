@@ -4,32 +4,6 @@ pub(super) const MENU_ROW_HEIGHT: Pixels = px(34.);
 pub(super) const MENU_PADDING: Pixels = px(5.);
 
 impl Ui {
-    pub fn form_actions(
-        self,
-        form: &'static str,
-        label: impl IntoElement,
-        submit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-        cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Div {
-        actions()
-            .child(
-                self.button(
-                    ButtonVariant::Primary,
-                    SharedString::from(format!("save-{form}")),
-                    label,
-                )
-                .on_click(submit),
-            )
-            .child(
-                self.button(
-                    ButtonVariant::Secondary,
-                    SharedString::from(format!("cancel-{form}")),
-                    "Cancel",
-                )
-                .on_click(cancel),
-            )
-    }
-
     pub fn input_frame(self, id: impl Into<ElementId>, focus: &FocusHandle) -> Stateful<Div> {
         let colors = self.colors;
         focus::text_field(div().id(id), focus)
@@ -73,7 +47,6 @@ impl Ui {
             .flex()
             .flex_none()
             .items_center()
-            .w_full()
             .h(MENU_ROW_HEIGHT)
             .px(SPACE_2)
             .rounded(CONTROL_RADIUS)

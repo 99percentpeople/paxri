@@ -2,13 +2,13 @@
 use std::{io::ErrorKind, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
+use peerhatch_config::{Config, Destination, DevicePlatform};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     time::timeout,
 };
-use peerhatch_config::{Config, Destination, DevicePlatform};
 pub mod connection;
 pub mod reverse;
 
@@ -17,6 +17,7 @@ pub use session::{PeerSession, StreamKind, Transport};
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const TARGET_CONNECT: Duration = Duration::from_secs(6);
 const MAX_FRAME: usize = 4096;
+const MAX_CATALOG_FRAME: usize = 512 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
@@ -24,6 +25,7 @@ enum Request {
     Open { service: String },
     OpenTcp { target: String },
     DeviceInfo,
+    ListServices,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
@@ -31,13 +33,21 @@ enum Answer {
     Ok,
     Error { code: String },
     DeviceInfo { platform: DevicePlatform },
+    Services { names: Vec<String> },
 }
 
 async fn read_frame<T: DeserializeOwned>(stream: &mut (impl AsyncRead + Unpin)) -> Result<T> {
+    read_frame_with_limit(stream, MAX_FRAME).await
+}
+
+async fn read_frame_with_limit<T: DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+    limit: usize,
+) -> Result<T> {
     timeout(HANDSHAKE, async {
         let length = stream.read_u32().await? as usize;
         ensure!(
-            (1..=MAX_FRAME).contains(&length),
+            (1..=limit).contains(&length),
             "invalid handshake frame length"
         );
         let mut frame = vec![0; length];
@@ -51,9 +61,13 @@ async fn read_frame<T: DeserializeOwned>(stream: &mut (impl AsyncRead + Unpin)) 
 async fn write_frame(stream: &mut (impl AsyncWrite + Unpin), frame: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(frame)?;
     ensure!(bytes.len() <= MAX_FRAME, "handshake message too large");
+    write_payload(stream, &bytes).await
+}
+
+async fn write_payload(stream: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> Result<()> {
     timeout(HANDSHAKE, async {
         stream.write_u32(bytes.len() as u32).await?;
-        stream.write_all(&bytes).await?;
+        stream.write_all(bytes).await?;
         stream.flush().await
     })
     .await??;
@@ -74,7 +88,20 @@ pub async fn peer_platform(transport: &impl Transport, peer: &str) -> Result<Dev
     match read_frame(&mut stream).await? {
         Answer::DeviceInfo { platform } => Ok(platform),
         Answer::Error { code } => bail!("remote device info: {code}"),
-        Answer::Ok => bail!("missing remote device info"),
+        _ => bail!("missing remote device info"),
+    }
+}
+
+pub async fn list_services(transport: &impl Transport, peer: &str) -> Result<Vec<String>> {
+    let mut stream = transport.open(peer, StreamKind::Services).await?;
+    write_frame(&mut stream, &Request::ListServices).await?;
+    match read_frame_with_limit(&mut stream, MAX_CATALOG_FRAME).await? {
+        Answer::Services { names } => Ok(names),
+        Answer::Error { code } if code == "INVALID_REQUEST" => {
+            bail!("This peer's gateway does not support service discovery yet.")
+        }
+        Answer::Error { code } => bail!("Remote service list: {code}"),
+        _ => bail!("Unexpected response to service discovery"),
     }
 }
 
@@ -96,7 +123,7 @@ async fn open_destination<T: Transport>(
     match read_frame(&mut stream).await? {
         Answer::Error { code } => bail!("remote service {}: {code}", destination.address()),
         Answer::Ok => Ok(stream),
-        Answer::DeviceInfo { .. } => bail!("unexpected device info in service response"),
+        _ => bail!("unexpected service response"),
     }
 }
 
@@ -151,11 +178,7 @@ pub async fn serve(
     };
     let authorized = match &request {
         Request::DeviceInfo => {
-            if config
-                .peers
-                .values()
-                .any(|p| p.endpoint_id.eq_ignore_ascii_case(authenticated_id))
-            {
+            if config.is_paired(authenticated_id) {
                 write_frame(
                     &mut stream,
                     &Answer::DeviceInfo {
@@ -168,6 +191,31 @@ pub async fn serve(
             }
             None
         }
+        Request::ListServices => {
+            if config.is_paired(authenticated_id) {
+                let names = config
+                    .services
+                    .iter()
+                    .filter(|(_, service)| allowed(service))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                let payload = serde_json::to_vec(&Answer::Services { names })?;
+                if payload.len() <= MAX_CATALOG_FRAME {
+                    write_payload(&mut stream, &payload).await?;
+                } else {
+                    write_frame(
+                        &mut stream,
+                        &Answer::Error {
+                            code: "CATALOG_TOO_LARGE".into(),
+                        },
+                    )
+                    .await?;
+                }
+                stream.shutdown().await?;
+                return Ok(());
+            }
+            None
+        }
         Request::Open { service } => config
             .services
             .get(service)
@@ -175,10 +223,8 @@ pub async fn serve(
             .map(|s| &s.target),
         Request::OpenTcp { target } => {
             // Dial only an exact locally granted endpoint, including a published TCP service.
-            let grant = config.peers.values().any(|p| {
-                p.endpoint_id.eq_ignore_ascii_case(authenticated_id)
-                    && p.ports.connect.contains(target)
-            });
+            let grant =
+                config.port_access.connect.contains(target) && config.is_paired(authenticated_id);
             let published = config
                 .services
                 .values()

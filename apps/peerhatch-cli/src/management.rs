@@ -107,12 +107,9 @@ impl ForwardAction {
 
 #[derive(Subcommand)]
 pub enum PortAction {
-    Show {
-        peer: String,
-    },
-    /// Replace both explicit allowlists. Repeat an option for several addresses.
+    Show,
+    /// Replace both gateway-wide allowlists for paired devices.
     Set {
-        peer: String,
         #[arg(long, value_delimiter = ',', value_parser = tcp_target)]
         connect: Vec<String>,
         #[arg(long, value_delimiter = ',', value_parser = listen_address)]
@@ -122,25 +119,19 @@ pub enum PortAction {
 
 impl PortAction {
     pub async fn run(self, ipc: &Path) -> Result<()> {
-        let (peer, command) = match self {
-            Self::Set {
-                peer,
-                connect,
-                listen,
-            } => (
-                peer.clone(),
-                Command::SetPortAccess {
-                    peer,
-                    ports: PortAccess { connect, listen },
-                },
-            ),
-            Self::Show { peer } => (peer, Command::Status),
+        let command = match self {
+            Self::Set { connect, listen } => Command::SetGatewayPortAccess {
+                expected: None,
+                ports: PortAccess { connect, listen },
+            },
+            Self::Show => Command::Status,
         };
         let status = request(ipc, command).await?;
-        let (name, _) = status.resolve_peer(&peer)?;
-        let empty = PortAccess::default();
-        let ports = status.port_access.get(name).unwrap_or(&empty);
-        print!("{}", output::port_access(name, ports));
+        let ports = status
+            .gateway_port_access
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Update the gateway to manage global port access."))?;
+        print!("{}", output::port_access(ports));
         Ok(())
     }
 }
@@ -155,6 +146,11 @@ pub enum PairAction {
     Join { code: String },
     /// Show pending requests and the last pairing result
     Status,
+    /// Unpair a device by name, full ID or unique ID prefix
+    ///
+    /// Close its connections and remove its forwarding rules and service grants
+    /// on both gateways. An offline gateway receives the notice on a later retry.
+    Remove { peer: String },
     /// Withdraw this device's outgoing request
     Cancel,
     /// Approve the pending request from this device ID
@@ -165,12 +161,14 @@ pub enum PairAction {
 
 impl PairAction {
     pub async fn run(self, ipc: &Path) -> Result<()> {
+        let unpair = matches!(self, Self::Remove { .. });
         let show_code = matches!(self, Self::Code | Self::Refresh);
         let command = match self {
             Self::Code | Self::Status => Command::Status,
             Self::Refresh => Command::RefreshPairingCode,
             Self::Join { code } => Command::JoinPairing { code },
             Self::Cancel => Command::CancelPairing,
+            Self::Remove { peer } => Command::Unpair { peer, expected_id: None },
             Self::Accept { device_id } => Command::AnswerPairing {
                 device_id,
                 request_id: None,
@@ -183,6 +181,10 @@ impl PairAction {
             },
         };
         let pairing = request(ipc, command).await?.pairing;
+        if unpair {
+            println!("{}", pairing.message.as_deref().unwrap_or("Device unpaired."));
+            return Ok(());
+        }
         if show_code {
             println!(
                 "{}",

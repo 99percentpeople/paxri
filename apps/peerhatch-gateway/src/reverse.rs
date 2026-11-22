@@ -91,11 +91,8 @@ impl Listeners {
         let mut config = self.config.clone();
         let (mut recv, mut send) = tokio::io::split(stream);
         let (listen, id) = wire::receive(&mut recv).await?;
-        let permitted = |cfg: &Config| {
-            cfg.peers.values().any(|p| {
-                p.endpoint_id.eq_ignore_ascii_case(&peer) && p.ports.listen.contains(&listen)
-            })
-        };
+        let permitted =
+            |cfg: &Config| cfg.port_access.listen.contains(&listen) && cfg.is_paired(&peer);
         let binding = async {
             ensure!(
                 permitted(&config.borrow_and_update()),

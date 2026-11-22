@@ -1,9 +1,11 @@
-use super::{
-    device_heading, overview, overview_columns, peer_settings::PortsForm, rules::RuleForm,
-};
+use super::{device_heading, home::DevicesPane, overview, overview_columns};
 use crate::{
-    Dashboard, GatewayRequest, Workspace,
-    components::{Button, ButtonVariant::Primary, Icon, Ui, single_line, tooltip},
+    Dashboard, Workspace,
+    components::{
+        Button,
+        ButtonVariant::{Destructive, Primary, Secondary},
+        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Ui, actions, single_line, tooltip,
+    },
 };
 use gpui::{prelude::*, *};
 use peerhatch_control::{Command, Status};
@@ -19,91 +21,15 @@ fn connection_host(address: &str) -> String {
     }
 }
 
-pub(crate) struct DeviceSettings {
-    pub(crate) scroll: ScrollHandle,
-    pub(super) peer: SharedString,
-    pub(super) dashboard: Entity<Dashboard>,
-    pub(super) rule: Option<RuleForm>,
-    pub(super) ports_form: Option<PortsForm>,
-    pub(super) removing: Option<String>,
-    pub(super) saving: bool,
-    pub(super) action_error: Option<String>,
-}
-
-impl DeviceSettings {
-    pub(crate) fn platform(&self, cx: &App) -> peerhatch_control::DevicePlatform {
-        self.dashboard
-            .read(cx)
-            .status
-            .as_ref()
-            .map(|s| s.peer_platform(&self.peer))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn new(
-        peer: SharedString,
-        dashboard: Entity<Dashboard>,
-        cx: &mut App,
-    ) -> Entity<Self> {
-        cx.new(|cx| {
-            cx.observe(&dashboard, |_, _, cx| cx.notify()).detach();
-            Self {
-                peer,
-                scroll: ScrollHandle::new(),
-                dashboard,
-                rule: None,
-                ports_form: None,
-                removing: None,
-                saving: false,
-                action_error: None,
-            }
-        })
-    }
-
-    pub(super) fn send(&mut self, command: Command, cx: &mut Context<Self>) {
-        if self.saving {
-            return;
-        }
-        self.saving = true;
-        self.action_error = None;
-        let finish: fn(&mut Self) = match &command {
-            Command::SetPortAccess { .. } => |v| v.ports_form = None,
-            Command::SaveForward { .. } => |v| v.rule = None,
-            Command::RemoveForward { .. } => |v| v.removing = None,
-            _ => |_| {},
-        };
-        let view = cx.weak_entity();
-        self.dashboard.update(cx, |dashboard, cx| {
-            dashboard.request(
-                GatewayRequest {
-                    command: crate::Operation::Api(command),
-                    on_complete: Some(Box::new(move |result, cx| {
-                        let _ = view.update(cx, |page, cx| {
-                            page.saving = false;
-                            match result {
-                                Ok(()) => finish(page),
-                                Err(message) => page.action_error = Some(message),
-                            }
-                            cx.notify();
-                        });
-                    })),
-                },
-                cx,
-            );
-        });
-        cx.notify();
-    }
-}
-
-impl DeviceSettings {
-    fn connection(&self, status: &Status, ui: Ui) -> Div {
-        let paths = status.connections_for(&self.peer);
+impl Dashboard {
+    fn connection(&self, peer: &str, status: &Status, ui: Ui) -> Div {
+        let paths = status.connections_for(peer);
         let mut card = ui.section("Connection").child(ui.separator());
         let Some(paths) = paths else {
             return card.child(ui.muted("Connection status unavailable."));
         };
         if paths.is_empty() {
-            return card.child(ui.muted(status.peer_state(&self.peer)));
+            return card.child(ui.muted(status.peer_state(peer)));
         }
         for (i, path) in paths.iter().enumerate() {
             let streams = path.stream_labels().collect::<Vec<_>>().join(" · ");
@@ -145,8 +71,8 @@ impl DeviceSettings {
         card
     }
 
-    fn new_session(&self, ui: Ui) -> Button {
-        let peer = self.peer.clone();
+    fn new_session(&self, peer: &str, ui: Ui) -> Button {
+        let peer = SharedString::from(peer.to_owned());
         ui.button(Primary, "new-terminal-session", "New session")
             .icon(Icon::Terminal)
             .on_click(move |_, w, cx| {
@@ -156,12 +82,9 @@ impl DeviceSettings {
             })
     }
 
-    fn sessions(&self, ui: Ui, cx: &Context<Self>) -> Div {
-        let mut sessions = self
-            .dashboard
-            .read(cx)
-            .open_sessions(&self.peer, cx)
-            .peekable();
+    fn sessions(&self, peer: &str, ui: Ui, cx: &Context<Self>) -> Div {
+        let peer = SharedString::from(peer.to_owned());
+        let mut sessions = self.open_sessions(&peer, cx).peekable();
         let card = ui.section("Terminal sessions").child(ui.separator());
         if sessions.peek().is_none() {
             return card.child(ui.muted("No open sessions."));
@@ -171,7 +94,7 @@ impl DeviceSettings {
                 .flex()
                 .flex_col()
                 .children(sessions.map(|(number, title)| {
-                    let peer = self.peer.clone();
+                    let peer = peer.clone();
                     ui.navigation_row(
                         ("show-terminal", number),
                         ui.icon_tile(Icon::Terminal, 32., 16.),
@@ -189,44 +112,92 @@ impl DeviceSettings {
     }
 }
 
-impl Render for DeviceSettings {
-    fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ui = Ui::new(w, cx);
-        let status = self.dashboard.read(cx).status.as_ref();
-        let identity = status.and_then(|s| {
-            let name = self.peer.as_ref();
-            let id = s.peers.get(name)?;
-            let short = s
-                .short_peer_ids()
-                .remove(name)
-                .unwrap_or_else(|| id.clone());
-            Some((id.as_str(), short))
+impl Dashboard {
+    fn confirm_unpair(&self, peer: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let peer = peer.to_owned();
+        let id = id.to_owned();
+        let dashboard = cx.entity();
+        Dialog::open(
+            window,
+            cx,
+            DialogMode::Modal,
+            "Unpair device?",
+            size(px(440.), px(252.)),
+            dashboard,
+            None,
+            move |_, ui, cx| {
+                let name = peer.clone();
+                let expected = id.clone();
+                let body = div().flex().flex_col().gap_2()
+                    .child(format!("Unpair this device and {peer}?"))
+                    .child(ui.muted("Active connections close immediately. Both gateways remove forwarding rules and service grants for this pairing. Offline peers sync when reachable."));
+                DialogContent::new(body, "Cancel").action(
+                    ui.button(Destructive, "confirm-unpair", "Unpair device")
+                        .on_click(cx.listener(move |v, _, w, cx| {
+                            v.send_from_dialog(
+                                Command::Unpair {
+                                    peer: name.clone(),
+                                    expected_id: Some(expected.clone()),
+                                },
+                                w,
+                                DialogSuccess::Close,
+                                cx,
+                            );
+                        })),
+                )
+            },
+        );
+    }
+
+    pub(super) fn device_detail(
+        &self,
+        peer: &str,
+        status: &Status,
+        ui: Ui,
+        cx: &Context<Self>,
+    ) -> Div {
+        let identity = status.peers.get(peer).map(|id| {
+            (
+                id.as_str(),
+                status
+                    .short_peer_ids()
+                    .remove(peer)
+                    .unwrap_or_else(|| id.clone()),
+            )
         });
-        let paired = identity.is_some();
         let header = device_heading(
             ui,
             "Device details",
-            self.peer.clone(),
-            self.platform(cx),
+            peer.to_owned().into(),
+            status.peer_platform(peer),
             identity,
         )
-        .when(status.is_some_and(|s| s.peer_online(&self.peer)), |r| {
-            r.child(self.new_session(ui))
+        .when(status.peer_online(peer), |row| {
+            row.child(self.new_session(peer, ui))
         });
-        let page = overview()
+        let unpair = status.peers.get(peer).map(|id| {
+            let id = id.clone();
+            let name = peer.to_owned();
+            ui.button(Secondary, "unpair-device", "Unpair device")
+                .on_click(cx.listener(move |v, _, w, cx| v.confirm_unpair(&name, &id, w, cx)))
+        });
+        let selected = peer.to_owned();
+        overview()
             .child(header)
-            .when_some(self.action_error.clone(), |p, e| p.child(ui.alert(e)));
-        let Some(status) = status else {
-            return page.child(self.dashboard.update(cx, |d, cx| d.gateway_notice(ui, cx)));
-        };
-        if !paired {
-            return page.child(ui.muted("This device is no longer paired."));
-        }
-        page.child(overview_columns(
-            self.connection(status, ui),
-            self.sessions(ui, cx),
-        ))
-        .child(self.forwarding(status, ui, cx))
-        .child(self.port_access(status, ui, cx))
+            .child(overview_columns(
+                self.connection(peer, status, ui),
+                self.sessions(peer, ui, cx),
+            ))
+            .child(
+                actions()
+                    .child(
+                        ui.button(Secondary, "device-forwards", "View forwarding rules")
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                v.forward_filter = Some(selected.clone());
+                                v.show_devices_pane(DevicesPane::Forwards, cx);
+                            })),
+                    )
+                    .children(unpair),
+            )
     }
 }

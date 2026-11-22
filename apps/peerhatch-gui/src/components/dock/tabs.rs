@@ -9,6 +9,7 @@ pub struct DockTabs<K: Clone + PartialEq + 'static> {
     id: ElementId,
     items: Vec<(K, Stateful<Div>)>,
     trailing: Option<AnyElement>,
+    sidebar_content: Option<AnyElement>,
     pub(super) drag: Option<DockDrag<K>>,
     indent: Pixels,
 }
@@ -21,6 +22,7 @@ impl<K: Clone + PartialEq + 'static> DockTabs<K> {
             id: id.into(),
             items: vec![],
             trailing: None,
+            sidebar_content: None,
             drag: None,
             indent: px(0.),
         }
@@ -33,6 +35,11 @@ impl<K: Clone + PartialEq + 'static> DockTabs<K> {
 
     pub fn indent(mut self, indent: Pixels) -> Self {
         self.indent = indent;
+        self
+    }
+
+    pub fn sidebar_content(mut self, content: impl IntoElement) -> Self {
+        self.sidebar_content = Some(content.into_any_element());
         self
     }
 
@@ -130,15 +137,25 @@ impl<K: Clone + PartialEq + 'static> RenderOnce for DockTabs<K> {
                         .min_h_0()
                         .flex_col()
                         .items_center()
+                        .when(self.sidebar_content.is_some(), |strip| {
+                            strip.max_h(relative(0.45))
+                        })
                         .overflow_y_scroll(),
                 )
                 .when_some(self.trailing, |root, action| {
                     let row = div().flex_none().w_full().flex().pb(SPACE_1);
-                    root.child(if layout.settings().compact() {
-                        row.justify_center().child(action)
-                    } else {
-                        row.px(SPACE_1).child(div().w_full().child(action))
-                    })
+                    root.child(row.px(SPACE_1).child(div().w_full().child(action)))
+                })
+                .when_some(self.sidebar_content, |root, content| {
+                    root.child(
+                        div()
+                            .w_full()
+                            .min_h_0()
+                            .flex_1()
+                            .border_t_1()
+                            .border_color(rgb(ui.colors.border))
+                            .child(content),
+                    )
                 }),
         }
     }
@@ -205,9 +222,6 @@ impl Ui {
                     .border_color(rgb(self.colors.border))
                     .text_color(rgb(self.colors.accent.foreground))
             });
-        if settings.compact() {
-            return tab.w(BUTTON_HEIGHT).justify_center().child(icon.draw(16.));
-        }
         let tab = match settings.placement {
             DockPlacement::Top => tab.min_w(TAB_MIN_WIDTH).max_w(TAB_MAX_WIDTH),
             DockPlacement::Left => tab.w_full().min_w_0(),

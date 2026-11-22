@@ -1,8 +1,11 @@
-pub(crate) mod device;
+mod device;
 mod device_list;
 mod home;
+pub(crate) use home::DevicesPane;
 mod network_settings;
-mod peer_settings;
+mod port_access;
+mod port_actions;
+mod published_services;
 mod rules;
 mod settings;
 mod settings_catalog;

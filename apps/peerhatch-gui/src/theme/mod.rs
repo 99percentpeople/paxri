@@ -19,7 +19,7 @@ pub const CONTROL_RADIUS: Pixels = px(6.);
 pub const PANEL_RADIUS: Pixels = px(8.);
 
 #[derive(Default)]
-struct Preferences(GuiSettings);
+pub(crate) struct Preferences(GuiSettings);
 impl Global for Preferences {}
 
 pub fn current(cx: &App) -> GuiSettings {

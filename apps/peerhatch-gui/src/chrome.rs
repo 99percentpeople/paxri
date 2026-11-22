@@ -3,6 +3,7 @@ use crate::components::Ui;
 use gpui::{prelude::*, *};
 
 pub(super) const TITLEBAR_HEIGHT: f32 = 40.;
+pub(super) const WINDOW_BUTTON_WIDTH: f32 = 44.;
 
 pub fn window_options(title: &str, dimensions: Size<Pixels>, cx: &App) -> WindowOptions {
     WindowOptions {
@@ -285,7 +286,7 @@ impl Control {
         .size(px(12.));
         let button = div()
             .id(id)
-            .w(px(44.))
+            .w(px(WINDOW_BUTTON_WIDTH))
             .h_full()
             .flex_none()
             .flex()
@@ -300,7 +301,7 @@ impl Control {
             })
             .child(icon);
         match self {
-            Self::Close => button.on_click(|_, w, _| w.remove_window()),
+            Self::Close => button.on_click(close_window),
             // The native maximize hit area also enables the Windows snap menu.
             #[cfg(target_os = "windows")]
             Self::Maximize => button.window_control_area(WindowControlArea::Max),
@@ -312,6 +313,44 @@ impl Control {
             Self::Minimize => button.on_click(|_, w, _| w.minimize_window()),
         }
     }
+}
+
+pub(crate) fn close_window(_: &ClickEvent, w: &mut Window, _: &mut App) {
+    w.remove_window();
+}
+
+pub(crate) fn dialog_titlebar(title: &'static str, ui: Ui) -> Div {
+    let label = div()
+        .id("dialog-drag-area")
+        .h_full()
+        .flex_1()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .pl_4()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(title);
+    #[cfg(not(windows))]
+    let label = label.on_mouse_down(MouseButton::Left, |_, w, cx| {
+        cx.stop_propagation();
+        #[cfg(target_os = "macos")]
+        mac::drag(w);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        w.start_window_move();
+    });
+    div()
+        .w_full()
+        .flex_none()
+        .h(px(TITLEBAR_HEIGHT))
+        .flex()
+        .items_center()
+        .bg(rgb(ui.colors.chrome.background))
+        .text_color(rgb(ui.colors.chrome.foreground))
+        .border_b_1()
+        .border_color(rgb(ui.colors.border))
+        .child(label)
+        .child(Control::Close.button(false, ui))
 }
 
 pub fn titlebar(

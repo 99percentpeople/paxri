@@ -20,6 +20,8 @@ const MAX_FRAME: usize = 16 * 1024;
 pub struct Contact {
     pub name: String,
     pub ticket: EndpointTicket,
+    #[serde(default)]
+    pub supports_unpair: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<peerhatch_config::DevicePlatform>,
 }
@@ -87,7 +89,36 @@ pub enum Decision {
     Rejected(String),
 }
 
-pub struct Incoming {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnpairRequest {
+    pairing_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum PairRequest {
+    Join(Request),
+    // The explicit tag distinguishes a legacy pairing from a revocation without a generation.
+    Unpair { unpair: UnpairRequest },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum UnpairAck {
+    Cleared,
+    NewerPairing,
+}
+
+pub enum Incoming {
+    Join(JoinRequest),
+    Unpair {
+        authenticated_id: String,
+        pairing_id: Option<String>,
+        reply: oneshot::Sender<Result<UnpairAck, String>>,
+    },
+}
+
+pub struct JoinRequest {
     pub request_id: String,
     pub token: String,
     pub peer: Contact,
@@ -112,31 +143,45 @@ impl PairingHandler {
         let _permit = self.slots.try_acquire().context("Pairing is busy")?;
         let (mut tx, mut rx) = timeout(CONNECT_TIMEOUT, conn.accept_bi()).await??;
         let bytes = timeout(CONNECT_TIMEOUT, rx.read_to_end(MAX_FRAME)).await??;
-        let Request {
-            token,
-            contact,
-            request_id,
-        } = serde_json::from_slice(&bytes)?;
-        contact.validate(conn.remote_id())?;
-        ensure!(
-            request_id.len() == 32 && request_id.bytes().all(|b| b.is_ascii_hexdigit()),
-            "Invalid pairing request ID"
-        );
-        let (reply, response) = oneshot::channel();
-        self.incoming
-            .try_send(Incoming {
-                request_id,
+        let bytes = match serde_json::from_slice::<PairRequest>(&bytes)? {
+            PairRequest::Join(Request {
                 token,
-                peer: contact,
-                reply,
-            })
-            .map_err(|_| anyhow::anyhow!("Pairing is busy"))?;
-        let decision = tokio::select! {
-            _ = conn.closed() => return Ok(()),
-            _ = tx.stopped() => return Ok(()),
-            result = response => result.context("Pairing request closed")?,
+                contact,
+                request_id,
+            }) => {
+                contact.validate(conn.remote_id())?;
+                ensure!(
+                    request_id.len() == 32 && request_id.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "Invalid pairing request ID"
+                );
+                let (reply, response) = oneshot::channel();
+                self.incoming
+                    .try_send(Incoming::Join(JoinRequest {
+                        request_id,
+                        token,
+                        peer: contact,
+                        reply,
+                    }))
+                    .map_err(|_| anyhow::anyhow!("Pairing is busy"))?;
+                let decision = tokio::select! {
+                    _ = conn.closed() => return Ok(()),
+                    _ = tx.stopped() => return Ok(()),
+                    result = response => result.context("Pairing request closed")?,
+                };
+                serde_json::to_vec(&decision)?
+            }
+            PairRequest::Unpair { unpair } => {
+                let (reply, response) = oneshot::channel();
+                self.incoming
+                    .try_send(Incoming::Unpair {
+                        authenticated_id: conn.remote_id().to_string(),
+                        pairing_id: unpair.pairing_id,
+                        reply,
+                    })
+                    .map_err(|_| anyhow::anyhow!("Pairing is busy"))?;
+                serde_json::to_vec(&response.await?)?
+            }
         };
-        let bytes = serde_json::to_vec(&decision)?;
         ensure!(bytes.len() <= MAX_FRAME, "Pairing response too large");
         timeout(CONNECT_TIMEOUT, tx.write_all(&bytes)).await??;
         tx.finish()?;
@@ -154,6 +199,35 @@ impl ProtocolHandler for PairingHandler {
 }
 
 impl NativeTransport {
+    pub async fn notify_unpair(
+        &self,
+        id: &str,
+        pending: &peerhatch_config::PendingUnpair,
+    ) -> Result<UnpairAck> {
+        let ticket: EndpointTicket = pending.ticket.parse()?;
+        let dest = ticket.endpoint_addr();
+        ensure!(
+            dest.id.to_string().eq_ignore_ascii_case(id),
+            "Unpair address does not match the device"
+        );
+        let request = PairRequest::Unpair {
+            unpair: UnpairRequest {
+                pairing_id: pending.pairing_id.clone(),
+            },
+        };
+        timeout(std::time::Duration::from_secs(8), async {
+            let conn = super::addresses::dial(&self.endpoint, dest.clone(), PROTOCOL).await?;
+            let (mut tx, mut rx) = conn.open_bi().await?;
+            tx.write_all(&serde_json::to_vec(&request)?).await?;
+            tx.finish()?;
+            let answer: Result<UnpairAck, String> =
+                serde_json::from_slice(&rx.read_to_end(MAX_FRAME).await?)?;
+            answer.map_err(anyhow::Error::msg)
+        })
+        .await
+        .context("Peer unpair confirmation timed out")?
+    }
+
     pub async fn request_pairing(
         &self,
         invite: &Invitation,

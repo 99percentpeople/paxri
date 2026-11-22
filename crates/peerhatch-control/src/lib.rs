@@ -14,7 +14,7 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use peerhatch_config::{
-    Destination, DevicePlatform, Direction, Forward, PortAccess, listen_address, tcp_target,
+    Destination, DevicePlatform, Direction, Forward, PortAccess, Service, listen_address, tcp_target,
 };
 
 pub use peerhatch_config::gui::{GuiChange, GuiSettings};
@@ -30,12 +30,20 @@ const DEADLINE: Duration = Duration::from_secs(5);
 pub enum Command {
     Status,
     WatchPeerConnections,
+    ListPeerServices {
+        peer: String,
+    },
     CheckPeer {
         peer: String,
     },
     Shutdown,
     RefreshPairingCode,
     CancelPairing,
+    Unpair {
+        peer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_id: Option<String>,
+    },
     JoinPairing {
         code: String,
     },
@@ -63,6 +71,16 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_peer: Option<String>,
     },
+    SaveService {
+        name: String,
+        expected: Option<Service>,
+        rename_to: Option<String>,
+        service: Service,
+    },
+    RemoveService {
+        name: String,
+        expected: Service,
+    },
     SetDeviceName {
         name: Option<String>,
     },
@@ -84,8 +102,8 @@ pub enum Command {
         size: terminal::Size,
         invocation: terminal::exec::Invocation,
     },
-    SetPortAccess {
-        peer: String,
+    SetGatewayPortAccess {
+        expected: Option<PortAccess>,
         ports: PortAccess,
     },
     Connect {
@@ -146,6 +164,8 @@ impl ForwardStatus {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PairingStatus {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_unpairs: Vec<String>,
     pub code: Option<String>,
     pub incoming: Vec<PairingPeer>,
     pub outgoing: Option<String>,
@@ -200,8 +220,11 @@ pub struct Status {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_last_status_change_ms: BTreeMap<String, i64>,
     #[serde(default)]
-    pub port_access: BTreeMap<String, PortAccess>,
+    pub gateway_port_access: Option<PortAccess>,
     pub services: BTreeMap<String, String>,
+    /// Missing on gateways that only report service targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_allow_peers: Option<BTreeMap<String, Vec<String>>>,
     pub forwards: BTreeMap<String, ForwardStatus>,
 }
 
@@ -462,8 +485,13 @@ pub async fn watch_peer_connections(path: &Path) -> Result<Stream> {
     Ok(stream)
 }
 
+pub async fn list_peer_services(path: &Path, peer: String) -> Result<Vec<String>> {
+    let (_, names) = begin(path, Command::ListPeerServices { peer }, Duration::from_secs(30)).await?;
+    Ok(names)
+}
+
 pub async fn request(path: &Path, command: Command) -> Result<Status> {
-    let deadline = if matches!(command, Command::CheckPeer { .. }) {
+    let deadline = if matches!(command, Command::CheckPeer { .. } | Command::Unpair { .. }) {
         Duration::from_secs(30)
     } else {
         DEADLINE

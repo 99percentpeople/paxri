@@ -4,14 +4,9 @@ use crate::components::{
 };
 
 impl Workspace {
-    pub(super) fn dismiss_menus(&self, cx: &mut Context<Self>) {
-        self.menu.update(cx, DropdownState::dismiss);
-        self.session_menu.update(cx, DropdownState::dismiss);
-    }
-
     pub(super) fn new_session_menu(&self, ui: Ui, cx: &Context<Self>) -> Dropdown<Button> {
         let dock = self.dock.read(cx);
-        let button = if dock.placement() == DockPlacement::Left && !dock.settings().compact() {
+        let button = if dock.placement() == DockPlacement::Left {
             ui.button(
                 Ghost,
                 "new-session",
@@ -56,38 +51,20 @@ impl Workspace {
         Dropdown::new(&self.session_menu, trigger, content).align_start()
     }
 
-    pub(super) fn workspace_menu(&self, ui: Ui, cx: &Context<Self>) -> Div {
-        let trigger = DropdownTrigger::new(
-            ui.icon_button(Ghost, "workspace-menu", Icon::Menu, "Menu")
-                .pressed(self.menu.read(cx).is_open()),
-        );
-        let show = |page: Page| {
-            let workspace = cx.weak_entity();
-            move |window: &mut Window, cx: &mut App| {
-                let _ = workspace.update(cx, |view, cx| view.show_page(page.clone(), window, cx));
-            }
-        };
-        let mut content = DropdownContent::new().item(
-            "settings",
-            Icon::Settings.label("Settings"),
-            show(Page::Settings),
-        );
-        if !self.tabs.contains(&Page::Home) {
-            content = content.item("home", Icon::Home.label("Open Home"), show(Page::Home));
-        }
-        let placement = self.dock.read(cx).placement().other();
-        let label = match placement {
-            DockPlacement::Top => Icon::TabsOnTop.label("Tabs on top"),
-            DockPlacement::Left => Icon::TabsOnLeft.label("Tabs on left"),
-        };
-        let dock = self.dock.clone();
-        let active = self.active.clone();
-        let content = content.item("tab-placement", label, move |_, cx| {
-            dock.update(cx, |dock, cx| dock.set_placement(placement, &active, cx));
-        });
+    pub(super) fn titlebar_actions(&self, ui: Ui, cx: &Context<Self>) -> Div {
         div()
+            .flex()
             .flex_none()
             .px_1()
-            .child(Dropdown::new(&self.menu, trigger, content))
+            .when(!self.tabs.contains(&Page::Home), |row| {
+                row.child(
+                    ui.icon_button(Ghost, "open-devices", Icon::Home, "Open Devices")
+                        .on_click(cx.listener(|v, _, w, cx| v.show_page(Page::Home, w, cx))),
+                )
+            })
+            .child(
+                ui.icon_button(Ghost, "open-settings", Icon::Settings, "Settings")
+                    .on_click(cx.listener(|v, _, w, cx| v.show_page(Page::Settings, w, cx))),
+            )
     }
 }
