@@ -1,9 +1,8 @@
 //! Human-readable reports for the management commands.
 mod table;
 
-use crate::status::MeasuredConnection;
 use table::Report;
-use peerhatch_control::{Direction, PairingStatus, PeerConnection, Status, format_bytes};
+use peerhatch_control::{Direction, PairingStatus, PeerConnection, PeerStatus, Status};
 
 fn connection_row(link: &PeerConnection) -> [String; 4] {
     let path = link.path.label();
@@ -11,11 +10,7 @@ fn connection_row(link: &PeerConnection) -> [String; 4] {
         "" | "Shared connection" => path.to_owned(),
         protocol => format!("{path} ({protocol})"),
     };
-    let rtt = match link.rtt_ms {
-        Some(0) => "<1 ms".into(),
-        Some(ms) => format!("{ms} ms"),
-        None => "-".into(),
-    };
+    let rtt = link.rtt_ms.map_or_else(|| "-".into(), |ms| ms.to_string());
     let streams = link.stream_labels().collect::<Vec<_>>().join(", ");
     [
         path,
@@ -71,7 +66,7 @@ pub(super) fn status(status: &Status) -> String {
     if !connections.is_empty() {
         report.table(
             "Connections",
-            ["PEER", "PATH", "ADDRESS", "RTT", "STREAMS"],
+            ["PEER", "PATH", "ADDRESS", "RTT (ms)", "STREAMS"],
             connections,
         );
     }
@@ -79,30 +74,30 @@ pub(super) fn status(status: &Status) -> String {
     report.text
 }
 
-pub(super) fn peer(status: &Status, name: &str, id: &str, paths: &[MeasuredConnection]) -> String {
+pub(super) fn peer(snapshot: &PeerStatus) -> String {
     let mut report = Report::new();
     report.heading("Paired device");
     report.fields(&[
-        ("Name", name),
-        ("System", status.peer_platform(name).label()),
-        ("Device ID", id),
-        ("State", status.peer_state(name)),
+        ("Name", &snapshot.peer),
+        ("System", snapshot.platform.label()),
+        ("Device ID", &snapshot.device_id),
+        ("State", &snapshot.state),
     ]);
-    if !paths.is_empty() {
-        report.table(
-            "Connections",
-            ["PATH", "ADDRESS", "UPLOAD", "DOWNLOAD", "RTT", "STREAMS"],
-            paths.iter().map(|measured| {
-                let [path, address, rtt, streams] = connection_row(measured.link);
-                let (upload, download) = match measured.rates {
-                    Some(rates) => (
-                        format!("{}/s", format_bytes(rates.upload_bytes_per_second)),
-                        format!("{}/s", format_bytes(rates.download_bytes_per_second)),
-                    ),
+    if let Some(paths) = snapshot.connections.as_ref().filter(|links| !links.is_empty()) {
+        let rows = paths.iter()
+            .map(|link| {
+                let (sent, received) = match link.traffic {
+                    Some(t) => (t.sent_bytes.to_string(), t.received_bytes.to_string()),
                     None => ("-".into(), "-".into()),
                 };
-                [path, address, upload, download, rtt, streams]
-            }).collect(),
+                let [path, address, rtt, streams] = connection_row(link);
+                [path, address, sent, received, rtt, streams]
+            })
+            .collect();
+        report.table(
+            "Connections",
+            ["PATH", "ADDRESS", "SENT (B)", "RECEIVED (B)", "RTT (ms)", "STREAMS"],
+            rows,
         );
     }
     report.text

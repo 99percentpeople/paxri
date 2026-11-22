@@ -8,7 +8,7 @@ Select a peer in the Devices sidebar or run `peerhatch status PEER`. **Direct** 
 
 The device page samples **Upload**, **Download**, and **Latency** about every three seconds and plots up to one minute of history. Rates use the local gateway’s QUIC byte counters, including control traffic and retransmissions. Hover over either rate to see the total sent or received on the current connection.
 
-`peerhatch status PEER` samples the same counters over about one second and prints upload rate, download rate, and RTT for each connection. With `--json`, each connection has `rates.upload_bytes_per_second`, `rates.download_bytes_per_second`, and `rtt_ms`. A measurable idle connection reports zero. If counters are unavailable or the connection changes during sampling, the rate columns show `-` and `rates` is `null`.
+`peerhatch status PEER` reads a single snapshot from the local gateway. **SENT (B)** and **RECEIVED (B)** are cumulative byte counts for the current connection. In `--json`, use `connections[].traffic.sent_bytes`, `traffic.received_bytes` and `rtt_ms` on the same connection. To calculate a rate, divide the change in a counter by the elapsed seconds between your own queries. Start a new baseline when `traffic.connected_at_ms` changes. A gateway that does not report counters omits `traffic`; the table displays `-`.
 
 To measure application echo time between two nodes, use `peerhatch probe listen` and `peerhatch probe connect`. Pass `--relay-only` when measuring relay performance. Use `--no-relay` to test an IP-only route with a known peer ticket. Set `RUST_LOG=iroh::net_report=debug,iroh::socket::remote_map=debug` for detailed native diagnostics.
 

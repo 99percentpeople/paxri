@@ -14,7 +14,7 @@ mod forward_management;
 mod platforms;
 mod settings;
 use settings::SettingsFile;
-use peerhatch_control::{Command, ControlListener, ControlStream, ForwardStatus, Status};
+use peerhatch_control::{Command, ControlListener, ControlStream, ForwardStatus, PeerStatus, Status};
 use peerhatch_native::gateway::NativeTransport;
 mod reverse;
 mod streams;
@@ -115,6 +115,18 @@ impl Gateway {
             selector.clone_from(name);
         }
         Ok(())
+    }
+
+    fn peer_status(&self, selector: &str) -> Result<PeerStatus> {
+        let (name, peer) = self.config.resolve_peer(selector)?;
+        let session = self.transport.online_session(name).ok();
+        Ok(PeerStatus {
+            peer: name.clone(),
+            device_id: peer.endpoint_id.clone(),
+            platform: peer.platform.unwrap_or_default(),
+            state: if session.is_some() { "Connected" } else { "Offline" }.into(),
+            connections: Some(session.map(|s| s.status()).into_iter().collect()),
+        })
     }
 
     fn apply_config(&mut self, config: Config) {
@@ -373,6 +385,29 @@ impl Gateway {
     }
 }
 
+async fn check_peer<'a>(
+    gateway: &'a Mutex<Gateway>,
+    selector: &str,
+) -> Result<(tokio::sync::MutexGuard<'a, Gateway>, String)> {
+    let (transport, name, expected_id) = {
+        let state = gateway.lock().await;
+        let (name, peer) = state.config.resolve_peer(selector)?;
+        (state.transport.clone(), name.clone(), peer.endpoint_id.clone())
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        peerhatch_core::peer_platform(&*transport, &name),
+    )
+    .await
+    .with_context(|| format!("Checking connection to {name} timed out"))??;
+    let state = gateway.lock().await;
+    anyhow::ensure!(
+        state.config.peers.get(&name).is_some_and(|p| p.endpoint_id == expected_id),
+        "Pairing changed while checking {name}"
+    );
+    Ok((state, name))
+}
+
 async fn handle_client(
     mut socket: ControlStream,
     gateway: Arc<Mutex<Gateway>>,
@@ -385,8 +420,7 @@ async fn handle_client(
     };
     // Resolve only outgoing local requests. Transport authentication and incoming
     // stream authorization continue to use the complete public key.
-    if let Command::CheckPeer { peer }
-    | Command::ManagePeerForward { owner: peer, .. }
+    if let Command::ManagePeerForward { owner: peer, .. }
     | Command::Connect { peer, .. }
     | Command::OpenTerminal { peer, .. }
     | Command::Exec { peer, .. }
@@ -427,6 +461,14 @@ async fn handle_client(
             let status = gateway.lock().await.status();
             peerhatch_control::respond(&mut socket, Ok(status)).await
         }
+        Command::PeerStatus { peer, check } => {
+            let snapshot = if check {
+                check_peer(&gateway, &peer).await.and_then(|(state, name)| state.peer_status(&name))
+            } else {
+                gateway.lock().await.peer_status(&peer)
+            };
+            peerhatch_control::respond(&mut socket, snapshot).await
+        }
         Command::WatchPeerConnections => {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let state = gateway.lock().await;
@@ -450,18 +492,8 @@ async fn handle_client(
             }
         }
         Command::CheckPeer { peer } => {
-            let transport = gateway.lock().await.transport.clone();
-            let result = match tokio::time::timeout(
-                std::time::Duration::from_secs(25),
-                peerhatch_core::peer_platform(&*transport, &peer),
-            )
-            .await
-            {
-                Ok(Ok(_)) => Ok(gateway.lock().await.status()),
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(anyhow::anyhow!("Checking connection to {peer} timed out")),
-            };
-            peerhatch_control::respond(&mut socket, result).await
+            let snapshot = check_peer(&gateway, &peer).await.map(|(mut state, _)| state.status());
+            peerhatch_control::respond(&mut socket, snapshot).await
         }
         Command::SetNative { change } => {
             let mut state = gateway.lock().await;

@@ -31,6 +31,7 @@ const DEADLINE: Duration = Duration::from_secs(5);
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    PeerStatus { peer: String, check: bool },
     WatchPeerConnections,
     ListForwards,
     ManagePeerForward { owner: String, action: PeerForward },
@@ -169,6 +170,16 @@ pub struct PairingPeer {
     pub device_id: String,
     #[serde(default)]
     pub platform: DevicePlatform,
+}
+
+/// Local connection observations for a single paired device.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerStatus {
+    pub peer: String,
+    pub device_id: String,
+    pub platform: DevicePlatform,
+    pub state: String,
+    pub connections: Option<Vec<PeerConnection>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -472,6 +483,28 @@ async fn begin<T: DeserializeOwned>(
 pub async fn watch_peer_connections(path: &Path) -> Result<Stream> {
     let (stream, ()) = begin(path, Command::WatchPeerConnections, DEADLINE).await?;
     Ok(stream)
+}
+
+pub async fn peer_status(path: &Path, peer: &str, check: bool) -> Result<PeerStatus> {
+    let command = Command::PeerStatus { peer: peer.to_owned(), check };
+    let deadline = if check { Duration::from_secs(30) } else { DEADLINE };
+    match begin(path, command, deadline).await {
+        Ok((_, snapshot)) => Ok(snapshot),
+        // Gateways predating this read-only command return Serde's unknown-variant error.
+        Err(e) if e.to_string().starts_with("unknown variant `peer_status`") => {
+            let command = if check { Command::CheckPeer { peer: peer.into() } } else { Command::Status };
+            let status = request(path, command).await?;
+            let (name, id) = status.resolve_peer(peer)?;
+            Ok(PeerStatus {
+                peer: name.into(),
+                device_id: id.into(),
+                platform: status.peer_platform(name),
+                state: status.peer_state(name).into(),
+                connections: status.connections_for(name).map(<[_]>::to_vec),
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn request(path: &Path, command: Command) -> Result<Status> {

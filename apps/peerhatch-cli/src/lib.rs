@@ -48,7 +48,7 @@ pub enum Command {
         action: gateway::Action,
     },
     /// Show the running gateway, peers and bound ports
-    #[command(after_help = "For a connected device, upload and download rates are sampled at the local gateway over about one second.")]
+    #[command(after_help = "Device status shows cumulative bytes sent, bytes received, and the current round-trip time.")]
     Status {
         /// Paired device name, full ID or unique ID prefix (at least 4 hex digits)
         peer: Option<String>,
@@ -206,6 +206,10 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
     if let Command::BootGateway { client, node_file } = command {
         return gateway::boot::start(&client, &node_file, selected.as_deref());
     }
+    if let Command::Status { peer: Some(peer), check, json } = command {
+        status::show_peer(selected.as_deref(), &peer, check, json).await?;
+        return Ok(0);
+    }
     let discover = selected.is_none()
         && std::env::var_os("PEERHATCH_IPC").is_none()
         && !matches!(
@@ -246,16 +250,14 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
         Command::Connect { peer, target } => {
             connect_stdio(&ipc, peer, target).await?;
         }
-        Command::Status { peer, check, json } => {
+        Command::Status { json, .. } => {
             let status = match active {
                 Some(status) => status,
                 None => {
                     peerhatch_control::request(&ipc, peerhatch_control::Command::Status).await?
                 }
             };
-            if let Some(selector) = peer {
-                status::show_peer(&ipc, status, &selector, check, json).await?;
-            } else if json {
+            if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
                 print!("{}", output::status(&status));

@@ -384,6 +384,8 @@ def check_pairing(root, keys, call, start, target_port, wait):
     host_short = next(word for word in devices.split() if len(word) >= 8 and keys["host"].startswith(word))
     selected = json.loads(call("client", "status", host_short, "--check", "--json"))
     assert (selected["peer"], selected["device_id"]) == ("Studio-2", keys["host"])
+    idle = json.loads(call("client", "status", "Studio", "--json"))
+    assert idle["state"] == "Offline" and idle["connections"] == [], idle
     for node, peer in directions:
         # QUIC can finish the application exchange before publishing its selected path.
         deadline = time.monotonic() + 5
@@ -394,6 +396,12 @@ def check_pairing(root, keys, call, start, target_port, wait):
                 break
             time.sleep(.05)
         assert links[0]["path"] == "direct" and links[0]["address"] and links[0]["rtt_ms"] is not None, links
+        traffic = links[0]["traffic"]
+        assert all(type(traffic[k]) is int and traffic[k] >= 0
+                   for k in ("sent_bytes", "received_bytes", "connected_at_ms")), traffic
+        assert "rates" not in links[0], links
+        report = call(node, "status", peer)
+        assert all(label in report for label in ("SENT (B)", "RECEIVED (B)", "RTT (ms)")), report
     rejected("host", "status", "missing", "--json")
     assert status("client")["peer_platforms"] == {"Studio-2": platform}
     call("spare", "pair", "join", old_code)

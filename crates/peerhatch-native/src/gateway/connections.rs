@@ -112,7 +112,7 @@ impl NativeSession {
             kind,
         }
     }
-    fn status(&self) -> PeerConnection {
+    pub fn status(&self) -> PeerConnection {
         let paths = self.conn.paths();
         let (path, address, rtt_ms) = match paths.iter().find(|p| p.is_selected()) {
             Some(p) => {
