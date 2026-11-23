@@ -2,7 +2,7 @@ use super::settings_catalog as catalog;
 use crate::{
     Dashboard,
     components::{
-        Button, ButtonVariant::Secondary, Icon, Select, SettingsGroup, SettingsSection, SettingsTable,
+        ButtonVariant::Secondary, Icon, Select, SettingsGroup, SettingsSection, SettingsTable,
         Ui, actions, setting_field,
     },
     theme::{self, Appearance, SPACE_2, SPACE_3},
@@ -14,11 +14,6 @@ use paxri_config::gui::TabPlacement;
 use paxri_cli::gateway::Action;
 use paxri_config::startup::Startup;
 use paxri_control::{Command, GuiChange};
-
-fn copy_button(ui: Ui, id: &'static str, label: &'static str, text: String) -> Button {
-    ui.button(Secondary, id, label)
-        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
-}
 
 impl Dashboard {
     fn appearance_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
@@ -46,7 +41,7 @@ impl Dashboard {
         group
     }
 
-    fn runtime_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
+    fn gateway_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
         let online = self.status.is_some();
         let external = self.status.as_ref().is_some_and(|s| !s.user_managed);
         let (state, color) = match self.gateway_action {
@@ -57,7 +52,7 @@ impl Dashboard {
             _ if self.error.is_some() => ("Offline", ui.colors.warning),
             _ => ("Connecting", ui.colors.muted_foreground),
         };
-        let mut group = SettingsGroup::new(catalog::RUNTIME);
+        let mut group = SettingsGroup::new(catalog::GATEWAY);
         let status_hint = if self
             .status
             .as_ref()
@@ -72,7 +67,7 @@ impl Dashboard {
             "",
             "Gateway status",
             status_hint,
-            &format!("process {state}"),
+            &format!("runtime process {state}"),
             actions().child(ui.status_badge(state, color)),
         );
 
@@ -103,9 +98,27 @@ impl Dashboard {
             "",
             "Gateway actions",
             actions_hint,
-            "process start stop restart",
+            "runtime process start stop restart",
             controls,
         );
+        let policy = if external {
+            setting_field(
+                ui.muted(format!("{} · Service-managed", self.startup.label()))
+                    .text_right(),
+            )
+        } else {
+            ui.setting_choice(
+                "gateway-startup",
+                self.startup,
+                Startup::ALL,
+                Startup::label,
+                cx.listener(|view, choice: &Startup, _, cx| {
+                    view.manage(Action::Startup { mode: Some(*choice) }, cx)
+                }),
+            )
+        };
+        group.setting(catalog::STARTUP, policy);
+
         let toggle = ui
             .button(
                 crate::components::ButtonVariant::Ghost,
@@ -129,7 +142,7 @@ impl Dashboard {
             "",
             "Gateway details",
             "Inspect the executable, startup registration, local IPC and configuration path.",
-            "diagnostics task scheduler socket",
+            "runtime diagnostics task scheduler socket",
             toggle,
         );
         if self.gateway_details {
@@ -166,11 +179,12 @@ impl Dashboard {
             );
         }
         if let Some(s) = &self.status {
+            let id = s.device_id.clone();
             group.add(
                 "",
                 "Device ID",
                 "Copy the full identifier for this device.",
-                "identity",
+                "runtime identity",
                 actions()
                     .justify_end()
                     .child(
@@ -180,37 +194,12 @@ impl Dashboard {
                         .flex_none()
                         .whitespace_nowrap(),
                     )
-                    .child(copy_button(ui, "copy-id", "Copy ID", s.device_id.clone())),
+                    .child(ui.button(Secondary, "copy-id", "Copy ID").on_click(move |_, w, cx| {
+                        crate::components::copy_with_feedback(id.clone(), "Device ID copied", w, cx);
+                    })),
             );
         }
         group
-    }
-
-    fn gateway_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
-        let mut gateway = SettingsGroup::new(catalog::GATEWAY);
-        let policy = if self.status.as_ref().is_some_and(|s| !s.user_managed) {
-            setting_field(
-                ui.muted(format!("{} · Service-managed", self.startup.label()))
-                    .text_right(),
-            )
-        } else {
-            ui.setting_choice(
-                "gateway-startup",
-                self.startup,
-                Startup::ALL,
-                Startup::label,
-                cx.listener(|view, choice: &Startup, _, cx| {
-                    view.manage(
-                        Action::Startup {
-                            mode: Some(*choice),
-                        },
-                        cx,
-                    )
-                }),
-            )
-        };
-        gateway.setting(catalog::STARTUP, policy);
-        gateway
     }
 
     pub(super) fn settings_groups(
@@ -222,7 +211,7 @@ impl Dashboard {
         type Builder<'a> = Box<dyn FnOnce() -> SettingsGroup + 'a>;
         let mut sources: Vec<(SettingsSection, Builder<'_>)> = Vec::new();
         if self.status.is_some() {
-            sources.push((catalog::DEVICE, Box::new(move || self.device_settings(ui))));
+            sources.push((catalog::DEVICE, Box::new(move || self.device_settings())));
         }
         sources.push((
             catalog::GATEWAY,
@@ -239,10 +228,6 @@ impl Dashboard {
         sources.push((
             catalog::TERMINAL,
             Box::new(move || self.terminal_settings(ui, cx)),
-        ));
-        sources.push((
-            catalog::RUNTIME,
-            Box::new(move || self.runtime_settings(ui, cx)),
         ));
         let selected = requested.map(|page| {
             if sources.iter().any(|(s, _)| s.table.top_level() == page) {
@@ -264,7 +249,7 @@ impl Dashboard {
         (selected, groups)
     }
 
-    pub(super) fn open_config_file(&self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+    pub(super) fn open_config_file(&self, path: std::path::PathBuf, window: AnyWindowHandle, cx: &mut Context<Self>) {
         let launch = self.runtime.spawn_blocking(move || -> anyhow::Result<()> {
             let path = std::path::absolute(path)?;
             if !path.try_exists()? {
@@ -272,12 +257,9 @@ impl Dashboard {
             }
             open::that(&path).with_context(|| format!("Could not open {}", path.display()))
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_, cx| {
             if let Err(error) = launch.await.map_err(anyhow::Error::from).and_then(|r| r) {
-                let _ = this.update(cx, |v, cx| {
-                    v.action_error = Some(format!("Open config file: {error:#}"));
-                    cx.notify();
-                });
+                let _ = cx.update(|cx| crate::components::Toast::show(format!("Open config file: {error:#}"), window, cx));
             }
         })
         .detach();
@@ -296,7 +278,7 @@ impl Dashboard {
         }
     }
 
-    fn device_settings(&self, ui: Ui) -> SettingsGroup {
-        SettingsGroup::device(self.name_field.render(ui))
+    fn device_settings(&self) -> SettingsGroup {
+        SettingsGroup::device(self.name_field.render())
     }
 }

@@ -118,9 +118,6 @@ impl Dashboard {
             ));
         }
         for page in &pages {
-            if page.section.table == SettingsTable::Runtime && pages.len() > 1 {
-                navigation = navigation.child(ui.separator());
-            }
             navigation = navigation.child(self.settings_nav_button(
                 ui,
                 Some(page.section),
@@ -168,7 +165,7 @@ impl Dashboard {
                     Icon::File,
                     format!("Open config file · {}", path.display()),
                 )
-                .on_click(cx.listener(move |v, _, _, cx| v.open_config_file(path.clone(), cx))),
+                .on_click(cx.listener(move |v, _, w, cx| v.open_config_file(path.clone(), w.window_handle(), cx))),
             );
         }
         let toolbar = div()

@@ -14,15 +14,12 @@ pub const TERMINAL: SettingsSection = SettingsSection::new(
     "Terminal",
     Icon::Terminal,
 );
-pub const RUNTIME: SettingsSection =
-    SettingsSection::new(SettingsTable::Runtime, "Runtime", Icon::Settings);
-
 pub const INTERFACE: SettingsSection =
     SettingsSection::new(SettingsTable::Named("gui"), "Interface", Icon::Settings);
 
 pub fn page_for(section: SettingsSection) -> SettingsSection {
     let table = section.table.top_level();
-    [DEVICE, GATEWAY, NETWORK, INTERFACE, RUNTIME]
+    [DEVICE, GATEWAY, NETWORK, INTERFACE]
         .into_iter()
         .find(|page| page.table == table)
         .unwrap_or(SettingsSection { table, ..section })

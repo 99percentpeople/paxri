@@ -452,10 +452,7 @@ impl Workspace {
                 Some(handle)
             }
             Err(e) => {
-                self.dashboard.update(cx, |d, cx| {
-                    d.action_error = Some(format!("Open window: {e}"));
-                    cx.notify();
-                });
+                crate::components::notify_active(format!("Open window: {e}"), cx);
                 None
             }
         }
@@ -579,7 +576,6 @@ impl Render for Workspace {
             }
         }
         let ui = Ui::new(window, cx);
-        let error = self.dashboard.read(cx).action_error.clone();
         let tabs = self.tab_bar(ui, window, cx);
         let panel = self.active_panel(ui, window.viewport_size().width, cx);
         let dock = DockLayout::new("paxri", tabs, panel, self.titlebar_actions(ui, cx));
@@ -603,7 +599,6 @@ impl Render for Workspace {
                     cx.stop_propagation();
                 })
             })
-            .when_some(error, |dock, message| dock.banner(ui.alert(message)))
             .when_some(self.dragged_tab.as_ref(), |dock, drag| {
                 dock.dragging(
                     drag.clone(),

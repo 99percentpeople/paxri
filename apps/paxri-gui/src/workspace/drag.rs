@@ -482,10 +482,7 @@ impl Workspace {
                 true
             }
             Err(e) => {
-                self.dashboard.update(cx, |d, cx| {
-                    d.action_error = Some(format!("Open window: {e}"));
-                    cx.notify();
-                });
+                crate::components::notify_active(format!("Open window: {e}"), cx);
                 false
             }
         }

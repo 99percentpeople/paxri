@@ -10,6 +10,8 @@ pub mod input;
 mod icons;
 mod list_item;
 mod tooltip;
+mod toast;
+pub use toast::Toast;
 use crate::theme::{self, CONTROL_RADIUS, Palette, SPACE_1, SPACE_2, SPACE_3, SPACE_4};
 pub use button::{Button, ButtonVariant};
 use gpui::{prelude::*, *};

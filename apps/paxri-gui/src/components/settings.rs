@@ -1,6 +1,5 @@
 //! Desktop-specific input controls for the shared settings rows.
 use super::{Input, Select, Ui, input::EditingFinished};
-use crate::theme::SPACE_1;
 use gpui::{prelude::*, *};
 use std::collections::VecDeque;
 
@@ -46,7 +45,6 @@ pub(crate) struct TextSetting {
     input: Entity<Input>,
     saved: String,
     pending: VecDeque<String>,
-    error: Option<String>,
 }
 
 impl TextSetting {
@@ -65,21 +63,11 @@ impl TextSetting {
             input,
             saved: String::new(),
             pending: VecDeque::new(),
-            error: None,
         }
     }
 
-    pub fn render(&self, ui: Ui) -> Div {
-        setting_field(
-            div()
-                .flex()
-                .flex_col()
-                .gap(SPACE_1)
-                .child(self.input.clone())
-                .when_some(self.error.clone(), |field, error| {
-                    field.child(ui.alert(error))
-                }),
-        )
+    pub fn render(&self) -> Div {
+        setting_field(self.input.clone())
     }
 
     pub fn set_placeholder(&self, placeholder: &str, cx: &mut App) {
@@ -101,7 +89,6 @@ impl TextSetting {
 
     pub fn changed_value(&mut self, cx: &mut App) -> Option<String> {
         let value = self.input.read(cx).text().trim().to_owned();
-        self.error = None;
         if value == *self.pending.back().unwrap_or(&self.saved) {
             self.input
                 .update(cx, |field, cx| field.set_text(&value, cx));
@@ -124,7 +111,7 @@ impl TextSetting {
                 self.input
                     .update(cx, |field, cx| field.set_text(&self.saved, cx));
             }
-            Err(error) => self.error = Some(error.clone()),
+            Err(error) => super::notify_active(error.clone(), cx),
         }
     }
 }

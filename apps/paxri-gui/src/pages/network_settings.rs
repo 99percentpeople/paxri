@@ -100,7 +100,7 @@ impl Dashboard {
                 .map_or("Automatic public relay", |url| url.as_str());
             ui.muted(value.to_owned()).text_right()
         } else {
-            self.relay_field.render(ui)
+            self.relay_field.render()
         };
         group.setting(catalog::RELAY, relay);
         if let Some(status) = &self.status

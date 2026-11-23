@@ -39,7 +39,6 @@ pub(crate) struct Dialog {
     owner: AnyWindowHandle,
     mode: DialogMode,
     focus: FocusHandle,
-    error: Option<String>,
     content: Box<dyn Fn(Ui, &mut App) -> DialogContent>,
     _owner_lifetime: Subscription,
 }
@@ -84,12 +83,7 @@ impl Dialog {
     }
 
     pub(crate) fn show_error(window: &Window, error: impl Into<String>, cx: &mut App) {
-        Self::complete(
-            window.window_handle(),
-            Err(error.into()),
-            DialogSuccess::KeepOpen,
-            cx,
-        );
+        super::Toast::show(error.into(), window.window_handle(), cx);
     }
 
     pub(crate) fn complete(
@@ -98,17 +92,14 @@ impl Dialog {
         on_success: DialogSuccess,
         cx: &mut App,
     ) {
-        if let Some(dialog) = handle.downcast::<Self>() {
-            cx.defer(move |cx| {
-                let _ = dialog.update(cx, |dialog, w, cx| {
-                    if result.is_ok() && matches!(on_success, DialogSuccess::Close) {
-                        w.remove_window();
-                    } else {
-                        dialog.error = result.err();
-                        cx.notify();
-                    }
+        match result {
+            Err(error) => super::Toast::show(error, handle, cx),
+            Ok(()) if matches!(on_success, DialogSuccess::Close) => {
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, w, _| w.remove_window());
                 });
-            });
+            }
+            Ok(()) => {}
         }
     }
 
@@ -202,7 +193,6 @@ impl Dialog {
                         owner,
                         mode,
                         focus,
-                        error: None,
                         content: Box::new(move |ui, cx| {
                             model.update(cx, |model, cx| render(model, ui, cx))
                         }),
@@ -262,17 +252,10 @@ impl Render for Dialog {
             .bg(rgb(ui.colors.canvas.background))
             .text_color(rgb(ui.colors.canvas.foreground))
             .child(crate::chrome::dialog_titlebar(self.title, ui))
-            .child(
-                div()
-                    .id("dialog-content")
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .when_some(self.error.clone(), |d, e| d.child(ui.alert(e)))
-                    .child(parts.body),
-            )
+            .child(div().relative().flex_1().min_h_0().flex().flex_col()
+                .child(div().id("dialog-content").w_full().flex_1().min_h_0()
+                    .overflow_y_scroll().p_4().child(parts.body))
+                .children(super::Toast::overlay(w, cx)))
             .child(footer)
             .on_key_down(|e, w, cx| {
                 if e.keystroke.key == "escape" && !e.keystroke.modifiers.modified() {

@@ -17,7 +17,6 @@ pub enum SettingsLayout {
 pub enum SettingsTable {
     Root,
     Named(&'static str),
-    Runtime,
 }
 
 impl SettingsTable {
@@ -29,7 +28,6 @@ impl SettingsTable {
         match self {
             Self::Root => "Top level".into(),
             Self::Named(name) => format!("[{name}]").into(),
-            Self::Runtime => "Runtime".into(),
         }
     }
 
@@ -47,7 +45,6 @@ impl SettingsTable {
         match self {
             Self::Root => Some(key.to_owned()),
             Self::Named(table) => Some(format!("{table}.{key}")),
-            Self::Runtime => None,
         }
     }
 }
@@ -187,6 +184,11 @@ impl SettingsGroup {
         row.search.push_str(&heading.to_lowercase());
     }
 
+    /// A form field displayed like a preference, without a configuration path.
+    pub fn field(&mut self, title: impl Into<SharedString>, control: impl IntoElement) {
+        self.add("", title, "", "", controls::setting_field(control));
+    }
+
     pub fn add(
         &mut self,
         key: &str,
@@ -223,6 +225,11 @@ impl SettingsGroup {
     pub fn filter(&mut self, words: &[&str]) {
         self.rows
             .retain(|row| words.iter().all(|word| row.search.contains(*word)));
+    }
+
+    pub fn render_rows(self, ui: Ui) -> impl IntoElement {
+        let section = self.section;
+        self.render(ui, section)
     }
 
     fn render(self, ui: Ui, page: SettingsSection) -> impl IntoElement {
@@ -372,6 +379,6 @@ mod tests {
             SettingsTable::Root.path("device_name").as_deref(),
             Some("device_name")
         );
-        assert!(SettingsTable::Runtime.path("gateway").is_none());
+        assert!(super::catalog::GATEWAY.table.path("").is_none());
     }
 }

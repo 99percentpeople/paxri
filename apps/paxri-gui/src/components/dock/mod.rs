@@ -86,7 +86,6 @@ pub struct DockLayout<K: Clone + PartialEq + 'static> {
     actions: AnyElement,
     tabs: DockTabs<K>,
     panel: DockPanel,
-    banner: Option<AnyElement>,
     preview: Option<AnyElement>,
 }
 
@@ -103,14 +102,8 @@ impl<K: Clone + PartialEq + 'static> DockLayout<K> {
             actions: actions.into_any_element(),
             tabs,
             panel,
-            banner: None,
             preview: None,
         }
-    }
-
-    pub fn banner(mut self, banner: impl IntoElement) -> Self {
-        self.banner = Some(banner.into_any_element());
-        self
     }
 
     /// Paint a proxy above the strip while its resting slot keeps its measured size.
@@ -205,8 +198,7 @@ impl<K: Clone + PartialEq + 'static> RenderOnce for DockLayout<K> {
             .bg(rgb(ui.colors.canvas.background))
             .text_color(rgb(ui.colors.canvas.foreground))
             .child(header)
-            .children(self.banner)
-            .child(body)
+            .child(body.relative().children(super::Toast::overlay(w, cx)))
             .children(self.preview)
             .children(resize);
         chrome::frame(content, w)

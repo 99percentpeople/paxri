@@ -41,7 +41,6 @@ impl Dashboard {
     }
 
     pub(super) fn show_devices_pane(&mut self, pane: DevicesPane, cx: &mut Context<Self>) {
-        self.action_error = None;
         let forwards = pane == DevicesPane::Forwards;
         self.devices_pane = Some(pane);
         if forwards {
@@ -54,30 +53,7 @@ impl Dashboard {
 
     fn copy_pairing_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let code = self.local_code.read(cx).text().to_owned();
-        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-        // Clipboard ownership can change asynchronously. Check the value after the platform event.
-        let dashboard = cx.weak_entity();
-        window.on_next_frame(move |_, cx| {
-            let _ = dashboard.update(cx, |view, cx| {
-                if view.local_code.read(cx).text() != code {
-                    return;
-                }
-                let copied = cx.read_from_clipboard().and_then(|item| item.text());
-                view.copied_feedback = (copied.as_deref() == Some(code.as_str())).then(|| {
-                    cx.spawn(async |this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1500))
-                            .await;
-                        let _ = this.update(cx, |view, cx| {
-                            view.copied_feedback = None;
-                            cx.notify();
-                        });
-                    })
-                });
-                cx.notify();
-            });
-        });
-        cx.notify();
+        crate::components::copy_with_feedback(code, "Pairing code copied", window, cx);
     }
 
     fn device_sidebar(&self, ui: Ui, cx: &Context<Self>) -> DockNavigation {
@@ -123,20 +99,11 @@ impl Dashboard {
                         d.child(self.paired_devices(ui, s, cx))
                     })
                     .child(add)
-                    .when_some(self.status.as_ref(), |d, s| {
-                        if s.pairing.pending_unpairs.is_empty() {
-                            d.when_some(s.pairing.message.clone(), |d, m| {
-                                d.child(ui.muted(m).text_xs())
-                            })
-                        } else {
-                            d.child(
-                                ui.muted(format!(
-                                    "Awaiting unpair confirmation: {}",
-                                    s.pairing.pending_unpairs.join(", ")
-                                ))
-                                .text_xs(),
-                            )
-                        }
+                    .when_some(self.status.as_ref().filter(|s| !s.pairing.pending_unpairs.is_empty()), |d, s| {
+                        d.child(ui.muted(format!(
+                            "Awaiting unpair confirmation: {}",
+                            s.pairing.pending_unpairs.join(", ")
+                        )).text_xs())
                     }),
             )
             .child(
@@ -335,15 +302,10 @@ impl Dashboard {
     fn pairing_fields(&self, ui: Ui, pairing: &PairingStatus, cx: &Context<Self>) -> Div {
         let mut code = div().w_full().flex().items_center().gap_1();
         if pairing.code.is_some() {
-            let (icon, label) = if self.copied_feedback.is_some() {
-                (Icon::Check, "Copied")
-            } else {
-                (Icon::Copy, "Copy code")
-            };
             code = code
                 .child(div().flex_1().min_w_0().child(self.local_code.clone()))
                 .child(
-                    ui.icon_button(Ghost, "copy-code", icon, label)
+                    ui.icon_button(Ghost, "copy-code", Icon::Copy, "Copy code")
                         .on_click(cx.listener(|v, _, w, cx| v.copy_pairing_code(w, cx))),
                 );
         } else {
@@ -366,7 +328,6 @@ impl Dashboard {
             .when(pairing.outgoing.is_none(), |d| {
                 d.child(ui.labeled("Other device’s pairing code", self.pairing_input.clone()))
             })
-            .when_some(pairing.message.clone(), |d, m| d.child(ui.muted(m)))
             .child(
                 ui.muted("Pairing allows both devices to open terminals and copy files.")
                     .text_xs(),

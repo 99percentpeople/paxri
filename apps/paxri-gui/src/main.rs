@@ -79,7 +79,6 @@ struct Dashboard {
     peer_system: Option<paxri_control::DevicePlatform>,
     local_code: Entity<Input>,
     pairing_qr: Option<std::rc::Rc<qrcode::QrCode>>,
-    copied_feedback: Option<Task<()>>,
     saving: bool,
     gateway_action: Option<GatewayAction>,
     address: Option<PathBuf>,
@@ -96,7 +95,6 @@ struct Dashboard {
     error: Option<String>,
     busy: bool,
     pending: VecDeque<GatewayRequest>,
-    action_error: Option<String>,
 }
 
 impl Dashboard {
@@ -331,19 +329,14 @@ impl Dashboard {
                         view.status = None;
                         view.startup = startup;
                         view.error = Some("Gateway stopped.".into());
-                        if changing {
-                            view.action_error = None;
-                        }
                     }
                     Ok(RequestResult::OfflineNative(settings)) => {
                         view.presence_watch = None;
                         view.profile_native = Some(settings);
                         view.status = None;
-                        view.action_error = None;
                     }
                     Ok(RequestResult::OfflineGui(settings)) => {
                         theme::apply(settings, cx);
-                        view.action_error = None;
                     }
                     Ok(RequestResult::Gateway(mut status, legacy)) => {
                         if show_forwards && changing {
@@ -358,6 +351,11 @@ impl Dashboard {
                             old.device_id != status.device_id || old.ipc_path != status.ipc_path
                         }) {
                             view.connection_history = Default::default();
+                        } else if let Some(message) = &status.pairing.message
+                            && view.status.as_ref().and_then(|s| s.pairing.message.as_ref()) != Some(message)
+                            && let Some(window) = cx.active_window()
+                        {
+                            components::Toast::show(message.clone(), window, cx);
                         }
                         let paths = status.peer_connections.iter().flatten().filter_map(|(alias, paths)| {
                             Some((status.peers.get(alias)?.as_str(), paths.as_slice()))
@@ -400,7 +398,6 @@ impl Dashboard {
                             .local_code
                             .update(cx, |field, cx| field.set_text(code, cx))
                         {
-                            view.copied_feedback = None;
                             view.pairing_qr = status.pairing.code.as_ref()
                                 .and_then(|code| qrcode::QrCode::new(code).ok())
                                 .map(std::rc::Rc::new);
@@ -408,13 +405,10 @@ impl Dashboard {
                         view.startup = status.startup;
                         view.status = Some(*status);
                         view.error = None;
-                        if changing && on_complete.is_none() {
-                            view.action_error = None;
-                        }
                     }
                     Err(error) if changing => {
                         if on_complete.is_none() && !name_saved && !relay_saved {
-                            view.action_error = Some(error);
+                            components::notify_active(error, cx);
                         }
                     }
                     Err(error) => {
@@ -477,7 +471,6 @@ impl Dashboard {
             gateway_details: false,
             local_code: Input::read_only("", cx),
             pairing_qr: None,
-            copied_feedback: None,
             review_request: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),
             peer_search,
@@ -502,7 +495,6 @@ impl Dashboard {
             error: None,
             busy: false,
             pending: VecDeque::new(),
-            action_error: None,
         };
         view.request(
             GatewayRequest {
