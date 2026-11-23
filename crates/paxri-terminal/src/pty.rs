@@ -11,7 +11,12 @@ use std::{
     thread,
 };
 
+#[cfg(unix)]
+mod unix;
+
 pub enum Output {
+    /// Previously displayed bytes. Clients must discard generated terminal replies.
+    Replay(Vec<u8>),
     Bytes(Vec<u8>),
     Error(String),
     Exited(std::io::Result<ExitStatus>),
@@ -30,10 +35,33 @@ impl Session {
     }
 
     pub fn spawn(cmd: CommandBuilder, size: PtySize) -> Result<(Self, Receiver<Output>)> {
+        Self::spawn_pty(cmd, size, false)
+    }
+
+    pub fn spawn_managed(cmd: CommandBuilder, size: PtySize) -> Result<(Self, Receiver<Output>)> {
+        Self::spawn_pty(cmd, size, true)
+    }
+
+    fn spawn_pty(
+        cmd: CommandBuilder,
+        size: PtySize,
+        managed: bool,
+    ) -> Result<(Self, Receiver<Output>)> {
         let pair = native_pty_system()
             .openpty(size)
             .context("open a terminal")?;
-        let mut reader = pair.master.try_clone_reader()?;
+        #[cfg(unix)]
+        let (mut reader, notify_exit) = if managed {
+            let (reader, notify) = unix::Reader::new(&*pair.master)?;
+            (Box::new(reader) as Box<dyn Read + Send>, Some(notify))
+        } else {
+            (pair.master.try_clone_reader()?, None)
+        };
+        #[cfg(not(unix))]
+        let mut reader = {
+            let _ = managed;
+            pair.master.try_clone_reader()?
+        };
         let mut writer = pair.master.take_writer()?;
         let mut child = pair
             .slave
@@ -78,6 +106,8 @@ impl Session {
             child_sizes.close();
             child_input.close();
             let _ = exit.send(result);
+            #[cfg(unix)]
+            drop(notify_exit);
         });
         let errors = output.clone();
         thread::spawn(move || {

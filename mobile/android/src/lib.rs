@@ -42,6 +42,7 @@ use paxri_ui::{
 };
 use std::collections::BTreeMap;
 use views::initial_size;
+use paxri_terminal::managed::{Key as SessionKey, Request as TerminalRequest};
 
 enum Update {
     Ready(Arc<Client>, Peers),
@@ -68,7 +69,8 @@ enum Update {
     Gesture(u64, touch::Gesture),
     Close,
     Connected(u64),
-    Output(u64, Vec<u8>),
+    Output(u64, Vec<u8>, bool),
+    Hosted(String, Option<Vec<SessionKey>>),
     Presence(Presence),
     ForwardChanged(String, Result<(), String>),
     ForwardRules(
@@ -406,7 +408,7 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
 
 struct Session {
     id: u64,
-    number: usize,
+    key: SessionKey,
     peer: String,
     name: SharedString,
     state: SessionState,
@@ -430,7 +432,7 @@ impl Session {
     }
 
     fn labels(&self, cx: &App) -> (SharedString, String) {
-        let number = self.number;
+        let number = self.key.number;
         let subtitle = match &self.state {
             SessionState::Connected => format!("Session {number}"),
             SessionState::Connecting => format!("Session {number} · Connecting…"),
@@ -477,6 +479,8 @@ struct Mobile {
     rule_form: forwards::RuleForm,
     sessions: BTreeMap<u64, Session>,
     last_session_number: BTreeMap<String, usize>,
+    hosted: BTreeMap<String, Vec<SessionKey>>,
+    listing_peer: Option<String>,
     page: Page,
     drawer: Drawer,
     name_input: Entity<paxri_ui::components::input::Input>,
@@ -621,6 +625,7 @@ impl Mobile {
             self.settings_scroll.set_offset(Point::default());
         }
         self.page = page;
+        self.refresh_sessions();
         self.sync_forwards(false);
         self.drawer.set_open(false);
         self.sync_back();
@@ -663,7 +668,32 @@ impl Mobile {
         TabTitle::assign_defaults(&titles, cx);
     }
 
-    fn open(&mut self, peer: String, window: &Window, cx: &mut Context<Self>) {
+    fn refresh_sessions(&mut self) {
+        let Page::Peer(peer) = &self.page else { return; };
+        let Some(client) = self.client.clone() else { return; };
+        if self.listing_peer.is_some() || !self.presence.online(peer) ||
+            !self.peers.get(peer).and_then(|p| p.capabilities).is_some_and(|c| c.managed_terminals) { return; }
+        let peer = peer.clone();
+        self.listing_peer = Some(peer.clone());
+        let updates = self.updates.clone();
+        self.rt.spawn(async move {
+            let keys = client.manage_terminal(&peer, TerminalRequest::List).await.ok();
+            let _ = updates.send(Update::Hosted(peer, keys)).await;
+        });
+    }
+
+    fn end_session(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.get(&id) else { return; };
+        if matches!(session.state, SessionState::Ended(_)) {
+            self.back(cx);
+            self.sessions.remove(&id);
+            cx.notify();
+        } else {
+            let _ = session.input.send(Frame::Exit(0));
+        }
+    }
+
+    fn open(&mut self, peer: String, saved_key: Option<SessionKey>, window: &Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -675,7 +705,18 @@ impl Mobile {
         }
         let name = saved.name.clone().into();
         let number = self.last_session_number.entry(peer.clone()).or_default();
-        *number += 1;
+        let key = match saved_key {
+            Some(key) => key,
+            None => {
+                let highest = self.hosted.get(&peer).into_iter().flatten().map(|k| k.number).max().unwrap_or(0);
+                *number = (*number).max(highest).saturating_add(1);
+                match SessionKey::new(*number) {
+                    Ok(key) => key,
+                    Err(e) => { Toast::show(e.to_string(), self.window, cx); return; }
+                }
+            }
+        };
+        self.sessions.retain(|_, s| s.peer != peer || s.key != key || !matches!(s.state, SessionState::Ended(_)));
         self.generation += 1;
         let id = self.generation;
         let font = self.font.clone().scaled(self.terminal_zoom);
@@ -688,7 +729,8 @@ impl Mobile {
         let out = self.updates.clone();
         let dest = peer.clone();
         let job = self.rt.spawn(async move {
-            let result = client.terminal(&dest, size, keys, out.clone(), id).await;
+            let action = if saved_key.is_some() { TerminalRequest::Attach(key, size) } else { TerminalRequest::Create(key, size) };
+            let result = client.terminal(&dest, action, keys, out.clone(), id).await;
             let _ = out
                 .send(Update::End(id, result.map_err(|e| format!("{e:#}"))))
                 .await;
@@ -697,7 +739,7 @@ impl Mobile {
             id,
             Session {
                 id,
-                number: *number,
+                key,
                 peer,
                 name,
                 state: SessionState::Connecting,
@@ -803,6 +845,7 @@ impl Mobile {
                     Toast::show("Device unpaired", self.window, cx);
                 }
                 self.sessions.retain(|_, s| peers.contains_key(&s.peer));
+                self.hosted.retain(|peer, _| peers.contains_key(peer));
                 self.last_session_number
                     .retain(|peer, _| peers.contains_key(peer));
                 self.peers = peers;
@@ -883,11 +926,18 @@ impl Mobile {
                     }
                 }
             }
-            Update::Output(id, bytes) => {
+            Update::Hosted(peer, keys) => {
+                self.listing_peer = None;
+                if let Some(keys) = keys && self.peers.contains_key(&peer) {
+                    if self.hosted.get(&peer) == Some(&keys) { return; }
+                    self.hosted.insert(peer, keys);
+                }
+            }
+            Update::Output(id, bytes, replay) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.screen.process(&bytes);
                     let reply = s.screen.finish_batch();
-                    if !reply.is_empty() {
+                    if !replay && !reply.is_empty() {
                         let _ = s.input.send(Frame::Data(reply));
                     }
                     if let Some(title) = s.screen.take_title_update()
@@ -931,6 +981,7 @@ impl Mobile {
                         .map(|(id, paths)| (id.as_str(), paths.as_slice())),
                 );
                 self.presence = snapshot;
+                self.refresh_sessions();
                 if matches!(self.page, Page::Settings | Page::SettingsCategory(_)) {
                     return;
                 }
@@ -1071,6 +1122,8 @@ fn android_main(android: AndroidApp) {
                     connection_history: ConnectionHistory::default(),
                     sessions: BTreeMap::new(),
                     last_session_number: BTreeMap::new(),
+                    hosted: BTreeMap::new(),
+                    listing_peer: None,
                     forwards: Default::default(),
                     rule_form,
                     page: Page::Devices,

@@ -5,8 +5,8 @@ use terminal::Terminal;
 #[derive(Default)]
 pub(crate) struct PeerSessions {
     last_number: usize,
-    // The tabs own the PTYs. Listing a session must not keep it running.
-    open: BTreeMap<usize, WeakEntity<Terminal>>,
+    pub(crate) hosted: Vec<SessionKey>,
+    open: BTreeMap<SessionKey, WeakEntity<Terminal>>,
 }
 
 impl Dashboard {
@@ -20,34 +20,37 @@ impl Dashboard {
         terminal::TabTitle::assign_defaults(&titles, cx);
     }
 
-    pub(crate) fn open_sessions<'a>(
-        &'a self,
-        peer: &'a SharedString,
-        cx: &'a App,
-    ) -> impl Iterator<Item = (usize, SharedString)> + 'a {
-        self.terminal_sessions
-            .get(peer)
-            .into_iter()
-            .flat_map(|s| &s.open)
-            .filter_map(move |(&number, view)| {
-                let view = view.upgrade()?;
-                Some((number, view.read(cx).title.read(cx).label(peer)))
-            })
+    pub(crate) fn open_sessions(
+        &self,
+        peer: &SharedString,
+        cx: &App,
+    ) -> Vec<(SessionKey, SharedString)> {
+        let Some(sessions) = self.terminal_sessions.get(peer) else {
+            return Vec::new();
+        };
+        let mut rows: BTreeMap<_, _> = sessions
+            .hosted
+            .iter()
+            .map(|&key| (key, peer.clone()))
+            .collect();
+        for (&key, view) in &sessions.open {
+            if let Some(view) = view.upgrade() {
+                rows.insert(key, view.read(cx).title.read(cx).label(peer));
+            }
+        }
+        rows.into_iter().collect()
     }
 
     fn register_terminal(
         &mut self,
         peer: SharedString,
-        previous_number: Option<usize>,
+        key: SessionKey,
         view: &Entity<Terminal>,
         cx: &mut Context<Self>,
-    ) -> usize {
+    ) {
         let sessions = self.terminal_sessions.entry(peer.clone()).or_default();
-        let number = previous_number.unwrap_or_else(|| {
-            sessions.last_number += 1;
-            sessions.last_number
-        });
-        sessions.open.insert(number, view.downgrade());
+        sessions.last_number = sessions.last_number.max(key.number);
+        sessions.open.insert(key, view.downgrade());
         self.assign_terminal_defaults(cx);
         let title = view.read(cx).title.clone();
         cx.observe(&title, |d, _, cx| {
@@ -58,27 +61,26 @@ impl Dashboard {
         let id = view.entity_id();
         // Closing a native window also releases its tabs.
         cx.observe_release(view, move |d, _, cx| {
-            d.unregister_terminal(&peer, number, id, cx)
+            d.unregister_terminal(&peer, key, id, cx)
         })
         .detach();
         cx.notify();
-        number
     }
 
     fn unregister_terminal(
         &mut self,
         peer: &str,
-        number: usize,
+        key: SessionKey,
         id: EntityId,
         cx: &mut Context<Self>,
     ) {
         if let Some(sessions) = self.terminal_sessions.get_mut(peer)
             && sessions
                 .open
-                .get(&number)
+                .get(&key)
                 .is_some_and(|view| view.entity_id() == id)
         {
-            sessions.open.remove(&number);
+            sessions.open.remove(&key);
             cx.notify();
         }
     }
@@ -88,30 +90,20 @@ impl Workspace {
     fn terminal_tab(
         &self,
         peer: SharedString,
-        previous: Option<(usize, &Entity<terminal::TabTitle>)>,
+        key: SessionKey,
+        attach: bool,
         w: &Window,
         cx: &mut Context<Self>,
     ) -> Page {
         let dashboard = self.dashboard.read(cx);
         let runtime = dashboard.runtime.clone();
         let ipc = dashboard.active_address();
-        let title = previous
-            .map(|(_, title)| title.read(cx).for_reconnect())
-            .unwrap_or_default();
-        let view = Terminal::open(
-            &peer,
-            title,
-            &self.dashboard,
-            &runtime,
-            ipc.as_deref(),
-            w,
-            cx,
-        );
+        let view = Terminal::open(&peer, key, attach, &runtime, ipc.as_deref(), w, cx);
         App::subscribe(cx, &view, Self::terminal_exited).detach();
-        let number = self.dashboard.update(cx, |d, cx| {
-            d.register_terminal(peer.clone(), previous.map(|(number, _)| number), &view, cx)
+        self.dashboard.update(cx, |d, cx| {
+            d.register_terminal(peer.clone(), key, &view, cx)
         });
-        Page::terminal(peer, number, view, cx)
+        Page::terminal(peer, key, view, cx)
     }
 
     pub(crate) fn new_terminal(
@@ -123,64 +115,52 @@ impl Workspace {
         if !self.dashboard.read(cx).can_open_shell(&peer) {
             return;
         }
-        let page = self.terminal_tab(peer, None, w, cx);
+        let dashboard = self.dashboard.read(cx);
+        let number = dashboard.terminal_sessions.get(&peer).map_or(0, |s| {
+            s.hosted
+                .iter()
+                .map(|k| k.number)
+                .max()
+                .unwrap_or(0)
+                .max(s.last_number)
+        });
+        let key = match SessionKey::new(number.saturating_add(1)) {
+            Ok(key) => key,
+            Err(e) => {
+                crate::components::Toast::show(e.to_string(), w.window_handle(), cx);
+                return;
+            }
+        };
+        let page = self.terminal_tab(peer, key, false, w, cx);
         self.append_tab(page, w, cx);
     }
 
     pub(crate) fn show_terminal(
         &mut self,
         peer: SharedString,
-        number: usize,
+        key: SessionKey,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self
-            .dashboard
-            .read(cx)
-            .terminal_sessions
-            .get(&peer)
-            .and_then(|s| s.open.get(&number))
-            .and_then(WeakEntity::upgrade)
-        {
-            self.focus_open_page(&Page::terminal(peer, number, view, cx), w, cx);
-        }
-    }
-
-    pub(super) fn reconnect_terminal(
-        &mut self,
-        _: &ReconnectTerminal,
-        w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.end_rename(EndRename::Blur, cx);
-        let Page::Terminal {
-            peer,
-            number,
-            view,
-            title,
-        } = &self.active
-        else {
-            return;
-        };
-        if view.read(cx).is_running() || !self.dashboard.read(cx).can_open_shell(peer) {
-            return;
-        }
-        if let Some(index) = self.tabs.iter().position(|p| p == &self.active) {
-            let page = self.terminal_tab(peer.clone(), Some((*number, title)), w, cx);
-            self.dock
-                .update(cx, |dock, _| dock.forget(&self.tabs[index]));
-            self.tabs[index] = page.clone();
-            self.focus_tab(page, w, cx);
+        let sessions = self.dashboard.read(cx).terminal_sessions.get(&peer);
+        if let Some(view) = sessions.and_then(|s| {
+            let view = s.open.get(&key)?.upgrade()?;
+            (view.read(cx).is_running() || !s.hosted.contains(&key)).then_some(view)
+        }) {
+            self.focus_open_page(&Page::terminal(peer, key, view, cx), w, cx);
+        } else if self.dashboard.read(cx).can_open_shell(&peer) {
+            let page = self.terminal_tab(peer, key, true, w, cx);
+            self.append_tab(page, w, cx);
         }
     }
 
     pub(super) fn forget_terminal(&self, page: &Page, cx: &mut Context<Self>) {
         if let Page::Terminal {
-            peer, number, view, ..
+            peer, key, view, ..
         } = page
         {
             self.dashboard.update(cx, |d, cx| {
-                d.unregister_terminal(peer, *number, view.entity_id(), cx)
+                d.unregister_terminal(peer, *key, view.entity_id(), cx)
             });
         }
     }

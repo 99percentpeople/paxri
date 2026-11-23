@@ -8,22 +8,15 @@ use tokio::{io::AsyncReadExt, time::timeout};
 pub async fn open<S: PeerSession>(
     session: S,
     size: Option<Size>,
-    invocation: Option<Invocation>,
+    invocation: Invocation,
 ) -> Result<S::Stream> {
-    let kind = match (size, &invocation) {
-        (Some(_), Some(_)) => StreamKind::Command,
-        (Some(_), None) => StreamKind::Terminal,
-        (None, Some(_)) => StreamKind::Pipe,
-        (None, None) => bail!("missing piped command"),
-    };
+    let kind = if size.is_some() { StreamKind::Command } else { StreamKind::Pipe };
     timeout(Duration::from_secs(20), async {
         let mut stream = session.open(kind).await?;
         if let Some(size) = size {
             size.write(&mut stream).await?;
         }
-        if let Some(command) = &invocation {
-            command.write(&mut stream).await?;
-        }
+        invocation.write(&mut stream).await?;
         match stream.read_u8().await? {
             wire::READY => Ok(stream),
             wire::DENIED => bail!(
@@ -33,10 +26,9 @@ pub async fn open<S: PeerSession>(
             wire::PRIVILEGED => {
                 bail!("The remote gateway must run as a non-elevated user to host a terminal")
             }
-            wire::UNAVAILABLE if invocation.is_some() => {
+            wire::UNAVAILABLE => {
                 bail!("The remote gateway could not start the requested program")
             }
-            wire::UNAVAILABLE => bail!("The remote gateway could not start its default shell"),
             _ => bail!("Invalid terminal handshake"),
         }
     })

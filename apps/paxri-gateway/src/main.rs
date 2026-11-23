@@ -445,6 +445,7 @@ async fn handle_client(
     // stream authorization continue to use the complete public key.
     if let Command::ManagePeerForward { owner: peer, .. }
     | Command::Connect { peer, .. }
+    | Command::ManagedTerminal { peer, .. }
     | Command::OpenTerminal { peer, .. }
     | Command::Exec { peer, .. }
     | Command::ExecPipe { peer, .. }
@@ -590,6 +591,40 @@ async fn handle_client(
             };
             paxri_control::respond(&mut socket, result).await
         }
+        Command::ManagedTerminal { peer, action } => {
+            use paxri_terminal::managed::{Request, request};
+            let (session, permit) = {
+                let state = gateway.lock().await;
+                let session = state.transport.online_session(&peer).and_then(|session| {
+                    if state.config.peers.get(&peer).and_then(|p| state.device_info_for(p))
+                        .is_some_and(|info| !info.capabilities.managed_terminals) {
+                        anyhow::bail!("Update the remote gateway to use managed terminal sessions");
+                    }
+                    Ok(session)
+                });
+                (session, state.streams.clone().try_acquire_owned())
+            };
+            drop(management_slot);
+            let opened = async {
+                let permit = permit.context("gateway stream limit reached")?;
+                let (stream, keys) = request(session?, action).await?;
+                anyhow::Ok((permit, stream, keys))
+            }.await;
+            let (_permit, mut stream, keys) = match opened {
+                Ok(result) => result,
+                Err(e) => return paxri_control::respond::<()>(&mut socket, Err(e)).await,
+            };
+            paxri_control::respond(&mut socket, Ok(keys)).await?;
+            if matches!(action, Request::Create(..) | Request::Attach(..)) {
+                let (mut read, mut write) = tokio::io::split(&mut stream);
+                let (mut input, mut output) = tokio::io::split(socket);
+                tokio::select! {
+                    r = tokio::io::copy(&mut input, &mut write) => r?,
+                    r = tokio::io::copy(&mut read, &mut output) => r?,
+                };
+            }
+            Ok(())
+        }
         open @ (Command::Connect { .. }
         | Command::OpenTerminal { .. }
         | Command::Exec { .. }
@@ -638,15 +673,15 @@ async fn handle_client(
             let opened = async {
                 match open {
                     Command::OpenTerminal { peer, size } => {
-                        terminal::open(transport.online_session(&peer)?, Some(size), None).await
+                        terminal::open_shell(transport.online_session(&peer)?, size).await
                     }
                     Command::Exec {
                         peer,
                         size,
                         invocation,
-                    } => terminal::open(transport.online_session(&peer)?, Some(size), Some(invocation)).await,
+                    } => terminal::open(transport.online_session(&peer)?, Some(size), invocation).await,
                     Command::ExecPipe { peer, invocation } => {
-                        terminal::open(transport.online_session(&peer)?, None, Some(invocation)).await
+                        terminal::open(transport.online_session(&peer)?, None, invocation).await
                     }
                     Command::OpenFiles { peer } => {
                         use paxri_core::{StreamKind, Transport};

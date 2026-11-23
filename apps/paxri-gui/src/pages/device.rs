@@ -21,18 +21,26 @@ impl Dashboard {
             })
     }
 
-    fn sessions(&self, peer: &str, ui: Ui, cx: &Context<Self>) -> Div {
+    fn sessions(&self, peer: &str, ui: Ui, cx: &Context<Self>) -> Option<Div> {
         let peer = SharedString::from(peer.to_owned());
-        let rows = self.open_sessions(&peer, cx).map(|(number, title)| {
-            let peer = peer.clone();
-            ui.session_row(number, title, format!("Session {number}"))
-                .on_click(move |_, w, cx| {
-                    if let Some(workspace) = w.root::<Workspace>().flatten() {
-                        workspace.update(cx, |v, cx| v.show_terminal(peer.clone(), number, w, cx));
-                    }
-                })
-        });
-        ui.terminal_sessions(Some(self.new_session(&peer, ui)), rows)
+        let mut rows = self
+            .open_sessions(&peer, cx)
+            .into_iter().map(|(key, title)| {
+                let peer = peer.clone();
+                ui.session_row(key.nonce as usize, title, format!("Session {}", key.number))
+                    .on_click(move |_, w, cx| {
+                        if let Some(workspace) = w.root::<Workspace>().flatten() {
+                            workspace
+                                .update(cx, |v, cx| v.show_terminal(peer.clone(), key, w, cx));
+                        }
+                    })
+            })
+            .peekable();
+        let new_session = self
+            .can_open_shell(&peer)
+            .then(|| self.new_session(&peer, ui));
+        (new_session.is_some() || rows.peek().is_some())
+            .then(|| ui.terminal_sessions(new_session, rows))
     }
 }
 
@@ -133,8 +141,8 @@ impl Dashboard {
                         .child(ui.separator())
                 },
             )
-            .when(status.can_open_shell(peer), |page| {
-                page.child(self.sessions(peer, ui, cx)).child(ui.separator())
+            .when_some(self.sessions(peer, ui, cx), |page, sessions| {
+                page.child(sessions).child(ui.separator())
             })
             // Android uses this gateway to store rules, including its first one.
             .when(count > 0 || status.peer_platform(peer) == DevicePlatform::Android

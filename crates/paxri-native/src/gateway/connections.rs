@@ -98,6 +98,7 @@ impl NativeSession {
         // Keep activity reports readable by clients that predate pipe execution.
         let kind = match kind {
             StreamKind::Pipe => StreamKind::Command,
+            StreamKind::ManagedTerminal => StreamKind::Terminal,
             other => other,
         };
         *self
@@ -629,7 +630,7 @@ mod tests {
             pb.local_info.send_replace(android.clone());
             remote_info.wait_for(|all| all.get(&id) == Some(&android)).await?;
             let upgraded = DeviceInfo {
-                capabilities: paxri_config::DeviceCapabilities { shell: true, exec: true, forward_rules: Some(true), create_forward_rules: true },
+                capabilities: paxri_config::DeviceCapabilities { shell: true, exec: true, managed_terminals: true, forward_rules: Some(true), create_forward_rules: true },
                 ..android
             };
             pb.local_info.send_replace(upgraded.clone());

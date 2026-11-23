@@ -18,6 +18,7 @@ pub enum StreamKind {
     Files = 6,
     ForwardRules = 7,
     Pipe = 8,
+    ManagedTerminal = 9,
 }
 
 impl StreamKind {
@@ -31,6 +32,7 @@ impl StreamKind {
             6 => Self::Files,
             7 => Self::ForwardRules,
             8 => Self::Pipe,
+            9 => Self::ManagedTerminal,
             n => bail!("Unknown peer stream type {n}"),
         })
     }
@@ -51,6 +53,7 @@ impl StreamKind {
             Self::Files => "File transfer",
             Self::ForwardRules => "Forwarding rules",
             Self::Pipe => "Piped command",
+            Self::ManagedTerminal => "Managed terminal",
         }
     }
 }

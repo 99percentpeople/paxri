@@ -51,6 +51,10 @@ impl NativeTransport {
             .with_context(|| format!("{peer} is offline"))
     }
 
+    pub fn endpoint_online(&self, id: &str) -> bool {
+        id.parse().ok().is_some_and(|id| self.connections.live(id).is_some())
+    }
+
     pub fn subscribe_peer_changes(&self) -> watch::Receiver<BTreeMap<String, i64>> {
         self.connections.changes.subscribe()
     }

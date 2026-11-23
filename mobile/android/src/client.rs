@@ -19,7 +19,7 @@ use paxri_native::{
         pairing::{Decision, Incoming, Invitation, UnpairAck},
     },
 };
-use paxri_terminal::{Frame, Size};
+use paxri_terminal::Frame;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -414,24 +414,29 @@ impl Client {
         Ok(UnpairAck::Cleared)
     }
 
+    pub async fn manage_terminal(&self, peer: &str, request: paxri_terminal::managed::Request) -> Result<Vec<paxri_terminal::managed::Key>> {
+        let session = self.transport.online_session(peer)?;
+        paxri_terminal::managed::request(session, request).await.map(|(_, keys)| keys)
+    }
+
     pub async fn terminal(
         &self,
         id: &str,
-        initial: Size,
+        action: paxri_terminal::managed::Request,
         mut input: mpsc::UnboundedReceiver<Frame>,
         out: Sender<Update>,
         generation: u64,
     ) -> Result<u32> {
         ensure!(
-            self.peers
-                .lock()
-                .await
-                .get(id)
-                .is_some_and(Peer::supports_shell),
+            self.peers.lock().await.get(id).is_some_and(Peer::supports_shell),
             "This device does not host an interactive shell"
         );
         let session = self.transport.online_session(id)?;
-        let stream = paxri_terminal::open(session, Some(initial), None).await?;
+        let (mut stream, _) = paxri_terminal::managed::request(session, action).await?;
+        let history = paxri_terminal::managed::read_history(&mut stream).await?;
+        if !history.is_empty() {
+            out.send(Update::Output(generation, history, true)).await?;
+        }
         let (mut reader, mut writer) = tokio::io::split(stream);
         out.send(Update::Connected(generation)).await?;
         let send = async {
@@ -443,7 +448,7 @@ impl Client {
         let receive = async {
             loop {
                 match Frame::read(&mut reader).await? {
-                    Frame::Data(data) => out.send(Update::Output(generation, data)).await?,
+                    Frame::Data(data) => out.send(Update::Output(generation, data, false)).await?,
                     Frame::Exit(status) => return Ok(status),
                     Frame::Resize(_) => bail!("Unexpected terminal resize from peer"),
                 }

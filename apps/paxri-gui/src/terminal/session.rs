@@ -1,18 +1,20 @@
 use async_channel::{Receiver, Sender, TrySendError};
-use std::path::Path;
-use tokio::{runtime::Handle, task::JoinHandle};
 use paxri_control::terminal::{
     self as wire,
     pty::{self, ExitStatus, PtySize},
 };
+use std::path::Path;
+use tokio::{runtime::Handle, task::JoinHandle};
 
 pub use pty::Output;
+use wire::managed::{Key, Request};
 
 pub struct Session {
     io: pty::Session,
     size: Option<PtySize>,
     pub input: Input,
     task: JoinHandle<()>,
+    end: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 // The UI cannot block on a full channel. A queued write waits for its predecessor
@@ -58,19 +60,36 @@ impl Input {
 }
 
 impl Session {
-    pub fn start(peer: &str, ipc: Option<&Path>, runtime: &Handle) -> (Self, Receiver<Output>) {
+    pub fn start(
+        peer: &str,
+        key: Key,
+        attach: bool,
+        ipc: Option<&Path>,
+        runtime: &Handle,
+    ) -> (Self, Receiver<Output>) {
         let (io, keys, sizes) = pty::Session::channels();
         let (output, events) = async_channel::bounded(32);
         let address = ipc
             .map(Path::to_owned)
             .unwrap_or_else(paxri_control::default_address);
         let peer = peer.to_owned();
+        let (end, stop) = tokio::sync::oneshot::channel();
         let task = runtime.spawn(async move {
             let result = async {
                 // The first layout supplies the content area after tabs and padding.
                 let size = sizes.recv().await?;
-                let stream = paxri_control::open_terminal(&address, peer, size.into()).await?;
-                wire::client(stream, keys, sizes, &output).await
+                let request = if attach {
+                    Request::Attach(key, size.into())
+                } else {
+                    Request::Create(key, size.into())
+                };
+                let (mut stream, _) =
+                    paxri_control::managed_terminal(&address, peer, request).await?;
+                let history = wire::managed::read_history(&mut stream).await?;
+                if !history.is_empty() {
+                    output.send(Output::Replay(history)).await?;
+                }
+                wire::managed::client(stream, keys, sizes, &output, stop).await
             }
             .await;
             let status = result
@@ -89,9 +108,16 @@ impl Session {
                 size: None,
                 input,
                 task,
+                end: Some(end),
             },
             events,
         )
+    }
+
+    pub fn end(&mut self) {
+        if let Some(end) = self.end.take() {
+            let _ = end.send(());
+        }
     }
 
     pub fn resize(&mut self, size: PtySize) {
@@ -114,9 +140,9 @@ mod tests {
 
     #[tokio::test]
     async fn first_layout_sizes_the_shell_and_enter_is_forwarded_once() -> anyhow::Result<()> {
+        use paxri_control::{Command, ControlListener, receive, respond};
         use std::time::Duration;
         use tokio::time::timeout;
-        use paxri_control::{Command, ControlListener, receive, respond};
 
         let dir = tempfile::Builder::new()
             .prefix("p2p-gui-terminal-")
@@ -126,7 +152,8 @@ mod tests {
         #[cfg(windows)]
         let ipc = std::path::PathBuf::from(dir.path().file_name().unwrap());
         let gateway = ControlListener::bind(&ipc).await?;
-        let (mut session, _output) = Session::start("pi", Some(&ipc), &Handle::current());
+        let (mut session, _output) =
+            Session::start("pi", Key::new(1)?, false, Some(&ipc), &Handle::current());
         let quiet = Duration::from_millis(50);
         assert!(timeout(quiet, gateway.accept()).await.is_err());
 
@@ -139,9 +166,10 @@ mod tests {
             session.resize(initial);
             let mut stream = gateway.accept().await?;
             let command = receive(&mut stream).await?;
-            assert!(matches!(command, Command::OpenTerminal { peer, size }
+            assert!(matches!(command, Command::ManagedTerminal { peer, action: Request::Create(_, size) }
                 if peer == "pi" && size == initial.into()));
-            respond(&mut stream, Ok(())).await?;
+            respond(&mut stream, Ok(Vec::<Key>::new())).await?;
+            tokio::io::AsyncWriteExt::write_u32(&mut stream, 0).await?;
 
             session.resize(initial);
             assert!(

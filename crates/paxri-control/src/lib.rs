@@ -85,6 +85,7 @@ pub enum Command {
     OpenFiles {
         peer: String,
     },
+    ManagedTerminal { peer: String, action: terminal::managed::Request },
     OpenTerminal {
         peer: String,
         size: terminal::Size,
@@ -620,6 +621,15 @@ pub async fn copy_files(
     )
     .await?;
     files::copy(socket, copy, options, require_directory, report).await
+}
+
+pub async fn managed_terminal(path: &Path, peer: String, action: terminal::managed::Request) -> Result<(Stream, Vec<terminal::managed::Key>)> {
+    let result = begin(path, Command::ManagedTerminal { peer, action }, Duration::from_secs(25)).await;
+    match result {
+        Err(e) if e.to_string().starts_with("unknown variant `managed_terminal`") =>
+            Err(e.context("Update the local gateway to use managed terminal sessions")),
+        other => other,
+    }
 }
 
 /// Open a native interactive terminal. After the reply, IPC carries terminal frames directly.

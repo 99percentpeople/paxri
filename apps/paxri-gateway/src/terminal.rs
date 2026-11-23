@@ -1,4 +1,5 @@
 //! Host paired terminal sessions and piped commands under the gateway account.
+pub(super) mod managed;
 mod pipe;
 mod tools;
 pub(crate) use tools::SessionTools;
@@ -25,13 +26,26 @@ use tokio::{
 
 pub use paxri_terminal::open;
 
+/// Create a gateway-managed interactive shell for the local CLI.
+pub(super) async fn open_shell<S: paxri_core::PeerSession>(
+    session: S,
+    size: Size,
+) -> Result<S::Stream> {
+    use wire::managed::{Key, Request, read_history, request};
+    let (_, keys) = request(session.clone(), Request::List).await?;
+    let number = keys.iter().map(|key| key.number).max().unwrap_or(0).saturating_add(1);
+    let (mut stream, _) = request(session, Request::Create(Key::new(number)?, size)).await?;
+    read_history(&mut stream).await?;
+    Ok(stream)
+}
+
 pub(super) fn capabilities() -> paxri_config::DeviceCapabilities {
     let exec = crate::account::is_standard_user().unwrap_or(false);
     #[cfg(unix)]
     let shell = exec && std::path::Path::new(&CommandBuilder::new_default_prog().get_shell()).is_file();
     #[cfg(windows)]
     let shell = exec && windows::has_shell();
-    paxri_config::DeviceCapabilities { shell, exec, forward_rules: Some(true), create_forward_rules: true }
+    paxri_config::DeviceCapabilities { shell, exec, managed_terminals: shell, forward_rules: Some(true), create_forward_rules: true }
 }
 
 pub(super) async fn watch_capabilities(transport: Arc<paxri_native::gateway::NativeTransport>) {
@@ -81,7 +95,7 @@ async fn command_for(
 pub(super) struct Terminals {
     config: watch::Receiver<Arc<Config>>,
     tools: SessionTools,
-    slots: Semaphore,
+    slots: Arc<Semaphore>,
 }
 
 impl Terminals {
@@ -89,7 +103,7 @@ impl Terminals {
         Self {
             config,
             tools,
-            slots: Semaphore::new(16),
+            slots: Arc::new(Semaphore::new(wire::managed::SESSION_LIMIT)),
         }
     }
 
@@ -122,12 +136,8 @@ impl Terminals {
                 return Ok(());
             }
         };
-        let invocation = if kind == StreamKind::Terminal {
-            None
-        } else {
-            Some(timeout(STREAM_TIMEOUT, Invocation::read(&mut recv)).await??)
-        };
-        let command = command_for(invocation, &self.tools, &id).await;
+        let invocation = timeout(STREAM_TIMEOUT, Invocation::read(&mut recv)).await??;
+        let command = command_for(Some(invocation), &self.tools, &id).await;
         let Some(size) = size else {
             return pipe::serve(command, recv, send, config, &id).await;
         };
@@ -173,7 +183,7 @@ impl Terminals {
                 let stream_output = async {
                     loop {
                         match output.recv().await? {
-                            Output::Bytes(bytes) => Frame::Data(bytes).write(&mut send).await?,
+                            Output::Bytes(bytes) | Output::Replay(bytes) => Frame::Data(bytes).write(&mut send).await?,
                             Output::Exited(result) => {
                                 return Frame::Exit(result?.exit_code()).write(&mut send).await;
                             }

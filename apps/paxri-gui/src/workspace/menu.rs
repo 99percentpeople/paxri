@@ -46,10 +46,9 @@ impl Workspace {
             .px_1()
             .when(matches!(&self.active, Page::Terminal { view, .. } if view.read(cx).is_running()), |row| {
                 row.child(ui.end_session_button()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let page = this.active.clone();
-                        if matches!(page, Page::Terminal { .. }) {
-                            this.close_tab(&page, window, cx);
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Page::Terminal { view, .. } = &this.active {
+                            view.update(cx, |terminal, _| terminal.end());
                         }
                     })))
             })

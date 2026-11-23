@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod exec;
+pub mod managed;
 mod open;
 pub mod pipe;
 pub mod pty;
@@ -118,9 +119,15 @@ async fn send_input(
     mut writer: impl AsyncWrite + Unpin,
     input: async_channel::Receiver<Vec<u8>>,
     sizes: async_channel::Receiver<portable_pty::PtySize>,
+    end: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
+    tokio::pin!(end);
     loop {
         let frame = tokio::select! {
+            _ = &mut end => {
+                Frame::Exit(0).write(&mut writer).await?;
+                return std::future::pending().await;
+            }
             data = input.recv() => match data { Ok(data) => Frame::Data(data), Err(_) => break },
             size = sizes.recv() => match size { Ok(size) => Frame::Resize(size.into()), Err(_) => break },
         };
@@ -134,6 +141,16 @@ pub async fn client(
     input: async_channel::Receiver<Vec<u8>>,
     sizes: async_channel::Receiver<portable_pty::PtySize>,
     output: &async_channel::Sender<pty::Output>,
+) -> Result<u32> {
+    run_client(stream, input, sizes, output, std::future::pending()).await
+}
+
+async fn run_client(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    input: async_channel::Receiver<Vec<u8>>,
+    sizes: async_channel::Receiver<portable_pty::PtySize>,
+    output: &async_channel::Sender<pty::Output>,
+    end: impl std::future::Future<Output = ()>,
 ) -> Result<u32> {
     let (mut reader, writer) = tokio::io::split(stream);
     let receive = async {
@@ -150,7 +167,7 @@ pub async fn client(
     };
     tokio::select! {
         result = receive => result,
-        result = send_input(writer, input, sizes) => { result?; bail!("terminal closed") }
+        result = send_input(writer, input, sizes, end) => { result?; bail!("terminal closed") }
     }
 }
 

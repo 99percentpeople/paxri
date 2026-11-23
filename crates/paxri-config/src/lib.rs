@@ -124,6 +124,7 @@ pub enum DevicePlatform {
 #[serde(default)]
 pub struct DeviceCapabilities {
     pub shell: bool,
+    pub managed_terminals: bool,
     pub exec: bool,
     /// None for older peers that did not advertise rule management.
     #[serde(skip_serializing_if = "Option::is_none")]

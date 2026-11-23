@@ -53,7 +53,7 @@ struct GatewayRequest {
 
 enum RequestResult {
     Gateway(Box<Status>, Option<Native>),
-    Peer(paxri_control::PeerStatus),
+    Peer(paxri_control::PeerStatus, Option<Vec<paxri_control::terminal::managed::Key>>),
     OfflineGui(theme::GuiSettings),
     OfflineNative(Native),
     Stopped(Startup, Option<Native>),
@@ -242,7 +242,13 @@ impl Dashboard {
             };
             let command = match command {
                 Operation::Api(Command::PeerStatus { peer, check }) => {
-                    return paxri_control::peer_status(&path, &peer, check).await.map(RequestResult::Peer);
+                    let snapshot = paxri_control::peer_status(&path, &peer, check).await?;
+                    let hosted = if snapshot.state == "Connected" && snapshot.capabilities.is_some_and(|c| c.managed_terminals) {
+                        tokio::time::timeout(Duration::from_secs(2), paxri_control::managed_terminal(
+                            &path, peer, paxri_control::terminal::managed::Request::List,
+                        )).await.ok().and_then(|r| r.ok()).map(|(_, keys)| keys)
+                    } else { None };
+                    return Ok(RequestResult::Peer(snapshot, hosted));
                 }
                 Operation::Api(Command::Status) => {
                     let mut status = gateway::discover(selected.as_deref(), selected_config.as_deref()).await?;
@@ -312,7 +318,10 @@ impl Dashboard {
                 view.gateway_action = None;
                 let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 match result {
-                    Ok(RequestResult::Peer(peer)) => {
+                    Ok(RequestResult::Peer(peer, hosted)) => {
+                        if let Some(keys) = hosted && view.status.as_ref().and_then(|s| s.peers.get(&peer.peer)) == Some(&peer.device_id) {
+                            view.terminal_sessions.entry(peer.peer.clone().into()).or_default().hosted = keys;
+                        }
                         if let Some(status) = &mut view.status
                             && status.peers.get(&peer.peer) == Some(&peer.device_id)
                             && let Some(links) = status.peer_connections.as_mut().and_then(|all| all.get_mut(&peer.peer))
@@ -351,6 +360,7 @@ impl Dashboard {
                             old.device_id != status.device_id || old.ipc_path != status.ipc_path
                         }) {
                             view.connection_history = Default::default();
+                            view.terminal_sessions.clear();
                         } else if let Some(message) = &status.pairing.message
                             && view.status.as_ref().and_then(|s| s.pairing.message.as_ref()) != Some(message)
                             && let Some(window) = cx.active_window()

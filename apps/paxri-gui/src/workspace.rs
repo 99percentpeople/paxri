@@ -12,9 +12,8 @@ mod menu;
 mod rename;
 mod terminals;
 use rename::{EndRename, TabRename};
+use paxri_control::terminal::managed::Key as SessionKey;
 pub(super) use terminals::PeerSessions;
-
-gpui::actions!(workspace, [ReconnectTerminal]);
 
 #[cfg(not(target_os = "macos"))]
 use dock::DockTarget;
@@ -32,7 +31,7 @@ enum Page {
     Settings,
     Terminal {
         peer: SharedString,
-        number: usize,
+        key: SessionKey,
         view: Entity<terminal::Terminal>,
         title: Entity<terminal::TabTitle>,
     },
@@ -41,7 +40,7 @@ enum Page {
 impl Page {
     fn terminal(
         peer: SharedString,
-        number: usize,
+        key: SessionKey,
         view: Entity<terminal::Terminal>,
         cx: &App,
     ) -> Self {
@@ -49,7 +48,7 @@ impl Page {
         let title = view.read(cx).title.clone();
         Self::Terminal {
             peer,
-            number,
+            key,
             view,
             title,
         }
@@ -63,7 +62,7 @@ impl Page {
         match self {
             Self::Home => "paxri".into(),
             Self::Settings => "Settings — paxri".into(),
-            Self::Terminal { peer, number, .. } => format!("{peer} — Terminal {number}").into(),
+            Self::Terminal { peer, key, .. } => format!("{peer} — Terminal {}", key.number).into(),
         }
     }
 
@@ -611,7 +610,6 @@ impl Render for Workspace {
                     ),
                 )
             })
-            .on_action(cx.listener(Self::reconnect_terminal))
             .capture_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
                 if e.keystroke.key == "escape" && v.cancel_tab_drag(w, cx) {
                     w.prevent_default();

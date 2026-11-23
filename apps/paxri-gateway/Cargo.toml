@@ -27,4 +27,5 @@ windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Co
 windows-service = "0.8"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"

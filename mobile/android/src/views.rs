@@ -122,11 +122,7 @@ impl Mobile {
                 } else {
                     ui.end_session_button()
                 }
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.back(cx);
-                    this.sessions.remove(&id);
-                    cx.notify();
-                }));
+                .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)));
                 (
                     title,
                     Some(subtitle),
@@ -328,15 +324,28 @@ impl Mobile {
         let peer = &self.peers[id];
         let paths = self.presence.paths_for(id);
         let can_connect = self.presence.online(id) && peer.supports_shell();
-        let rows = self.sessions.values().filter(|s| s.peer == id).map(|s| {
-            let id = s.id;
-            let (title, detail) = s.labels(cx);
-            ui.session_row(s.number, title, detail)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.navigate(Page::Terminal(id), cx);
-                    cx.notify();
-                }))
-        });
+        let hosted = self.hosted.get(id).map(Vec::as_slice).unwrap_or_default();
+        let mut rows = self
+            .sessions
+            .values()
+            .filter(|s| s.peer == id && !(can_connect && matches!(s.state, SessionState::Ended(_)) && hosted.contains(&s.key)))
+            .map(|s| {
+                let id = s.id;
+                let (title, detail) = s.labels(cx);
+                ui.session_row(s.key.nonce as usize, title, detail)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.navigate(Page::Terminal(id), cx);
+                        cx.notify();
+                    }))
+            })
+            .chain(hosted.iter().copied().filter(|key| can_connect && !self.sessions.values().any(|s|
+                s.peer == id && s.key == *key && !matches!(s.state, SessionState::Ended(_)))).map(|key| {
+                let target = id.to_owned();
+                ui.session_row(key.nonce as usize, peer.name.clone().into(), format!("Session {}", key.number))
+                    .on_click(cx.listener(move |this, _, w, cx| this.open(target.clone(), Some(key), w, cx)))
+            }))
+            .peekable();
+        let show_sessions = can_connect || rows.peek().is_some();
         let body = div()
             .id("device-page")
             .flex_1()
@@ -394,9 +403,9 @@ impl Mobile {
                     })),
                 )
             })
-            .when(can_connect, |page| {
-                page.pb(px(88.))
-                    .child(ui.separator())
+            .when(can_connect, |page| page.pb(px(88.)))
+            .when(show_sessions, |page| {
+                page.child(ui.separator())
                     .child(ui.terminal_sessions(None, rows))
             });
         div()
@@ -408,13 +417,8 @@ impl Mobile {
             .child(body)
             .when(can_connect, |page| {
                 let target = id.to_owned();
-                let button = ui
-                    .button(Primary, "new-terminal-session", Icon::Terminal.draw(24.))
-                    .floating()
-                    .occlude()
-                    .role(Role::Button)
-                    .aria_label("New session")
-                    .on_click(cx.listener(move |this, _, w, cx| this.open(target.clone(), w, cx)));
+                let button = floating_button(ui, "new-terminal-session", Icon::Terminal, "New session")
+                    .on_click(cx.listener(move |this, _, w, cx| this.open(target.clone(), None, w, cx)));
                 page.child(floating_corner().child(button))
             })
     }

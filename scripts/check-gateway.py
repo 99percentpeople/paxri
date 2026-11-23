@@ -193,23 +193,94 @@ sys.exit(37)
         read_until(fd, b"last-output")
         assert child.wait(12) == 23
 
+    @contextlib.contextmanager
+    def managed(action):
+        with socket.socket(socket.AF_UNIX) as stream:
+            stream.settimeout(6)
+            stream.connect(ipc("client"))
+            request = json.dumps(dict(version=1, command="managed_terminal", peer="host", action=action)).encode()
+            stream.sendall(struct.pack(">I", len(request)) + request)
+            with stream.makefile("rb") as reader:
+                length, = struct.unpack(">I", reader.read(4))
+                result = json.loads(reader.read(length))["result"]
+                assert "Ok" in result, result
+                yield stream, reader, result["Ok"]
+
+    def directory():
+        with managed("List") as (_, _, entries):
+            return entries
+
+    size = dict(rows=31, cols=89)
     with session() as (child, fd, slave):
         ready(slave)
-        os.write(fd, b"""printf 'shell-pid=%s\\n' "$$"; sh -c 'printf "job-pid=%s\\n" "$$"; exec sleep 60'\r""")
-        match = read_until(fd, rb"shell-pid=(\d+).*?job-pid=(\d+)")
-        pids = [int(p) for p in match.groups()]
-        with session("exec", "host", "-c", 'printf "exec-pid=%s\\n" "$$"; exec sleep 60') as (cmd, cmd_fd, _):
-            pids.append(int(read_until(cmd_fd, rb"exec-pid=(\d+)").group(1)))
-            client_process.terminate()
-            client_process.wait(10)
-            assert cmd.wait(10) != 0
-        assert child.wait(10) != 0
-        end = time.monotonic() + 5
-        while any(Path(f"/proc/{pid}").exists() for pid in pids):
-            assert time.monotonic() < end, "disconnect left a shell or foreground job running"
+        os.write(fd, b"""v=kept; printf 'shell-pid=%s\\n' "$$"\r""")
+        pid = int(read_until(fd, rb"shell-pid=(\d+)").group(1))
+        key, = directory()
+        child.terminate()
+        child.wait(10)
+    assert Path(f"/proc/{pid}").exists()
+    assert directory() == [key]
+    with managed({"Attach": [key, size]}) as (stream, reader, _):
+        length, = struct.unpack(">I", reader.read(4))
+        assert f"shell-pid={pid}".encode() in reader.read(length)
+        command = b"""printf 'resumed=%s,%s\\n' "$$" "$v"; sh -c 'echo job-pid=$$; exec sleep 600'\r"""
+        stream.sendall(struct.pack(">BH", 1, len(command)) + command)
+        output = bytearray()
+        while b"job-pid=" not in output or not re.search(rb"job-pid=(\d+)\r?\n", output):
+            assert reader.read(1) == b"\x01"
+            length, = struct.unpack(">H", reader.read(2))
+            output.extend(reader.read(length))
+        assert f"resumed={pid},kept".encode() in output
+        job = int(re.search(rb"job-pid=(\d+)\r?\n", output).group(1))
+
+    with session("exec", "host", "-c", 'printf "exec-pid=%s\\n" "$$"; exec sleep 60') as (cmd, cmd_fd, _):
+        command_pid = int(read_until(cmd_fd, rb"exec-pid=(\d+)").group(1))
+        client_process.terminate()
+        client_process.wait(10)
+        assert cmd.wait(10) != 0
+
+    def wait_gone(pids):
+        end = time.monotonic() + 8
+        while any(Path(f"/proc/{p}").exists() for p in pids):
+            assert time.monotonic() < end, f"process still running: {pids}"
             time.sleep(.05)
+
+    wait_gone([command_pid])
+    assert all(Path(f"/proc/{p}").exists() for p in (pid, job))
+    start("client")
+    call("client", "status", "host", "--check")
+    assert directory() == [key]
+    with managed({"End": key}):
+        pass
+    assert directory() == []
+    wait_gone([pid, job])
+    # Closing the drawing surface and requesting End are different on the wire.
+    with managed({"Create": [key, size]}) as (stream, reader, _):
+        assert reader.read(4) == bytes(4)
+        stream.sendall(struct.pack(">BI", 3, 0))
+        while (kind := reader.read(1)) == b"\x01":
+            length, = struct.unpack(">H", reader.read(2))
+            reader.read(length)
+        assert kind == b"\x03" and reader.read(4) == bytes(4)
+    assert not directory()
+    with managed({"Create": [key, size]}) as (stream, reader, _):
+        assert reader.read(4) == bytes(4)
+        command = b"sleep 0.3; sleep 5 & exit 17\r"
+        stream.sendall(struct.pack(">BH", 1, len(command)) + command)
+        # Ensure the host received the command before detaching the socket.
+        assert reader.read(1) == b"\x01"
+        length, = struct.unpack(">H", reader.read(2))
+        pending = reader.read(length)
+        while command.rstrip() not in pending:
+            assert reader.read(1) == b"\x01"
+            length, = struct.unpack(">H", reader.read(2))
+            pending += reader.read(length)
+    deadline = time.monotonic() + 3
+    while directory():
+        assert time.monotonic() < deadline, "background job held an exited shell open"
+        time.sleep(.05)
     assert host_process.poll() is None
-    print("Native shell and command PTYs passed pairing, I/O, resize, exit and disconnect checks.")
+    print("Native PTYs passed detach, replay, shell state, peer reconnect, explicit end and process cleanup checks.")
 
 
 def check_pipe(cli, ipc):

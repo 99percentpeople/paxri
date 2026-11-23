@@ -53,14 +53,6 @@ impl TabTitle {
         self.fallback = None;
         true
     }
-
-    pub fn for_reconnect(&self) -> Self {
-        Self {
-            pty: None,
-            custom: self.custom.clone(),
-            fallback: self.fallback.clone(),
-        }
-    }
 }
 
 fn missing_defaults<'a>(
@@ -119,9 +111,6 @@ mod tests {
         assert!(title.rename("build"));
         assert!(!title.set_pty("editor".into()));
         assert_eq!(title.label(&peer).as_ref(), "build");
-        let mut retry = title.for_reconnect();
-        assert!(!retry.set_pty("login".into()));
-        assert_eq!(retry.label(&peer).as_ref(), "build");
         assert!(title.rename(""));
         assert_eq!(title.label(&peer).as_ref(), "editor");
         assert!(title.set_pty(String::new()));

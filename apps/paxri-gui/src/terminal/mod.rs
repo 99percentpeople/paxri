@@ -6,7 +6,7 @@ mod mouse;
 mod session;
 pub(crate) use paxri_ui::terminal::title::TabTitle;
 
-use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
+use crate::components::{ScrollMetrics, ScrollSource, Scrollbar, Ui};
 use crate::theme::{SPACE_2, Zoom};
 use crate::theme::fonts::{CellSize, MonospaceFonts};
 use alacritty_terminal::{
@@ -53,7 +53,6 @@ pub struct Terminal {
     emulator: Emulator,
     session: Option<Session>,
     error: Option<String>,
-    can_open_shell: bool,
     marked: cursor::Preedit,
     viewport: Bounds<Pixels>,
     selecting: bool,
@@ -98,8 +97,8 @@ impl ScrollSource for Entity<Terminal> {
 impl Terminal {
     pub(super) fn open(
         peer: &str,
-        title: TabTitle,
-        dashboard: &Entity<crate::Dashboard>,
+        key: paxri_control::terminal::managed::Key,
+        attach: bool,
         runtime: &tokio::runtime::Handle,
         ipc: Option<&Path>,
         window: &Window,
@@ -110,19 +109,8 @@ impl Terminal {
         let grid = GridSize::from_viewport(window.viewport_size(), font.cell);
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
-        let (session, events) = Session::start(peer, ipc, runtime);
-        let peer = peer.to_owned();
+        let (session, events) = Session::start(peer, key, attach, ipc, runtime);
         cx.new(|cx| {
-            cx.observe(dashboard, move |view: &mut Self, dashboard, cx| {
-                let online = dashboard.read(cx).can_open_shell(&peer);
-                if view.can_open_shell != online {
-                    view.can_open_shell = online;
-                    if !view.is_running() {
-                        cx.notify();
-                    }
-                }
-            })
-            .detach();
             cx.observe_global::<TerminalZoom>(|_, cx| cx.notify()).detach();
             let focus = cx.focus_handle();
             cx.spawn(async move |this, cx| {
@@ -160,11 +148,10 @@ impl Terminal {
             emulator.set_default_cursor(cursor::default_style(&appearance));
             Terminal {
                 focus,
-                title: cx.new(|_| title),
+                title: cx.new(|_| TabTitle::default()),
                 emulator,
                 session: Some(session),
                 error: None,
-                can_open_shell: true,
                 marked: cursor::Preedit::default(),
                 viewport: Bounds::default(),
                 selecting: false,
@@ -178,6 +165,10 @@ impl Terminal {
 
     pub(super) fn is_running(&self) -> bool {
         self.session.is_some()
+    }
+
+    pub(super) fn end(&mut self) {
+        if let Some(session) = &mut self.session { session.end(); }
     }
 
     pub(super) fn has_exited(&self) -> bool {
@@ -199,6 +190,10 @@ impl Terminal {
     }
     fn output(&mut self, event: Output, cx: &mut Context<Self>) {
         match event {
+            Output::Replay(bytes) => {
+                self.emulator.process(&bytes);
+                let _ = self.emulator.finish_batch();
+            }
             Output::Bytes(bytes) => self.emulator.process(&bytes),
             Output::Error(error) => {
                 if self.is_running() {
@@ -340,10 +335,7 @@ impl Terminal {
         } else {
             key.modifiers.control && key.modifiers.shift
         };
-        if self.can_open_shell && !self.is_running() && key.key == "enter" && !key.modifiers.modified()
-        {
-            window.dispatch_action(Box::new(super::workspace::ReconnectTerminal), cx);
-        } else if shortcut && key.key.eq_ignore_ascii_case("v") {
+        if shortcut && key.key.eq_ignore_ascii_case("v") {
             self.paste(window, cx);
         } else if key.key.eq_ignore_ascii_case("c")
             && (shortcut
@@ -465,17 +457,7 @@ impl Render for Terminal {
                         .items_center()
                         .bg(rgb(ui.colors.canvas.background))
                         .text_color(rgb(ui.colors.canvas.foreground))
-                        .child(div().flex_1().text_sm().child(error))
-                        .when(self.can_open_shell && !self.is_running(), |bar| {
-                            bar.child(ui.button(Primary, "reconnect", "Reconnect").on_click(
-                                |_, w, cx| {
-                                    w.dispatch_action(
-                                        Box::new(super::workspace::ReconnectTerminal),
-                                        cx,
-                                    );
-                                },
-                            ))
-                        }),
+                        .child(div().flex_1().text_sm().child(error)),
                 )
             })
             .child(
