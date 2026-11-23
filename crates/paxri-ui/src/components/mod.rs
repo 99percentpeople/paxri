@@ -1,6 +1,7 @@
 mod button;
 pub mod caret;
 mod controls;
+pub mod directory;
 mod dropdown;
 mod filter_toolbar;
 pub use filter_toolbar::FilterToolbar;
