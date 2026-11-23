@@ -1,11 +1,11 @@
 use super::*;
 use paxri_control::{Direction, PeerForward, forwarding::Rules};
-use paxri_ui::components::heading;
 use paxri_ui::components::{
     ButtonVariant::{Destructive, Ghost, Outline},
-    Icon,
+    DropdownState, Icon, ListItem, Select, actions, heading,
     input::Input,
 };
+use paxri_ui::settings::{SettingsGroup, SettingsSection, SettingsTable};
 
 enum Entry {
     Loading(u64, tokio::task::JoinHandle<()>),
@@ -49,6 +49,19 @@ impl ForwardList {
 }
 
 impl Mobile {
+    fn rule_devices(&self) -> impl Iterator<Item = (&String, &client::Peer)> {
+        self.peers.iter().filter(|(id, peer)| {
+            self.client.is_some()
+                && self.presence.online(id)
+                && peer.supports_creating_forward_rules()
+        })
+    }
+
+    pub(super) fn can_add_rule(&self, scope: Option<&str>) -> bool {
+        self.rule_devices()
+            .any(|(id, _)| scope.is_none_or(|scope| scope == id))
+    }
+
     pub(super) fn sync_forwards(&mut self, refresh: bool) {
         let Page::Forwards(selected) = &self.page else {
             self.forwards.entries.clear();
@@ -106,6 +119,7 @@ impl Mobile {
             .overflow_y_scroll()
             .restrict_scroll_to_axis()
             .p_4()
+            .when(self.can_add_rule(selected), |page| page.pb(px(88.)))
             .flex()
             .flex_col()
             .gap_4();
@@ -126,21 +140,12 @@ impl Mobile {
             if selected.is_none() {
                 group = group.child(heading(peer.name.clone()));
             }
-            if peer.capabilities.is_some_and(|c| c.create_forward_rules) {
-                let owner = id.clone();
-                group = group.child(
-                    ui.button(Outline, SharedString::from(format!("add-{id}")), "Add rule")
-                        .icon(Icon::Plus)
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.open_rule(&owner, None, cx)),
-                        ),
-                );
-            } else {
+            if !peer.supports_creating_forward_rules() {
                 group = group.child(ui.muted("Update this gateway to add rules.").text_xs());
             }
             group = match entry {
                 Entry::Loading(..) => group.child(ui.muted("Loading forwarding rules…")),
-                Entry::Ready(Err(error)) => group.child(ui.alert(error.clone())),
+                Entry::Ready(Err(_)) => group.child(ui.muted("Forwarding rules unavailable.")),
                 Entry::Ready(Ok(rules)) if rules.is_empty() => {
                     group.child(ui.muted("No forwarding rules for this device."))
                 }
@@ -148,13 +153,11 @@ impl Mobile {
                     for (name, rule) in rules {
                         let owner = id.clone();
                         let key = name.clone();
-                        let label = div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                            .child(ui.muted(rule.route_for(&peer.name)))
-                            .child(ui.muted(rule.state().to_owned()).text_xs());
+                        let label = ListItem::new(
+                            div().font_weight(FontWeight::SEMIBOLD).child(name.clone()),
+                        )
+                        .detail(ui.muted(rule.route_for(&peer.name)))
+                        .detail(ui.muted(rule.state().to_owned()).text_xs());
                         group = group.child(
                             ui.button(
                                 Ghost,
@@ -164,7 +167,7 @@ impl Mobile {
                             .row()
                             .icon(Icon::Pencil)
                             .on_click(cx.listener(
-                                move |this, _, _, cx| this.open_rule(&owner, Some(&key), cx),
+                                move |this, _, _, cx| this.open_rule(Some((&owner, &key)), cx),
                             )),
                         );
                     }
@@ -179,25 +182,27 @@ impl Mobile {
 
 pub(super) struct RuleForm {
     pub inputs: [Entity<Input>; 3],
+    pub device_menu: Entity<DropdownState>,
+    pub direction_menu: Entity<DropdownState>,
     pub existing: Option<String>,
     direction: Direction,
     enabled: bool,
     confirm_remove: bool,
     pub saving: bool,
-    pub error: String,
 }
 
 impl RuleForm {
-    pub(super) fn new(cx: &mut App) -> Self {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Mobile>) -> Self {
         Self {
             inputs: ["e.g. web", "8080 or IP:port", "3000 or host:port"]
                 .map(|placeholder| Input::setting(placeholder, cx)),
+            device_menu: DropdownState::new(window, cx),
+            direction_menu: DropdownState::new(window, cx),
             existing: None,
             direction: Direction::Local,
             enabled: false,
             confirm_remove: false,
             saving: false,
-            error: String::new(),
         }
     }
 
@@ -231,24 +236,36 @@ impl RuleForm {
 }
 
 impl Mobile {
-    fn open_rule(&mut self, owner: &str, name: Option<&str>, cx: &mut Context<Self>) {
+    pub(super) fn open_rule(&mut self, existing: Option<(&str, &str)>, cx: &mut Context<Self>) {
         let Page::Forwards(scope) = &self.page else {
             return;
         };
         if self.rule_form.saving {
             return;
         }
-        let rule = name.and_then(|key| match self.forwards.entries.get(owner)? {
-            Entry::Ready(Ok(rules)) => rules.get(key),
-            _ => None,
-        });
-        if name.is_some() && rule.is_none() {
-            return;
-        }
+        let (owner, name, rule) = match existing {
+            Some((owner, name)) => {
+                let Some(Entry::Ready(Ok(rules))) = self.forwards.entries.get(owner) else {
+                    return;
+                };
+                let Some(rule) = rules.get(name) else { return };
+                (Some(owner.to_owned()), Some(name), Some(rule))
+            }
+            None => {
+                if !self.can_add_rule(scope.as_deref()) {
+                    return;
+                }
+                let owner = scope.clone().or_else(|| {
+                    let mut devices = self.rule_devices();
+                    let (id, _) = devices.next()?;
+                    devices.next().is_none().then(|| id.clone())
+                });
+                (owner, None, None)
+            }
+        };
         self.rule_form.existing = name.map(str::to_owned);
         self.rule_form.enabled = rule.is_some_and(|r| r.enabled());
         self.rule_form.direction = rule.map_or(Direction::Local, |r| r.direction);
-        self.rule_form.error.clear();
         self.rule_form.confirm_remove = false;
         let values = [
             name.unwrap_or_default(),
@@ -260,7 +277,7 @@ impl Mobile {
         }
         self.navigate(
             Page::ForwardEdit {
-                owner: owner.to_owned(),
+                owner,
                 scope: scope.clone(),
             },
             cx,
@@ -269,10 +286,13 @@ impl Mobile {
     }
 
     fn change_forward(&mut self, action: PeerForward, cx: &mut Context<Self>) {
-        let Page::ForwardEdit { owner, .. } = &self.page else {
+        let Page::ForwardEdit {
+            owner: Some(owner), ..
+        } = &self.page
+        else {
             return;
         };
-        if self.rule_form.saving {
+        if self.rule_form.saving || !self.can_save_rule(Some(owner)) {
             return;
         }
         let Some((client, peer)) = self.client.as_ref().zip(self.peers.get(owner)) else {
@@ -282,7 +302,6 @@ impl Mobile {
         let owner = owner.clone();
         let client = client.clone();
         self.rule_form.saving = true;
-        self.rule_form.error.clear();
         self.rule_form.confirm_remove = false;
         let updates = self.updates.clone();
         self.rt.spawn(async move {
@@ -296,13 +315,23 @@ impl Mobile {
         cx.notify();
     }
 
+    fn can_save_rule(&self, owner: Option<&str>) -> bool {
+        owner.is_some_and(|id| {
+            if self.rule_form.existing.is_some() {
+                self.client.is_some() && self.presence.online(id)
+            } else {
+                self.can_add_rule(Some(id))
+            }
+        })
+    }
+
     pub(super) fn save_rule_button(
         &self,
-        owner: &str,
+        owner: Option<&str>,
         ui: Ui,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.presence.online(owner) || self.rule_form.saving || self.rule_form.confirm_remove {
+        if !self.can_save_rule(owner) || self.rule_form.saving || self.rule_form.confirm_remove {
             return None;
         }
         Some(
@@ -314,86 +343,103 @@ impl Mobile {
                 .on_click(
                     cx.listener(|this, _, _, cx| match this.rule_form.save_action(cx) {
                         Ok(action) => this.change_forward(action, cx),
-                        Err(error) => {
-                            this.rule_form.error = error;
-                            cx.notify();
-                        }
+                        Err(error) => Toast::show(error, this.window, cx),
                     }),
                 )
                 .into_any_element(),
         )
     }
 
-    pub(super) fn rule_editor(&self, owner: &str, ui: Ui, cx: &Context<Self>) -> Stateful<Div> {
+    pub(super) fn rule_editor(
+        &self,
+        owner: Option<&str>,
+        ui: Ui,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let form = &self.rule_form;
         let [name, listen, target] = &form.inputs;
-        let field = |label: &'static str, input: &Entity<Input>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(label)
-                .child(input.clone())
-        };
-        let choose = |key, text, direction| {
-            ui.button(Outline, key, text)
-                .pressed(form.direction == direction)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.rule_form.direction = direction;
-                    cx.notify();
-                }))
-        };
-        let mut page = div()
-            .id("forward-edit-page")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll)
-            .restrict_scroll_to_axis()
-            .flex()
-            .flex_col()
-            .p_4()
-            .gap_3()
-            .child(match &form.existing {
-                Some(key) => heading(key.clone()),
-                None => field("Rule name", name),
-            })
-            .child(
-                div().flex().flex_col().gap_1().child("Listen on").child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(choose("listen-phone", "This phone", Direction::Local))
-                        .child(choose("listen-peer", "Paired device", Direction::Remote)),
-                ),
+        let mut fields = SettingsGroup::new(SettingsSection::new(
+            SettingsTable::Root,
+            "Port forwarding",
+            Icon::Forward,
+        ));
+        if form.existing.is_some() || form.saving {
+            fields.field(
+                "Device",
+                owner
+                    .and_then(|id| self.peers.get(id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default(),
+            );
+        } else {
+            let mut devices = Select::new(
+                "rule-device",
+                owner.map(str::to_owned),
+                cx.listener(|this, id: &String, _, cx| {
+                    if let Page::ForwardEdit { owner, .. } = &mut this.page {
+                        *owner = Some(id.clone());
+                        cx.notify();
+                    }
+                }),
             )
-            .child(field("Listen address", listen))
-            .child(field(
-                if form.direction == Direction::Local {
-                    "Target on paired device"
-                } else {
-                    "Target on this phone"
-                },
-                target,
-            ));
-        if !form.error.is_empty() {
-            page = page.child(ui.alert(form.error.clone()));
+            .with_optional_state(Some(&form.device_menu))
+            .placeholder(match owner.and_then(|id| self.peers.get(id)) {
+                Some(peer) => format!("{} (unavailable)", peer.name),
+                None => "Choose a paired device".to_owned(),
+            });
+            for (id, peer) in self.rule_devices() {
+                devices = devices.option_with_icon(
+                    id.clone(),
+                    peer.name.clone(),
+                    Icon::device(peer.platform),
+                );
+            }
+            fields.field("Device", devices);
         }
+        if let Some(key) = &form.existing {
+            fields.field("Rule name", key.clone());
+        } else {
+            fields.field("Rule name", name.clone());
+        }
+        let direction = Select::new(
+            "forward-listener",
+            form.direction,
+            cx.listener(|this, direction: &Direction, _, cx| {
+                this.rule_form.direction = *direction;
+                cx.notify();
+            }),
+        )
+        .with_optional_state(Some(&form.direction_menu))
+        .option(Direction::Local, "This phone")
+        .option(Direction::Remote, "Paired device");
+        fields.field("Listen on", direction);
+        fields.field("Listen address", listen.clone());
+        fields.field(
+            if form.direction == Direction::Local {
+                "Target on paired device"
+            } else {
+                "Target on this phone"
+            },
+            target.clone(),
+        );
+        let page = self
+            .settings_body("forward-edit-page")
+            .child(fields.render_rows(ui));
         if form.saving {
             return page.child(ui.muted("Saving…"));
         }
-        if !self.presence.online(owner) {
+        if owner.is_some_and(|id| !self.presence.online(id)) {
             return page.child(ui.muted("Device offline."));
+        }
+        if form.existing.is_none() && !self.can_add_rule(None) {
+            return page.child(ui.muted("No connected devices can create forwarding rules."));
         }
         if let Some(name) = &form.existing
             && form.confirm_remove
         {
             let key = name.clone();
             return page.child(ui.muted(format!("Remove {name}?"))).child(
-                div()
-                    .flex()
-                    .gap_2()
+                actions()
                     .child(
                         ui.button(Outline, "cancel-remove", "Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -411,10 +457,7 @@ impl Mobile {
         page.when_some(form.existing.clone(), |page, name| {
             let enabled = !form.enabled;
             page.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
+                actions()
                     .child(
                         ui.button(
                             Outline,

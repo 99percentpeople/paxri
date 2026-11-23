@@ -6,14 +6,14 @@ use paxri_config::{
 };
 use paxri_ui::{
     components::{
-        ButtonVariant::{Ghost, Outline, Primary},
+        ButtonVariant::{Ghost, Outline},
         Icon, Select, heading,
-        input::{Input, NumberFormat, NumberStep},
+        input::{EditingFinished, Input, NumberFormat, NumberStep},
         row,
     },
     settings::{
-        SettingsGroup, SettingsLayout, SettingsPage, SettingsSection, SettingsTable,
-        controls::number_field,
+        SettingsGroup, SettingsSection, SettingsTable,
+        controls::{number_field, setting_field},
     },
 };
 
@@ -49,20 +49,15 @@ fn key_name(token: &str) -> &str {
         .unwrap_or(token)
 }
 
-fn row_input(keys: &[String], cx: &mut Context<Mobile>) -> Entity<Input> {
-    let text = keys
-        .iter()
+fn row_text(keys: &[String]) -> String {
+    keys.iter()
         .map(|key| match key.as_str() {
             "," => "Comma",
             "，" => "FullwidthComma",
             key => key,
         })
         .collect::<Vec<_>>()
-        .join(", ");
-    let input = Input::setting("Esc, Tab, Ctrl", cx);
-    input.update(cx, |field, cx| field.set_text(&text, cx));
-    bind_field(&input, gpui_mobile::KeyboardType::Default, cx);
-    input
+        .join(", ")
 }
 
 fn bind_field(
@@ -71,14 +66,15 @@ fn bind_field(
     cx: &mut Context<Mobile>,
 ) {
     Mobile::bind_input(input, keyboard, cx);
+    cx.subscribe(input, |view, field, _: &EditingFinished, cx| {
+        view.finish_keybar_fields(Some(&field), cx);
+    })
+    .detach();
     let mut previous = input.read(cx).text().to_owned();
     cx.observe(input, move |view, input, cx| {
         let text = input.read(cx).text();
-        if let Some(editor) = &mut view.key_editor
-            && text != previous
-        {
+        if view.key_editor.is_some() && text != previous {
             text.clone_into(&mut previous);
-            editor.error.clear();
             cx.notify();
         }
     })
@@ -89,11 +85,47 @@ fn keys(text: &str) -> impl Iterator<Item = &str> {
     text.split(SEPARATORS).map(|token| key_name(token.trim()))
 }
 
+struct KeyRow {
+    input: Entity<Input>,
+    keys: Vec<String>,
+}
+
+impl KeyRow {
+    fn new(keys: &[String], cx: &mut Context<Mobile>) -> Self {
+        let input = Input::setting("Esc, Tab, Ctrl", cx);
+        input.update(cx, |field, cx| field.set_text(&row_text(keys), cx));
+        bind_field(&input, gpui_mobile::KeyboardType::Default, cx);
+        Self {
+            input,
+            keys: keys.to_vec(),
+        }
+    }
+
+    fn finish(&mut self, index: usize, cx: &mut App) -> Result<(), String> {
+        let mut values = Vec::new();
+        for (j, key) in keys(self.input.read(cx).text()).enumerate() {
+            if key.is_empty() {
+                continue;
+            }
+            if !valid_key(key) {
+                return Err(format!(
+                    "Row {}, key {}: unknown key “{key}”.",
+                    index + 1,
+                    j + 1
+                ));
+            }
+            values.push(key.to_owned());
+        }
+        self.keys = values;
+        Ok(())
+    }
+}
+
 pub(super) struct Editor {
-    rows: Vec<Entity<Input>>,
+    rows: Vec<KeyRow>,
     height: Entity<Input>,
+    row_height: u8,
     haptics: KeyHaptics,
-    error: String,
 }
 
 impl Editor {
@@ -104,7 +136,7 @@ impl Editor {
             field.set_text(&layout.row_height.to_string(), cx);
         });
         bind_field(&height, gpui_mobile::KeyboardType::NumberPad, cx);
-        cx.subscribe(&height, |_, input, step: &NumberStep, cx| {
+        cx.subscribe(&height, |view, input, step: &NumberStep, cx| {
             let range = KeybarSettings::HEIGHTS;
             let current = input
                 .read(cx)
@@ -115,13 +147,18 @@ impl Editor {
                 .saturating_add(step.0)
                 .clamp((*range.start()).into(), (*range.end()).into());
             input.update(cx, |field, cx| field.set_text(&next.to_string(), cx));
+            view.finish_keybar_fields(Some(&input), cx);
         })
         .detach();
         Self {
-            rows: layout.rows.iter().map(|keys| row_input(keys, cx)).collect(),
+            rows: layout
+                .rows
+                .iter()
+                .map(|keys| KeyRow::new(keys, cx))
+                .collect(),
             height,
+            row_height: layout.row_height,
             haptics: layout.haptics,
-            error: String::new(),
         }
     }
 
@@ -142,32 +179,17 @@ impl Editor {
             })
     }
 
-    fn layout(&self, cx: &App) -> Result<KeybarSettings, String> {
-        let mut rows = Vec::new();
-        for (i, row) in self.rows.iter().enumerate() {
-            let mut values = Vec::new();
-            for (j, key) in keys(row.read(cx).text()).enumerate() {
-                if key.is_empty() {
-                    continue;
-                }
-                if !valid_key(key) {
-                    return Err(format!(
-                        "Row {}, key {}: unknown key “{key}”.",
-                        i + 1,
-                        j + 1
-                    ));
-                }
-                values.push(key.to_owned());
-            }
-            if !values.is_empty() {
-                rows.push(values);
-            }
-        }
-        Ok(KeybarSettings {
-            rows,
-            row_height: self.row_height(cx)?,
+    fn layout(&self) -> KeybarSettings {
+        KeybarSettings {
+            rows: self
+                .rows
+                .iter()
+                .filter(|r| !r.keys.is_empty())
+                .map(|r| r.keys.clone())
+                .collect(),
+            row_height: self.row_height,
             haptics: self.haptics,
-        })
+        }
     }
 }
 
@@ -178,26 +200,47 @@ impl Mobile {
         cx.notify();
     }
 
-    pub(super) fn save_keybar_button(&self, ui: Ui, cx: &Context<Self>) -> AnyElement {
-        ui.button(Primary, "save-keys", "Save")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let Some(editor) = &mut this.key_editor else {
-                    return;
-                };
-                match editor.layout(cx) {
-                    Ok(layout) => {
-                        this.change_gui(GuiChange::Keybar(layout), cx);
-                        if this.settings_error.is_empty() {
-                            this.back(cx);
-                        }
-                    }
-                    Err(error) => {
-                        editor.error = error;
-                        cx.notify();
-                    }
+    fn apply_keybar(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.key_editor {
+            let layout = editor.layout();
+            if layout != *self.keybar {
+                self.change_gui(GuiChange::Keybar(layout), cx);
+            }
+        }
+    }
+
+    pub(super) fn finish_keybar_fields(
+        &mut self,
+        field: Option<&Entity<Input>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &mut self.key_editor else {
+            return;
+        };
+        let finished = |input: &Entity<Input>, cx: &App| {
+            field.is_none_or(|field| field == input) && !input.read(cx).is_composing()
+        };
+        if finished(&editor.height, cx) {
+            match editor.row_height(cx) {
+                Ok(height) => editor.row_height = height,
+                Err(error) => {
+                    editor.height.update(cx, |input, cx| {
+                        input.set_text(&editor.row_height.to_string(), cx)
+                    });
+                    Toast::show(error, self.window, cx);
                 }
-            }))
-            .into_any_element()
+            }
+        }
+        for (i, row) in editor.rows.iter_mut().enumerate() {
+            if finished(&row.input, cx)
+                && let Err(error) = row.finish(i, cx)
+            {
+                row.input
+                    .update(cx, |input, cx| input.set_text(&row_text(&row.keys), cx));
+                Toast::show(error, self.window, cx);
+            }
+        }
+        self.apply_keybar(cx);
     }
 
     pub(super) fn keybar_editor(&self, ui: Ui, cx: &Context<Self>) -> Stateful<Div> {
@@ -212,7 +255,7 @@ impl Mobile {
                 .rows
                 .iter()
                 .map(|row| {
-                    keys(row.read(cx).text())
+                    keys(row.input.read(cx).text())
                         .map(|key| if key.is_empty() { "…" } else { key }.to_owned())
                         .collect()
                 })
@@ -251,25 +294,10 @@ impl Mobile {
         .h(px(preview_height))
         .max_h(relative(0.35))
         .flex_none();
-        let mut form = div()
-            .id("keybar-fields")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.settings_scroll)
-            .flex()
-            .flex_col()
-            .p_4()
-            .gap_3()
-            .child(ui.muted("Separate keys with commas.").text_sm());
-        for error in [&editor.error, &self.settings_error] {
-            if !error.is_empty() {
-                form = form.child(ui.alert(error.clone()));
-            }
-        }
+        let mut fields = SettingsGroup::new(SECTION);
+        fields.notice = Some(ui.muted("Separate keys with commas.").into_any_element());
         for (i, row) in editor.rows.iter().enumerate() {
-            let id = row.entity_id();
+            let id = row.input.entity_id();
             let delete = ui
                 .icon_button(Ghost, ("delete-row", id), Icon::Trash, "Delete row")
                 .role(Role::Button)
@@ -277,34 +305,31 @@ impl Mobile {
                 .on_click(cx.listener(move |view, _, window, cx| {
                     window.blur(cx);
                     if let Some(editor) = &mut view.key_editor {
-                        editor.rows.retain(|row| row.entity_id() != id);
-                        editor.error.clear();
+                        editor.rows.retain(|row| row.input.entity_id() != id);
+                        view.apply_keybar(cx);
                         cx.notify();
                     }
                 }));
-            form = form.child(
-                ui.labeled(
-                    format!("Row {}", i + 1),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().flex_1().min_w_0().child(row.clone()))
-                        .child(delete),
-                )
-                .flex_none()
-                .min_w_0(),
+            fields.field(
+                format!("Row {}", i + 1),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(row.input.clone()))
+                    .child(delete),
             );
         }
-        form = form.child(
+        fields.footer = Some(
             row()
                 .child(
                     ui.button(Outline, "add-row", "Add row")
                         .icon(Icon::Plus)
                         .on_click(cx.listener(|view, _, window, cx| {
-                            let input = row_input(&[], cx);
+                            let row = KeyRow::new(&[], cx);
+                            let input = row.input.clone();
                             if let Some(editor) = &mut view.key_editor {
-                                editor.rows.push(input.clone());
+                                editor.rows.push(row);
                             }
                             window.on_next_frame(move |w, cx| {
                                 input.update(cx, |field, cx| field.edit_at_end(w, cx))
@@ -317,9 +342,11 @@ impl Mobile {
                         .on_click(cx.listener(|view, _, window, cx| {
                             window.blur(cx);
                             view.key_editor = Some(Editor::load(&KeybarSettings::default(), cx));
+                            view.apply_keybar(cx);
                             cx.notify();
                         })),
-                ),
+                )
+                .into_any_element(),
         );
         let mut feedback = Select::new(
             "key-vibration",
@@ -327,6 +354,7 @@ impl Mobile {
             cx.listener(|view, mode: &KeyHaptics, _, cx| {
                 if let Some(editor) = &mut view.key_editor {
                     editor.haptics = *mode;
+                    view.apply_keybar(cx);
                     cx.notify();
                 }
             }),
@@ -335,25 +363,17 @@ impl Mobile {
         for (mode, label) in HAPTICS {
             feedback = feedback.option(mode, label);
         }
-        let mut options = SettingsGroup::new(SECTION);
-        options.add(
+        fields.add(
             "row_height",
             "Key height",
             "",
             "",
             number_field(editor.height.clone()),
         );
-        options.add(
-            "haptics",
-            "Key vibration",
-            "",
-            "",
-            div().w(px(140.)).max_w_full().child(feedback),
-        );
-        let settings = SettingsPage {
-            section: SECTION,
-            groups: vec![options],
-        };
+        fields.add("haptics", "Key vibration", "", "", setting_field(feedback));
+        let form = self
+            .settings_body("keybar-fields")
+            .child(fields.render_rows(ui));
         div()
             .id("terminal-key-editor")
             .flex_1()
@@ -362,6 +382,6 @@ impl Mobile {
             .flex_col()
             .child(div().px_4().py_2().child(heading("Preview")))
             .child(preview)
-            .child(form.child(settings.render(ui, SettingsLayout::Mobile)))
+            .child(form)
     }
 }

@@ -5,7 +5,7 @@ use paxri_ui::connections::presence_detail;
 use paxri_ui::{
     components::{
         ButtonVariant::{Ghost, Primary},
-        Icon, single_line,
+        Button, Icon, single_line,
     },
     terminal::{cursor, display},
 };
@@ -33,6 +33,14 @@ pub(super) fn initial_size(window: &Window, cell: CellSize, keys: &KeybarSetting
 
 fn floating_corner() -> Div {
     div().absolute().bottom_4().right_4()
+}
+
+fn floating_button(ui: Ui, id: &'static str, icon: Icon, label: &'static str) -> Button {
+    ui.button(Primary, id, icon.draw(24.))
+        .floating()
+        .occlude()
+        .role(Role::Button)
+        .aria_label(label)
 }
 
 impl Mobile {
@@ -65,11 +73,9 @@ impl Mobile {
                     "New forwarding rule"
                 })
                 .into(),
-                self.peers
-                    .get(owner)
-                    .map(|peer| format!("Gateway · {}", peer.name)),
+                None,
                 Some("Back to forwarding rules"),
-                self.save_rule_button(owner, ui, cx),
+                self.save_rule_button(owner.as_deref(), ui, cx),
             ),
             Page::Forwards(peer) => (
                 "Port forwarding".into(),
@@ -98,7 +104,7 @@ impl Mobile {
                 SharedString::from(section.title),
                 section.table.heading_label().map(|label| label.to_string()),
                 Some("Back to settings"),
-                (*section == keybar::SECTION).then(|| self.save_keybar_button(ui, cx)),
+                None,
             ),
             Page::Terminal(id) => {
                 let id = *id;
@@ -191,7 +197,7 @@ impl Mobile {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.navigate(Page::Devices, cx);
                     if let Err(error) = activity_action(&this.android, action) {
-                        this.message = error;
+                        Toast::show(error, this.window, cx);
                     }
                     cx.notify();
                 }))
@@ -230,27 +236,28 @@ impl Mobile {
                 )
             })
             .child(
-                ui.button(Primary, "pair-device", toggle_icon.draw(24.))
-                    .floating()
-                    .occlude()
-                    .role(Role::Button)
-                    .aria_label(if expanded {
+                floating_button(
+                    ui,
+                    "pair-device",
+                    toggle_icon,
+                    if expanded {
                         "Close pairing menu"
                     } else {
                         "Pair device"
-                    })
-                    .aria_expanded(expanded)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.navigate(
-                            if expanded {
-                                Page::Devices
-                            } else {
-                                Page::PairingMenu
-                            },
-                            cx,
-                        );
-                        cx.notify();
-                    })),
+                    },
+                )
+                .aria_expanded(expanded)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.navigate(
+                        if expanded {
+                            Page::Devices
+                        } else {
+                            Page::PairingMenu
+                        },
+                        cx,
+                    );
+                    cx.notify();
+                })),
             )
     }
 
@@ -291,9 +298,10 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .when(!self.message.is_empty(), |page| {
-                page.child(ui.muted(self.message.clone()))
+            .when(self.client.is_none(), |page| {
+                page.child(ui.muted(if self.starting_network { "Starting network…" } else { "Network unavailable" }))
             })
+            .when(self.pairing, |page| page.child(ui.muted("Approve the request on your computer.")))
             .when(
                 self.peers.is_empty() && self.client.is_some() && !self.pairing,
                 |page| page.child(ui.muted("Tap + to pair a computer.")),
@@ -517,6 +525,8 @@ impl Render for Mobile {
         }
         let devices = matches!(self.page, Page::Devices | Page::PairingMenu);
         let expanded = self.page == Page::PairingMenu;
+        let show_add_rule =
+            matches!(&self.page, Page::Forwards(scope) if self.can_add_rule(scope.as_deref()));
         let drawer = self.drawer.position(window, cx);
         let content_width = window.viewport_size().width - px(left + right);
         let drawer_width =
@@ -562,7 +572,7 @@ impl Render for Mobile {
                             .settings(Some(section), ui, content_width, cx)
                             .into_any_element(),
                         Page::ForwardEdit { owner, .. } => {
-                            self.rule_editor(&owner, ui, cx).into_any_element()
+                            self.rule_editor(owner.as_deref(), ui, cx).into_any_element()
                         }
                         Page::Forwards(peer) => self
                             .forward_list(peer.as_deref(), ui, cx)
@@ -587,9 +597,16 @@ impl Render for Mobile {
                     .when(devices && self.client.is_some() && !self.pairing, |page| {
                         page.child(self.pairing_actions(expanded, ui, cx))
                     })
+                    .when(show_add_rule, |page| {
+                        page.child(floating_corner().child(
+                            floating_button(ui, "add-forward", Icon::Plus, "Add forwarding rule")
+                                .on_click(cx.listener(|this, _, _, cx| this.open_rule(None, cx))),
+                        ))
+                    })
                     .when(self.drawer.open || drawer > 0., |page| {
                         page.child(self.navigation_drawer(drawer, drawer_width, ui, cx))
-                    }),
+                    })
+                    .children(Toast::overlay(window, cx)),
             )
     }
 }

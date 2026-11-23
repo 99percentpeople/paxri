@@ -79,6 +79,10 @@ impl Peer {
         self.platform.supports_forward_rules(self.capabilities)
     }
 
+    pub fn supports_creating_forward_rules(&self) -> bool {
+        self.supports_forward_rules() && self.capabilities.is_some_and(|c| c.create_forward_rules)
+    }
+
     pub fn supports_shell(&self) -> bool {
         self.platform.supports_shell(self.capabilities)
     }

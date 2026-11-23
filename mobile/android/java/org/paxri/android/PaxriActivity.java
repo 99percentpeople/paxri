@@ -26,6 +26,7 @@ import android.widget.FrameLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.LinearLayout;
+import android.widget.Toast;
 import dev.gpui.mobile.GpuiInputActivity;
 
 public final class PaxriActivity extends GpuiInputActivity {
@@ -41,6 +42,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static native void composingTextChanged(String text);
     private long imeSession;
     private boolean networkReady;
+    private Toast toast;
     private PopupWindow terminalTouch;
     private long touchSession;
     private TerminalGestures gestures;
@@ -343,6 +345,15 @@ public final class PaxriActivity extends GpuiInputActivity {
         runOnUiThread(() -> {
             imeSession = session;
             super.gpuiResetComposition(session);
+        });
+    }
+
+    public void showToast(String message) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (toast != null) toast.cancel();
+            toast = Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT);
+            toast.show();
         });
     }
 

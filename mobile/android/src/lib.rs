@@ -28,7 +28,7 @@ use client::{Client, Peers, Presence};
 use navigation::Drawer;
 use paxri_ui::connections::ConnectionHistory;
 use paxri_ui::{
-    components::Ui,
+    components::{Toast, Ui},
     terminal::{
         cursor::Preedit,
         emulator::{Emulator, GridSize},
@@ -258,6 +258,7 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
 
 #[derive(Clone, Copy)]
 enum ActivityAction<'a> {
+    Toast(&'a str),
     SaveDeviceName(&'a str),
     Pair,
     Scan,
@@ -276,6 +277,10 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
         let activity =
             unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
         match action {
+            ActivityAction::Toast(message) => {
+                let text = JString::from_str(env, message).map_err(|e| e.to_string())?;
+                env.call_method(activity, jni_str!("showToast"), jni_sig!("(Ljava/lang/String;)V"), &[(&text).into()])
+            }
             ActivityAction::SaveDeviceName(name) => {
                 let value = JString::from_str(env, name).map_err(|e| e.to_string())?;
                 env.call_method(
@@ -393,7 +398,7 @@ enum Page {
     Settings,
     Forwards(Option<String>),
     ForwardEdit {
-        owner: String,
+        owner: Option<String>,
         scope: Option<String>,
     },
     SettingsCategory(paxri_ui::settings::SettingsSection),
@@ -403,6 +408,7 @@ enum Page {
 
 struct Mobile {
     android: AndroidApp,
+    window: AnyWindowHandle,
     ui_font: SharedString,
     font: TerminalFont,
     touch_area: Option<(u64, [i32; 5], Arc<KeybarSettings>)>,
@@ -429,8 +435,7 @@ struct Mobile {
     dark_system_bar_icons: Option<bool>,
     editing_input: Option<Entity<paxri_ui::components::input::Input>>,
     generation: u64,
-    message: String,
-    settings_error: String,
+    starting_network: bool,
     pairing: bool,
 }
 
@@ -479,7 +484,7 @@ impl Mobile {
         .detach();
     }
 
-    fn navigate(&mut self, page: Page, cx: &mut App) {
+    fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page != page
             && let Some(input) = self.editing_input.take()
         {
@@ -497,6 +502,7 @@ impl Mobile {
             gpui_mobile::hide_keyboard();
         }
         if self.page == Page::SettingsCategory(keybar::SECTION) && self.page != page {
+            self.finish_keybar_fields(None, cx);
             self.set_touch_area(0, [0; 5], self.keybar.clone());
             self.key_editor = None;
         }
@@ -541,7 +547,7 @@ impl Mobile {
         }
     }
 
-    fn back(&mut self, cx: &mut App) {
+    fn back(&mut self, cx: &mut Context<Self>) {
         if self.drawer.open {
             self.drawer.set_open(false);
             self.sync_back();
@@ -647,12 +653,15 @@ impl Mobile {
             Update::Ready(client, peers) => {
                 self.client = Some(client);
                 self.peers = peers;
-                self.message.clear();
+                self.starting_network = false;
                 if let Err(error) = activity_action(&self.android, ActivityAction::PairingReady) {
-                    self.message = error;
+                    Toast::show(error, self.window, cx);
                 }
             }
-            Update::Error(error) => self.message = error,
+            Update::Error(error) => {
+                self.starting_network = false;
+                Toast::show(error, self.window, cx);
+            }
             Update::PairCode(code) => {
                 let Some(client) = self.client.clone() else {
                     return;
@@ -664,7 +673,6 @@ impl Mobile {
                     self.navigate(Page::Devices, cx);
                 }
                 self.pairing = true;
-                self.message = "Approve the request on your computer.".into();
                 let tx = self.updates.clone();
                 self.rt.spawn(async move {
                     let outcome = client.pair(&code).await;
@@ -678,16 +686,24 @@ impl Mobile {
                 match result {
                     Ok(peers) => {
                         self.peers = peers;
-                        self.message.clear();
+                        Toast::show("Device paired", self.window, cx);
                     }
-                    Err(error) => self.message = error,
+                    Err(error) => Toast::show(error, self.window, cx),
                 }
             }
             Update::Devices(peers) => {
-                let revoked = match &self.page {
-                    Page::Peer(id)
-                    | Page::Forwards(Some(id))
-                    | Page::ForwardEdit { owner: id, .. } => !peers.contains_key(id),
+                let revoked = match &mut self.page {
+                    Page::Peer(id) | Page::Forwards(Some(id)) => !peers.contains_key(id),
+                    Page::ForwardEdit { owner, scope } => {
+                        if scope.as_ref().is_some_and(|id| !peers.contains_key(id)) {
+                            *scope = None;
+                        }
+                        let removed = owner.as_ref().is_some_and(|id| !peers.contains_key(id));
+                        if removed && self.rule_form.existing.is_none() {
+                            *owner = None;
+                        }
+                        removed && self.rule_form.existing.is_some()
+                    }
                     Page::Terminal(id) => self
                         .sessions
                         .get(id)
@@ -700,7 +716,9 @@ impl Mobile {
                 };
                 if revoked {
                     self.navigate(Page::Devices, cx);
-                    self.message = "Device unpaired.".into();
+                }
+                if self.peers.keys().any(|id| !peers.contains_key(id)) {
+                    Toast::show("Device unpaired", self.window, cx);
                 }
                 self.sessions.retain(|_, s| peers.contains_key(&s.peer));
                 self.last_session_number
@@ -723,7 +741,11 @@ impl Mobile {
                 if let Some(menu) = self
                     .terminal_menus
                     .iter()
-                    .chain([&self.keybar_menu])
+                    .chain([
+                        &self.keybar_menu,
+                        &self.rule_form.device_menu,
+                        &self.rule_form.direction_menu,
+                    ])
                     .find(|menu| menu.read(cx).is_open())
                 {
                     menu.update(cx, |menu, cx| menu.dismiss(cx));
@@ -790,10 +812,12 @@ impl Mobile {
             }
             Update::ForwardChanged(owner, result) => {
                 self.rule_form.saving = false;
-                if matches!(&self.page, Page::ForwardEdit { owner: peer, .. } if peer == &owner) {
+                if let Page::ForwardEdit { owner: Some(peer), scope } = &self.page
+                    && peer == &owner
+                {
                     match result {
-                        Ok(()) => self.back(cx),
-                        Err(error) => self.rule_form.error = error,
+                        Ok(()) => self.navigate(Page::Forwards(scope.as_ref().map(|_| owner)), cx),
+                        Err(error) => Toast::show(error, self.window, cx),
                     }
                 } else {
                     // A list opened while the save was pending may still contain its previous rules.
@@ -802,8 +826,12 @@ impl Mobile {
                 }
             }
             Update::ForwardRules(peer, request, result) => {
+                let error = result.as_ref().err().cloned();
                 if !self.forwards.complete(&peer, request, result) {
                     return;
+                }
+                if let Some(error) = error {
+                    Toast::show(error, self.window, cx);
                 }
             }
             Update::Presence(snapshot) => {
@@ -857,13 +885,17 @@ fn android_main(android: AndroidApp) {
     let handle = rt.handle().clone();
     Application::with_platform(platform.into_rc()).run(move |cx| {
         let (preferences, settings_error) = match settings::load(&android) {
-            Ok(settings) => (settings, String::new()),
+            Ok(settings) => (settings, None),
             Err(error) => (
                 theme::GuiSettings::default(),
-                format!("Loading settings: {error:#}"),
+                Some(format!("Loading settings: {error:#}")),
             ),
         };
         theme::install(preferences, cx);
+        let activity = android.clone();
+        Toast::set_native(move |message| {
+            activity_action(&activity, ActivityAction::Toast(message)).is_ok()
+        }, cx);
         let (tx, rx) = async_channel::bounded(128);
         // A busy PTY must not crowd out Back, pairing or window-inset events.
         let (controls, platform_events) = async_channel::unbounded();
@@ -887,6 +919,9 @@ fn android_main(android: AndroidApp) {
         });
         cx.open_window(WindowOptions::default(), move |window, cx| {
             theme::observe(window);
+            if let Some(error) = settings_error {
+                Toast::show(error, window.window_handle(), cx);
+            }
             cx.new(|cx| {
                 cx.spawn(async move |this, cx| {
                     while let Ok(event) = tokio::select! {
@@ -907,13 +942,13 @@ fn android_main(android: AndroidApp) {
                     .global::<theme::fonts::MonospaceFonts>()
                     .resolve(&theme::current(cx).terminal);
                 let terminal_settings =
-                    paxri_ui::settings::terminal::TerminalSettings::new(Mobile::change_gui, cx);
+                    paxri_ui::settings::terminal::TerminalSettings::new(|view: &mut Mobile, change, cx| { view.change_gui(change, cx); }, cx);
                 let names = DEVICE_NAME.borrow().clone();
                 let name_input = paxri_ui::components::input::Input::setting(&names.system, cx);
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
                 use gpui_mobile::KeyboardType;
                 let mut inputs = vec![(name_input.clone(), KeyboardType::Default)];
-                let rule_form = forwards::RuleForm::new(cx);
+                let rule_form = forwards::RuleForm::new(window, cx);
                 inputs.extend(
                     rule_form
                         .inputs
@@ -933,6 +968,7 @@ fn android_main(android: AndroidApp) {
                 Mobile {
                     name_input,
                     android,
+                    window: window.window_handle(),
                     ui_font,
                     font,
                     touch_area: None,
@@ -960,8 +996,7 @@ fn android_main(android: AndroidApp) {
                         paxri_ui::components::DropdownState::new(window, cx)
                     }),
                     generation: 0,
-                    message: "Starting network…".into(),
-                    settings_error,
+                    starting_network: true,
                     pairing: false,
                 }
             })

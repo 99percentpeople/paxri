@@ -48,6 +48,20 @@ pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
 }
 
 impl Mobile {
+    pub(super) fn settings_body(&self, id: impl Into<ElementId>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll)
+            .restrict_scroll_to_axis()
+            .flex()
+            .flex_col()
+            .p_4()
+            .gap_2()
+    }
+
     pub(super) fn commit_device_name(&mut self, cx: &mut App) {
         let input = self.name_input.read(cx);
         if input.is_composing() {
@@ -58,15 +72,16 @@ impl Mobile {
             if let Err(error) =
                 activity_action(&self.android, ActivityAction::SaveDeviceName(&value))
             {
-                self.settings_error = error;
+                Toast::show(error, self.window, cx);
                 return;
             }
+            Toast::show("Device name saved", self.window, cx);
         }
         self.name_input
             .update(cx, |input, cx| input.set_text(&value, cx));
     }
 
-    pub(super) fn change_gui(&mut self, change: GuiChange, cx: &mut Context<Self>) {
+    pub(super) fn change_gui(&mut self, change: GuiChange, cx: &mut Context<Self>) -> bool {
         match path(&self.android).and_then(|path| file::set_gui(&path, change, true)) {
             Ok(settings) => {
                 self.font = cx
@@ -77,11 +92,14 @@ impl Mobile {
                 }
                 self.keybar = settings.keybar.clone().unwrap_or_default();
                 theme::apply(settings, cx);
-                self.settings_error.clear();
+                cx.notify();
+                true
             }
-            Err(error) => self.settings_error = format!("Saving settings: {error:#}"),
+            Err(error) => {
+                Toast::show(format!("Saving settings: {error:#}"), self.window, cx);
+                false
+            }
         }
-        cx.notify();
     }
 
     pub(super) fn settings(
@@ -111,7 +129,7 @@ impl Mobile {
                     settings.appearance,
                     card_width,
                     cx.listener(|view, mode: &Appearance, _, cx| {
-                        view.change_gui(GuiChange::Appearance(*mode), cx)
+                        view.change_gui(GuiChange::Appearance(*mode), cx);
                     }),
                 ),
             );
@@ -127,27 +145,10 @@ impl Mobile {
         }
 
         let pages = SettingsPage::collect(vec![device, appearance, terminal]);
-        let mut body = div()
-            .id((
-                ElementId::from("settings"),
-                SharedString::from(
-                    selected
-                        .map(|section| section.title)
-                        .unwrap_or("categories"),
-                ),
-            ))
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll)
-            .restrict_scroll_to_axis()
-            .flex()
-            .flex_col()
-            .p_4()
-            .gap_2();
-        if !self.settings_error.is_empty() {
-            body = body.child(ui.alert(self.settings_error.clone()));
-        }
+        let mut body = self.settings_body((
+            ElementId::from("settings"),
+            SharedString::from(selected.map(|section| section.title).unwrap_or("categories")),
+        ));
         for page in pages {
             let section = page.section;
             if selected.is_none() {
