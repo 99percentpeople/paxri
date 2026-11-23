@@ -167,7 +167,7 @@ sys.exit(37)
     assert (captured.returncode, captured.stdout, captured.stderr) == (17, b"\x1b[6noutputerror", b""), captured
     with session() as (child, fd, slave):
         ready(slave)
-        os.write(fd, b"""peerhatch status >/dev/null && printf 'TOOLS[%s]\\n' "$PEERHATCH_CALLER_ID"\r""")
+        os.write(fd, b"""paxri status >/dev/null && printf 'TOOLS[%s]\\n' "$PAXRI_CALLER_ID"\r""")
         read_until(fd, re.escape(f"TOOLS[{keys['client']}]".encode()))
         with session("shell", keys["host"][:8]) as (second, second_fd, second_slave):
             ready(second_slave)
@@ -282,15 +282,15 @@ def check_session_tools(root, keys, call, cli):
     def remote(*args):
         return call("client", "exec", "host", *args)
 
-    assert host_code in remote("--", "peerhatch", "pair", "code")
+    assert host_code in remote("--", "paxri", "pair", "code")
     # Install a standalone executable after startup, outside the system PATH.
     directory = root / "tools" / "bin"
     directory.mkdir(parents=True)
     suffix = ".exe" if os.name == "nt" else ""
-    shutil.copy2(Path(cli).with_name("peerhatch" + suffix), directory / ("ph-test" + suffix))
+    shutil.copy2(Path(cli).with_name("paxri" + suffix), directory / ("ph-test" + suffix))
     assert host_code in remote("--", "ph-test", "pair", "code")
     assert host_code in call("client", "exec", "--pipe", "host", "--", "ph-test", "pair", "code")
-    caller = "$env:PEERHATCH_CALLER_ID" if os.name == "nt" else '"$PEERHATCH_CALLER_ID"'
+    caller = "$env:PAXRI_CALLER_ID" if os.name == "nt" else '"$PAXRI_CALLER_ID"'
     output = remote("-c", f"echo {caller}; ph-test pair code")
     assert keys["client"] in output and host_code in output, output
     print("PASS: bundled CLI, profile extension, host IPC and authenticated caller in remote exec")
@@ -532,7 +532,7 @@ def check_lifecycle(client):
             assert Path(initial["executable"]).resolve().parent == Path(client).resolve().parent
             # A second installation can recover this address by the profile alone.
             env = dict(os.environ)
-            env.pop("PEERHATCH_IPC", None)
+            env.pop("PAXRI_IPC", None)
             reused = subprocess.check_output([client, "gateway", "start", "--config", config],
                                              env=env, stderr=subprocess.PIPE, timeout=45, encoding="utf-8")
             assert ipc in reused and "Running executable" in reused
@@ -716,7 +716,7 @@ def check_unpair(root, keys, call, start, wait, echo_port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
-    parser.add_argument("--client", choices=("peerhatch", "peerhatch-gui"), default="peerhatch",
+    parser.add_argument("--client", choices=("paxri", "paxri-gui"), default="paxri",
                         help="client executable to use for gateway commands")
     parser.add_argument("--unpair", action="store_true", help="revoke an online or offline device and its active forwards")
     parser.add_argument("--pairing-only", action="store_true", help="exercise persistent pairing codes, rotation and bilateral approval")
@@ -731,7 +731,7 @@ def main():
         parser.error("--native-terminal requires a standard Linux user")
     bins = args.bin_dir.resolve()
     suffix = ".exe" if os.name == "nt" else ""
-    cli, gateway = (str(bins / (n + suffix)) for n in (args.client, "peerhatch-gateway"))
+    cli, gateway = (str(bins / (n + suffix)) for n in (args.client, "paxri-gateway"))
 
     if args.lifecycle:
         return check_lifecycle(cli)

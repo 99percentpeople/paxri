@@ -14,8 +14,8 @@ use jni::{
     EnvUnowned, jni_sig, jni_str,
     objects::{Global, JClass, JObject, JString},
 };
-use peerhatch_config::keybar::KeybarSettings;
-use peerhatch_terminal::{Frame, Size as PtySize};
+use paxri_config::keybar::KeybarSettings;
+use paxri_terminal::{Frame, Size as PtySize};
 use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -25,8 +25,8 @@ use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 use alacritty_terminal::{grid::Scroll, term::TermMode};
 use client::{Client, Peers, Presence};
 use navigation::Drawer;
-use peerhatch_ui::connections::ConnectionHistory;
-use peerhatch_ui::{
+use paxri_ui::connections::ConnectionHistory;
+use paxri_ui::{
     components::Ui,
     terminal::{
         cursor::Preedit,
@@ -68,7 +68,7 @@ enum Update {
     ForwardRules(
         String,
         u64,
-        Result<peerhatch_control::forwarding::Rules, String>,
+        Result<paxri_control::forwarding::Rules, String>,
     ),
     End(u64, Result<u32, String>),
 }
@@ -77,7 +77,7 @@ static ACTIVITY_VISIBLE: LazyLock<tokio::sync::watch::Sender<bool>> =
     LazyLock::new(|| tokio::sync::watch::channel(false).0);
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_activityVisibilityChanged(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_activityVisibilityChanged(
     _env: EnvUnowned,
     _class: JClass,
     visible: bool,
@@ -111,7 +111,7 @@ static DEVICE_NAME: LazyLock<tokio::sync::watch::Sender<DeviceName>> = LazyLock:
 });
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_deviceNameChanged(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_deviceNameChanged(
     mut env: EnvUnowned,
     _class: JClass,
     name: JString,
@@ -157,7 +157,7 @@ fn post(event: Update) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_initVerifier(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_initVerifier(
     mut env: EnvUnowned,
     _class: JClass,
     app: JObject,
@@ -166,20 +166,20 @@ pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_initVerifier
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PairingScannerActivity_isInvitation(
+pub extern "system" fn Java_org_paxri_android_PairingScannerActivity_isInvitation(
     mut env: EnvUnowned,
     _class: JClass,
     code: JString,
 ) -> bool {
     env.with_env(|_| {
         let valid =
-            peerhatch_native::gateway::pairing::Invitation::parse(&code.to_string()).is_ok();
+            paxri_native::gateway::pairing::Invitation::parse(&code.to_string()).is_ok();
         Ok::<_, jni::errors::Error>(valid)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_submitCode(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_submitCode(
     mut env: EnvUnowned,
     _class: JClass,
     code: JString,
@@ -191,7 +191,7 @@ pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_submitCode(
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_composingTextChanged(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_composingTextChanged(
     mut env: EnvUnowned,
     _class: JClass,
     text: JString,
@@ -203,7 +203,7 @@ pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_composingTex
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_insetsChanged(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_insetsChanged(
     _env: EnvUnowned,
     _class: JClass,
     left: f32,
@@ -215,7 +215,7 @@ pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_insetsChange
     post(Update::Insets);
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_goBack(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_goBack(
     _env: EnvUnowned,
     _class: JClass,
 ) -> bool {
@@ -227,7 +227,7 @@ pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_goBack(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_PeerHatchActivity_terminalKey(
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
     mut env: EnvUnowned,
     _class: JClass,
     session: i64,
@@ -313,7 +313,7 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
             ),
             ActivityAction::TouchArea(id, [x, y, width, height, toolbar], keys) => {
                 let rows: Vec<Vec<_>> = keys.rows.iter().map(|row| row.iter().map(|key|
-                    (key.as_str(), peerhatch_config::keybar::label(key))).collect()).collect();
+                    (key.as_str(), paxri_config::keybar::label(key))).collect()).collect();
                 let layout = serde_json::json!({
                     "rows": rows, "row_height": keys.row_height, "haptics": keys.haptics,
                 }).to_string();
@@ -351,7 +351,7 @@ struct Session {
     name: SharedString,
     state: SessionState,
     screen: Emulator,
-    wheel: peerhatch_ui::terminal::mouse::Wheel,
+    wheel: paxri_ui::terminal::mouse::Wheel,
     composing: Preedit,
     title: Entity<TabTitle>,
     input: mpsc::UnboundedSender<Frame>,
@@ -395,7 +395,7 @@ enum Page {
         owner: String,
         scope: Option<String>,
     },
-    SettingsCategory(peerhatch_ui::settings::SettingsSection),
+    SettingsCategory(paxri_ui::settings::SettingsSection),
     Peer(String),
     Terminal(u64),
 }
@@ -416,16 +416,16 @@ struct Mobile {
     last_session_number: BTreeMap<String, usize>,
     page: Page,
     drawer: Drawer,
-    name_input: Entity<peerhatch_ui::components::input::Input>,
+    name_input: Entity<paxri_ui::components::input::Input>,
     keybar: Arc<KeybarSettings>,
     key_editor: Option<keybar::Editor>,
-    keybar_menu: Entity<peerhatch_ui::components::DropdownState>,
-    terminal_settings: peerhatch_ui::settings::terminal::TerminalSettings,
-    terminal_menus: [Entity<peerhatch_ui::components::DropdownState>; 3],
+    keybar_menu: Entity<paxri_ui::components::DropdownState>,
+    terminal_settings: paxri_ui::settings::terminal::TerminalSettings,
+    terminal_menus: [Entity<paxri_ui::components::DropdownState>; 3],
     settings_scroll: ScrollHandle,
     bottom_inset: f32,
     dark_system_bar_icons: Option<bool>,
-    editing_input: Option<Entity<peerhatch_ui::components::input::Input>>,
+    editing_input: Option<Entity<paxri_ui::components::input::Input>>,
     generation: u64,
     message: String,
     settings_error: String,
@@ -434,7 +434,7 @@ struct Mobile {
 
 impl Mobile {
     fn bind_input(
-        input: &Entity<peerhatch_ui::components::input::Input>,
+        input: &Entity<paxri_ui::components::input::Input>,
         keyboard: gpui_mobile::KeyboardType,
         cx: &mut Context<Self>,
     ) {
@@ -442,7 +442,7 @@ impl Mobile {
             input,
             |this: &mut Mobile,
              field,
-             _: &peerhatch_ui::components::input::EditingFinished,
+             _: &paxri_ui::components::input::EditingFinished,
              cx| {
                 if this.editing_input.as_ref() != Some(&field) {
                     return;
@@ -461,7 +461,7 @@ impl Mobile {
             input,
             move |this: &mut Mobile,
                   field,
-                  _: &peerhatch_ui::components::input::KeyboardRequested,
+                  _: &paxri_ui::components::input::KeyboardRequested,
                   cx| {
                 this.editing_input = Some(field.clone());
                 let field = field.downgrade();
@@ -842,7 +842,7 @@ fn android_main(android: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Warn)
-            .with_tag("PeerHatch"),
+            .with_tag("paxri"),
     );
     gpui_mobile::android::jni::install_panic_hook();
     gpui_mobile::android::jni::init_platform(&android);
@@ -905,9 +905,9 @@ fn android_main(android: AndroidApp) {
                     .global::<theme::fonts::MonospaceFonts>()
                     .resolve(&theme::current(cx).terminal);
                 let terminal_settings =
-                    peerhatch_ui::settings::terminal::TerminalSettings::new(Mobile::change_gui, cx);
+                    paxri_ui::settings::terminal::TerminalSettings::new(Mobile::change_gui, cx);
                 let names = DEVICE_NAME.borrow().clone();
-                let name_input = peerhatch_ui::components::input::Input::setting(&names.system, cx);
+                let name_input = paxri_ui::components::input::Input::setting(&names.system, cx);
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
                 use gpui_mobile::KeyboardType;
                 let mut inputs = vec![(name_input.clone(), KeyboardType::Default)];
@@ -951,10 +951,10 @@ fn android_main(android: AndroidApp) {
                     editing_input: None,
                     keybar: theme::current(cx).keybar.unwrap_or_default(),
                     key_editor: None,
-                    keybar_menu: peerhatch_ui::components::DropdownState::new(window, cx),
+                    keybar_menu: paxri_ui::components::DropdownState::new(window, cx),
                     terminal_settings,
                     terminal_menus: std::array::from_fn(|_| {
-                        peerhatch_ui::components::DropdownState::new(window, cx)
+                        paxri_ui::components::DropdownState::new(window, cx)
                     }),
                     generation: 0,
                     message: "Starting network…".into(),

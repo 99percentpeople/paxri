@@ -146,7 +146,7 @@ def check(binary, sidebar_only=False):
             time.sleep(0.015)
 
     try:
-        home = wait_window("PeerHatch", 12)
+        home = wait_window("paxri", 12)
         left, top, right, bottom = api.GetMonitorInfo(api.MonitorFromWindow(home))["Work"]
         width, height = right - left, bottom - top
         dpi = user32.GetDpiForWindow(home) / 96
@@ -426,7 +426,7 @@ def check(binary, sidebar_only=False):
         for x, y in [(26, 55), (trailing_x, 57), (149, 59)]:
             api.SetCursorPos(home_point(x, y))
             time.sleep(0.18)
-            if window("Settings — PeerHatch"):
+            if window("Settings — paxri"):
                 raise AssertionError("Split before the tab left the reorder threshold")
             if x == trailing_x:
                 check_trailing_preview()
@@ -436,7 +436,7 @@ def check(binary, sidebar_only=False):
         api.SetCursorPos(split)
         end = time.monotonic() + 4
         while time.monotonic() < end:
-            detached = window("Settings — PeerHatch")
+            detached = window("Settings — paxri")
             if detached:
                 cloaked = wintypes.DWORD()
                 hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
@@ -479,7 +479,7 @@ def check(binary, sidebar_only=False):
         box = gui.GetWindowRect(detached)
         api.SetCursorPos(start)
         time.sleep(0.15)
-        if window("Settings — PeerHatch") != detached or gui.GetWindowRect(detached) != box:
+        if window("Settings — paxri") != detached or gui.GetWindowRect(detached) != box:
             raise AssertionError("Detached window changed after release")
         gui.ShowWindow(detached, win.SW_MINIMIZE)
         click_home_tab()
@@ -523,7 +523,7 @@ def check(binary, sidebar_only=False):
                 api.SetCursorPos(home_point(16, 20))
                 time.sleep(0.22)
                 api.SetCursorPos(home_point(16, 92))
-                detached = wait_window("Settings — PeerHatch", 2)
+                detached = wait_window("Settings — paxri", 2)
                 dock_over_previous_page(detached)
                 if gui.IsWindow(detached) or not api.GetAsyncKeyState(primary) & 0x8000:
                     raise AssertionError("Second entry did not merge during the same press")
@@ -535,7 +535,7 @@ def check(binary, sidebar_only=False):
             api.mouse_event(up, 0, 0)
             pressed = False
             time.sleep(0.13)
-            if bool(gui.IsWindow(detached)) == should_dock or window("PeerHatch") != home:
+            if bool(gui.IsWindow(detached)) == should_dock or window("paxri") != home:
                 raise AssertionError(f"Unexpected docking result for destination {drop}")
         choose_left_tabs()
         client_height = round(gui.GetClientRect(home)[3] / dpi)
@@ -568,7 +568,7 @@ def check(binary, sidebar_only=False):
         api.mouse_event(down, 0, 0)
         pressed = True
         api.SetCursorPos(home_point(285, 60))
-        detached = wait_window("Settings — PeerHatch", 4)
+        detached = wait_window("Settings — paxri", 4)
         check_held_window(detached)
         api.SetCursorPos(home_point(45, bottom_y))
         check_held_window(home)
@@ -589,7 +589,7 @@ def check(binary, sidebar_only=False):
         api.mouse_event(down, 0, 0)
         pressed = True
         api.SetCursorPos(home_point(285, 94))
-        detached = wait_window("Settings — PeerHatch", 4)
+        detached = wait_window("Settings — paxri", 4)
         api.SetCursorPos(points[0])
         check_held_window(detached)
         check_floating_slot(detached, sidebar=True, second=True)
@@ -621,7 +621,7 @@ def check(binary, sidebar_only=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, default=Path("target/debug/peerhatch-gui.exe"))
+    parser.add_argument("--binary", type=Path, default=Path("target/debug/paxri-gui.exe"))
     parser.add_argument("--sidebar-only", action="store_true", help="check sidebar resizing and its minimum width")
     args = parser.parse_args()
     if sys.platform != "win32":

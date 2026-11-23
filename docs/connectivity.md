@@ -1,16 +1,16 @@
 # NAT traversal and connectivity
 
-PeerHatch authenticates a device by its public key. An endpoint ticket provides its identity, relay hints, and IP candidates. When the default public infrastructure is enabled, the gateway can also look up the peer’s current address. A relay gives the two endpoints an initial path. iroh checks direct IPv4 and IPv6 UDP paths while the same encrypted connection carries traffic.
+paxri authenticates a device by its public key. An endpoint ticket provides its identity, relay hints, and IP candidates. When the default public infrastructure is enabled, the gateway can also look up the peer’s current address. A relay gives the two endpoints an initial path. iroh checks direct IPv4 and IPv6 UDP paths while the same encrypted connection carries traffic.
 
 ## Observe the actual path
 
-Select a peer in the Devices sidebar or run `peerhatch status PEER`. **Direct** shows the peer address used by the connection. **Relay** identifies the relay carrying traffic. **Selecting path** means path selection is in progress. The displayed RTT is the QUIC estimate. `--json` includes per-connection details and counts of active streams. Gateways announce themselves to paired peers and keep the shared connection available between sessions. The desktop receives connection changes from its local gateway. Use `peerhatch status PEER --check` to explicitly contact a peer for diagnostics.
+Select a peer in the Devices sidebar or run `paxri status PEER`. **Direct** shows the peer address used by the connection. **Relay** identifies the relay carrying traffic. **Selecting path** means path selection is in progress. The displayed RTT is the QUIC estimate. `--json` includes per-connection details and counts of active streams. Gateways announce themselves to paired peers and keep the shared connection available between sessions. The desktop receives connection changes from its local gateway. Use `paxri status PEER --check` to explicitly contact a peer for diagnostics.
 
 The device page refreshes **Upload**, **Download**, and **Latency** about once per second for the displayed device and plots up to one minute of history. Rates use the change in the local gateway’s QUIC byte counters over the actual time between samples, including control traffic and retransmissions. Hover over either rate to see the total sent or received on the current connection.
 
-`peerhatch status PEER` reads a single snapshot from the local gateway. **SENT (B)** and **RECEIVED (B)** are cumulative byte counts for the current connection. In `--json`, use `connections[].traffic.sent_bytes`, `traffic.received_bytes` and `rtt_ms` on the same connection. To calculate a rate, divide the change in a counter by the elapsed seconds between your own queries. Start a new baseline when `traffic.connected_at_ms` changes. A gateway that does not report counters omits `traffic`; the table displays `-`.
+`paxri status PEER` reads a single snapshot from the local gateway. **SENT (B)** and **RECEIVED (B)** are cumulative byte counts for the current connection. In `--json`, use `connections[].traffic.sent_bytes`, `traffic.received_bytes` and `rtt_ms` on the same connection. To calculate a rate, divide the change in a counter by the elapsed seconds between your own queries. Start a new baseline when `traffic.connected_at_ms` changes. A gateway that does not report counters omits `traffic`; the table displays `-`.
 
-To measure application echo time between two nodes, use `peerhatch probe listen` and `peerhatch probe connect`. Pass `--relay-only` when measuring relay performance. Use `--no-relay` to test an IP-only route with a known peer ticket. Set `RUST_LOG=iroh::net_report=debug,iroh::socket::remote_map=debug` for detailed native diagnostics.
+To measure application echo time between two nodes, use `paxri probe listen` and `paxri probe connect`. Pass `--relay-only` when measuring relay performance. Use `--no-relay` to test an IP-only route with a known peer ticket. Set `RUST_LOG=iroh::net_report=debug,iroh::socket::remote_map=debug` for detailed native diagnostics.
 
 ## Public relay and UDP discovery
 
@@ -41,7 +41,7 @@ A machine with a reachable public UDP address can accept direct traffic itself. 
 
 ## Reproduce the Linux network experiments
 
-Use a kernel that permits unprivileged network namespaces. Install iproute2, nftables, util-linux, OpenSSL, Python 3.8+, and an `iroh-relay` 1.4.1 binary. Build `peerhatch` and `peerhatch-gateway` with `cargo build --locked`. Override `PEERHATCH_BIN` and `IROH_RELAY_BIN` to select specific binaries.
+Use a kernel that permits unprivileged network namespaces. Install iproute2, nftables, util-linux, OpenSSL, Python 3.8+, and an `iroh-relay` 1.4.1 binary. Build `paxri` and `paxri-gateway` with `cargo build --locked`. Override `PAXRI_BIN` and `IROH_RELAY_BIN` to select specific binaries.
 
 ```sh
 scripts/check-nat.sh cone cone
@@ -68,7 +68,7 @@ Each client gets its own isolated LAN and router. The routers’ external addres
 
 The IPv6-only fixture uses a relay hostname with an AAAA record and a matching certificate. Give self-hosted relays a DNS name and matching TLS certificate. Configure IPv6 TCP targets using bracket notation such as `[::1]:3000`.
 
-On a Windows x64 machine paired with a Linux ARM64 device, a listener pinned to Ethernet accepted traffic on that IPv4 address. A wildcard IPv4 listener accepted loopback, Ethernet, and virtual-interface traffic. A separate IPv6 listener accepted IPv6, and both families could bind the same numeric port. The Windows inbound firewall affected new inbound TCP connections. SSH over an explicitly forwarded SSH service and PeerHatch’s own native PTY are separate uses of the transport.
+On a Windows x64 machine paired with a Linux ARM64 device, a listener pinned to Ethernet accepted traffic on that IPv4 address. A wildcard IPv4 listener accepted loopback, Ethernet, and virtual-interface traffic. A separate IPv6 listener accepted IPv6, and both families could bind the same numeric port. The Windows inbound firewall affected new inbound TCP connections. SSH over an explicitly forwarded SSH service and paxri’s own native PTY are separate uses of the transport.
 
 ## Measure performance on your network
 

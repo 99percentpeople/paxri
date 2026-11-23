@@ -7,19 +7,19 @@ COPY crates/ crates/
 COPY apps/ apps/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo --config packaging/distribution.toml build --locked --profile distribution \
-        -p peerhatch-gateway -p peerhatch-cli \
-    && install -D -t /out target/distribution/peerhatch-gateway target/distribution/peerhatch
+        -p paxri-gateway -p paxri-cli \
+    && install -D -t /out target/distribution/paxri-gateway target/distribution/paxri
 
 FROM debian:bookworm-slim
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-RUN groupadd --gid 10001 peerhatch \
-    && useradd --uid 10001 --gid peerhatch --no-create-home \
-        --home-dir /var/lib/peerhatch --shell /bin/bash peerhatch \
-    && install -d -m 0700 -o peerhatch -g peerhatch /var/lib/peerhatch /run/peerhatch
+RUN groupadd --gid 10001 paxri \
+    && useradd --uid 10001 --gid paxri --no-create-home \
+        --home-dir /var/lib/paxri --shell /bin/bash paxri \
+    && install -d -m 0700 -o paxri -g paxri /var/lib/paxri /run/paxri
 COPY --from=build /out/ /usr/local/bin/
-COPY --chmod=0755 packaging/docker/entrypoint.sh /usr/local/libexec/peerhatch/docker-entrypoint
-ENV HOME=/var/lib/peerhatch LANG=C.UTF-8 PEERHATCH_IPC=/run/peerhatch/gateway.sock
-USER peerhatch:peerhatch
-WORKDIR /var/lib/peerhatch
-HEALTHCHECK --interval=30s --start-period=20s --timeout=5s CMD peerhatch status >/dev/null
-ENTRYPOINT ["/usr/local/libexec/peerhatch/docker-entrypoint"]
+COPY --chmod=0755 packaging/docker/entrypoint.sh /usr/local/libexec/paxri/docker-entrypoint
+ENV HOME=/var/lib/paxri LANG=C.UTF-8 PAXRI_IPC=/run/paxri/gateway.sock
+USER paxri:paxri
+WORKDIR /var/lib/paxri
+HEALTHCHECK --interval=30s --start-period=20s --timeout=5s CMD paxri status >/dev/null
+ENTRYPOINT ["/usr/local/libexec/paxri/docker-entrypoint"]

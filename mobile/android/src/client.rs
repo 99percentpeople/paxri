@@ -7,19 +7,19 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use async_channel::Sender;
-use peerhatch_config::Config;
-use peerhatch_core::{
+use paxri_config::Config;
+use paxri_core::{
     PeerSession, StreamKind,
     connection::{PeerConnection, unix_time_ms},
 };
-use peerhatch_native::{
+use paxri_native::{
     EndpointTicket,
     gateway::{
         self, NativeTransport,
         pairing::{Decision, Incoming, Invitation, UnpairAck},
     },
 };
-use peerhatch_terminal::{Frame, Size};
+use paxri_terminal::{Frame, Size};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -32,9 +32,9 @@ use crate::Update;
 pub struct Peer {
     pub name: String,
     #[serde(default)]
-    pub platform: peerhatch_config::DevicePlatform,
+    pub platform: paxri_config::DevicePlatform,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<peerhatch_config::DeviceCapabilities>,
+    pub capabilities: Option<paxri_config::DeviceCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status_change_ms: Option<i64>,
     ticket: EndpointTicket,
@@ -104,15 +104,15 @@ impl Client {
         &self,
         peer_id: &str,
         name: &str,
-        action: peerhatch_control::PeerForward,
-    ) -> Result<peerhatch_control::forwarding::Rules> {
+        action: paxri_control::PeerForward,
+    ) -> Result<paxri_control::forwarding::Rules> {
         let session = self.transport.online_session(peer_id)?;
-        peerhatch_control::forwarding::query(name, session, action).await
+        paxri_control::forwarding::query(name, session, action).await
     }
 
     pub async fn start(dir: &Path, updates: Sender<Update>) -> Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
-        let key = peerhatch_native::identity::init(&dir.join("device.key"))?;
+        let key = paxri_native::identity::init(&dir.join("device.key"))?;
         let file = dir.join("peers.json");
         let peers = match std::fs::read(&file) {
             Ok(bytes) => serde_json::from_slice(&bytes).context("Reading saved devices")?,
@@ -126,7 +126,7 @@ impl Client {
             key,
             config(&peers)?,
             false,
-            peerhatch_config::DeviceCapabilities {
+            paxri_config::DeviceCapabilities {
                 forward_rules: Some(false),
                 ..Default::default()
             },
@@ -160,7 +160,7 @@ impl Client {
             let slots = Arc::new(tokio::sync::Semaphore::new(256));
             let Some(client) = weak.upgrade() else { return };
             let config = client.transport.subscribe_config();
-            let listeners = Arc::new(peerhatch_core::reverse::Listeners::new(
+            let listeners = Arc::new(paxri_core::reverse::Listeners::new(
                 config.clone(),
                 slots.clone(),
             ));
@@ -205,7 +205,7 @@ impl Client {
                                 result = async {
                                     match request.kind {
                                         StreamKind::Listen => listeners.serve(request.session, request.stream).await,
-                                        _ => peerhatch_core::serve(|| current.borrow().clone(), &id, request.stream).await,
+                                        _ => paxri_core::serve(|| current.borrow().clone(), &id, request.stream).await,
                                     }
                                 } => if let Err(error) = result { log::debug!("Forwarding stream: {error:#}"); }
                             }
@@ -220,7 +220,7 @@ impl Client {
                         let mut changed = false;
                         for (id, data) in info.borrow_and_update().iter() {
                             if let Some(peer) = next.get_mut(id) {
-                                if data.platform != peerhatch_config::DevicePlatform::Unknown && peer.platform != data.platform {
+                                if data.platform != paxri_config::DevicePlatform::Unknown && peer.platform != data.platform {
                                     peer.platform = data.platform;
                                     changed = true;
                                 }
@@ -424,7 +424,7 @@ impl Client {
             "This device does not host an interactive shell"
         );
         let session = self.transport.online_session(id)?;
-        let stream = peerhatch_terminal::open(session, Some(initial), None).await?;
+        let stream = paxri_terminal::open(session, Some(initial), None).await?;
         let (mut reader, mut writer) = tokio::io::split(stream);
         out.send(Update::Connected(generation)).await?;
         let send = async {

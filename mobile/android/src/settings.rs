@@ -1,7 +1,7 @@
 use super::*;
-use peerhatch_config::{file, gui::GuiChange};
-use peerhatch_ui::settings::controls::theme_cards;
-use peerhatch_ui::{
+use paxri_config::{file, gui::GuiChange};
+use paxri_ui::settings::controls::theme_cards;
+use paxri_ui::{
     settings::{SettingsGroup, SettingsLayout, SettingsPage, SettingsSection, catalog},
     theme::{Appearance, GuiSettings},
 };
@@ -94,7 +94,7 @@ impl Mobile {
         if selected == Some(keybar::SECTION) {
             return self.keybar_editor(ui, cx);
         }
-        let device = SettingsGroup::device(peerhatch_ui::settings::controls::setting_field(
+        let device = SettingsGroup::device(paxri_ui::settings::controls::setting_field(
             self.name_input.clone(),
         ));
         let mut appearance = SettingsGroup::new(catalog::APPEARANCE);
@@ -152,7 +152,7 @@ impl Mobile {
             let section = page.section;
             if selected.is_none() {
                 body = body.child(
-                    peerhatch_ui::settings::controls::category_button(
+                    paxri_ui::settings::controls::category_button(
                         ui,
                         Some(section),
                         false,
@@ -171,7 +171,7 @@ impl Mobile {
             }
         }
         if selected.is_none() {
-            body = body.child(peerhatch_ui::settings::controls::category_button(
+            body = body.child(paxri_ui::settings::controls::category_button(
                 ui, Some(keybar::SECTION), false, None, SettingsLayout::Mobile,
             ).role(Role::Button).aria_label("Terminal keys")
                 .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))));

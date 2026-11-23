@@ -19,7 +19,7 @@ TARGET = ROOT / "target"
 STAGE = TARGET / "dev-watch" / "debug"
 LIVE = TARGET / "debug"
 WINDOWS = os.name == "nt"
-NAMES = [n + (".exe" if WINDOWS else "") for n in ("peerhatch", "peerhatch-gateway", "peerhatch-gui")]
+NAMES = [n + (".exe" if WINDOWS else "") for n in ("paxri", "paxri-gateway", "paxri-gui")]
 if WINDOWS:
     import windows_conpty
     NAMES.extend(windows_conpty.FILES)
@@ -52,7 +52,7 @@ def build():
     env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     env["CARGO_BUILD_BUILD_DIR"] = str(TARGET)
     subprocess.run(["cargo", "build", "--locked", "--target-dir", str(STAGE.parent),
-                    "-p", "peerhatch-cli", "-p", "peerhatch-gateway", "-p", "peerhatch-gui"],
+                    "-p", "paxri-cli", "-p", "paxri-gateway", "-p", "paxri-gui"],
                    cwd=ROOT, env=env, check=True)
     if WINDOWS:
         for name, data in windows_conpty.runtime_files(STAGE / NAMES[1], TARGET / "conpty").items():
@@ -103,8 +103,8 @@ def gateway_status(app):
     if not WINDOWS:
         proc_env = Path(f"/proc/{app['pid']}/environ").read_bytes().split(b"\0")
         for entry in proc_env:
-            if entry.startswith(b"PEERHATCH_IPC="):
-                env["PEERHATCH_IPC"] = os.fsdecode(entry.partition(b"=")[2])
+            if entry.startswith(b"PAXRI_IPC="):
+                env["PAXRI_IPC"] = os.fsdecode(entry.partition(b"=")[2])
     return json.loads(subprocess.check_output([*cli, "status", "--json"], env=env,
                       stderr=subprocess.DEVNULL, timeout=5))["device_id"]
 

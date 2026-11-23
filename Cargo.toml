@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*", "apps/*"]
-default-members = ["apps/peerhatch-gateway", "apps/peerhatch-cli"]
+default-members = ["apps/paxri-gateway", "apps/paxri-cli"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -12,7 +12,7 @@ edition = "2024"
 publish = false
 
 # Keep GUI edits incremental while optimizing rendering and layout during development.
-[profile.dev.package.peerhatch-gui]
+[profile.dev.package.paxri-gui]
 opt-level = 1
 
 [profile.dev.package.gpui]

@@ -1,7 +1,7 @@
 use super::*;
-use peerhatch_control::{Direction, PeerForward, forwarding::Rules};
-use peerhatch_ui::components::heading;
-use peerhatch_ui::components::{
+use paxri_control::{Direction, PeerForward, forwarding::Rules};
+use paxri_ui::components::heading;
+use paxri_ui::components::{
     ButtonVariant::{Destructive, Ghost, Outline},
     Icon,
     input::Input,
@@ -203,8 +203,8 @@ impl RuleForm {
 
     fn save_action(&self, cx: &App) -> Result<PeerForward, String> {
         let [name, listen, target] = &self.inputs;
-        let listen = peerhatch_control::listen_address(listen.read(cx).text().trim())?;
-        let target = peerhatch_control::tcp_target(target.read(cx).text().trim())?;
+        let listen = paxri_control::listen_address(listen.read(cx).text().trim())?;
+        let target = paxri_control::tcp_target(target.read(cx).text().trim())?;
         let direction = self.direction;
         if let Some(name) = &self.existing {
             Ok(PeerForward::Edit {
@@ -308,7 +308,7 @@ impl Mobile {
         Some(
             ui.button(Ghost, "save-forward", Icon::Check.draw(22.))
                 .circular()
-                .tooltip(peerhatch_ui::components::tooltip("Save rule".into()))
+                .tooltip(paxri_ui::components::tooltip("Save rule".into()))
                 .role(Role::Button)
                 .aria_label("Save rule")
                 .on_click(

@@ -1,10 +1,10 @@
 //! Edit one terminal keybar row per text field and preview the draft as it is typed.
 use super::*;
-use peerhatch_config::{
+use paxri_config::{
     gui::GuiChange,
     keybar::{KEYS, KeyHaptics, KeybarSettings, label, valid_key},
 };
-use peerhatch_ui::{
+use paxri_ui::{
     components::{
         ButtonVariant::{Ghost, Outline, Primary},
         Icon, Select, heading,

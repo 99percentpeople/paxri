@@ -1,0 +1,23 @@
+[Unit]
+Description=paxri Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=paxri
+Group=paxri
+StateDirectory=paxri
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/paxri
+RuntimeDirectory=paxri
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStartPre=/usr/bin/systemd-tmpfiles --create /usr/local/lib/tmpfiles.d/paxri.conf
+ExecStartPre=/usr/local/bin/paxri identity /etc/paxri/device.key
+ExecStart=/usr/local/bin/paxri-gateway --config /etc/paxri/node.toml --key /etc/paxri/device.key --ipc /run/paxri/gateway.sock
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 use super::*;
 use alacritty_terminal::grid::Dimensions;
-use peerhatch_ui::terminal::mouse::{Cell, WheelTarget, wheel_input};
+use paxri_ui::terminal::mouse::{Cell, WheelTarget, wheel_input};
 
 pub(super) fn init_fonts(cx: &mut App) {
     use theme::fonts::{Face, MonospaceFonts};
@@ -54,7 +54,7 @@ pub(super) enum Gesture {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_TerminalKeybar_controlRadius(
+pub extern "system" fn Java_org_paxri_android_TerminalKeybar_controlRadius(
     _env: EnvUnowned,
     _class: JClass,
 ) -> f32 {
@@ -62,7 +62,7 @@ pub extern "system" fn Java_org_peerhatch_android_TerminalKeybar_controlRadius(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_TerminalGestures_tap(
+pub extern "system" fn Java_org_paxri_android_TerminalGestures_tap(
     _env: EnvUnowned,
     _class: JClass,
     session: i64,
@@ -71,7 +71,7 @@ pub extern "system" fn Java_org_peerhatch_android_TerminalGestures_tap(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_TerminalGestures_scroll(
+pub extern "system" fn Java_org_paxri_android_TerminalGestures_scroll(
     _env: EnvUnowned,
     _class: JClass,
     session: i64,
@@ -87,7 +87,7 @@ pub extern "system" fn Java_org_peerhatch_android_TerminalGestures_scroll(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_peerhatch_android_TerminalGestures_zoom(
+pub extern "system" fn Java_org_paxri_android_TerminalGestures_zoom(
     _env: EnvUnowned,
     _class: JClass,
     session: i64,
@@ -193,7 +193,7 @@ impl Mobile {
                 if finished {
                     let size = (self.font.size * 10.).round() / 10.;
                     if size != theme::current(cx).terminal.size() || size != self.font.size {
-                        self.change_gui(peerhatch_config::gui::GuiChange::FontSize(Some(size)), cx);
+                        self.change_gui(paxri_config::gui::GuiChange::FontSize(Some(size)), cx);
                     }
                 } else if factor.is_finite() && factor > 0. {
                     self.zoom_font(self.font.size * factor, cx);

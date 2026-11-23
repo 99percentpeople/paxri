@@ -1,4 +1,4 @@
-"""Activate a PeerHatch development build in its Windows user's desktop session."""
+"""Activate a paxri development build in its Windows user's desktop session."""
 import ctypes
 from ctypes import wintypes
 import json
@@ -65,7 +65,7 @@ def launches_desktop(arguments):
 def apps(live, all_sessions=False):
     processes = json.loads(powershell("""
         $s=(Get-Process -Id $PID).SessionId
-        $all=@(Get-CimInstance Win32_Process -Filter "Name='peerhatch-gateway.exe' OR Name='peerhatch-gui.exe'" |
+        $all=@(Get-CimInstance Win32_Process -Filter "Name='paxri-gateway.exe' OR Name='paxri-gui.exe'" |
           Where-Object {$env:P2P_DEV_ALL -eq '1' -or $_.SessionId -eq $s} |
           Select-Object ProcessId,ExecutablePath,CommandLine,Name)
         ConvertTo-Json -Compress -InputObject $all
@@ -75,7 +75,7 @@ def apps(live, all_sessions=False):
         if not p["CommandLine"] or not p["ExecutablePath"] or Path(p["ExecutablePath"]) != live / p["Name"]:
             continue
         args = argv(p["CommandLine"])
-        if p["Name"].lower() == "peerhatch-gui.exe" and not launches_desktop(args[1:]):
+        if p["Name"].lower() == "paxri-gui.exe" and not launches_desktop(args[1:]):
             continue
         running.append(dict(name=p["Name"], pid=p["ProcessId"], exe=p["ExecutablePath"],
                             command=p["CommandLine"], args=args))
@@ -96,9 +96,9 @@ def stop(app):
 
 
 def start(app, root):
-    logs = Path(os.environ["LOCALAPPDATA"]) / "PeerHatch"
+    logs = Path(os.environ["LOCALAPPDATA"]) / "paxri"
     logs.mkdir(parents=True, exist_ok=True)
-    with (logs / (Path(app["name"]).stem.removeprefix("peerhatch-") + ".log")).open("ab") as log:
+    with (logs / (Path(app["name"]).stem.removeprefix("paxri-") + ".log")).open("ab") as log:
         return subprocess.Popen(app["command"], executable=app["exe"], cwd=root, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW).pid
 
@@ -122,7 +122,7 @@ def responsive(pid):
 
 
 def interactive(script, state):
-    name = "PeerHatch-Dev-" + uuid.uuid4().hex
+    name = "paxri-Dev-" + uuid.uuid4().hex
     receipt = state / (name + ".json")
     # An SSH shell runs in session 0. Launch the replacement GUI on its owner's desktop.
     try:

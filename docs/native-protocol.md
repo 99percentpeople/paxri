@@ -1,10 +1,10 @@
 # Native protocol and configuration
 
-PeerHatch gateways share an authenticated connection using the iroh QUIC ALPN `p2p-tunnel/session/1`. The protocol identifiers and pairing-code prefix are stable across the PeerHatch rename. Each application operation opens an independent reliable, ordered, bidirectional stream.
+paxri gateways share an authenticated connection using the iroh QUIC ALPN `p2p-tunnel/session/1`. The protocol identifiers and pairing-code prefix are stable across project renames. Each application operation opens an independent reliable, ordered, bidirectional stream.
 
 ## Node configuration
 
-Each computer owns one version 1 TOML file. For a working pair of device configurations, start with [home.toml](../examples/home.toml) and [laptop.toml](../examples/laptop.toml). Replace the example Ed25519 public keys with your devices’ keys or pair interactively. `peerhatch config check FILE` validates a file locally.
+Each computer owns one version 1 TOML file. For a working pair of device configurations, start with [home.toml](../examples/home.toml) and [laptop.toml](../examples/laptop.toml). Replace the example Ed25519 public keys with your devices’ keys or pair interactively. `paxri config check FILE` validates a file locally.
 
 | Key | Meaning |
 | --- | --- |
@@ -31,7 +31,7 @@ Each computer owns one version 1 TOML file. For a working pair of device configu
 
 A listener can bind to loopback, a particular interface, `0.0.0.0` or `[::]`. Port zero asks the OS for an available port. A bare port in the GUI or CLI uses IPv4 loopback.
 
-Both endpoints can manage a forwarding rule. The creating gateway stores it in `[forwards.<name>]`. Use `peerhatch forward list` to see the storage owner, direction from this device, actual bound port, target and state. For an older named forwarding rule, replace its `service` key with the target TCP address before starting the gateway. The retired `[services]` and `[port_access]` tables are ignored.
+Both endpoints can manage a forwarding rule. The creating gateway stores it in `[forwards.<name>]`. Use `paxri forward list` to see the storage owner, direction from this device, actual bound port, target and state. For an older named forwarding rule, replace its `service` key with the target TCP address before starting the gateway. The retired `[services]` and `[port_access]` tables are ignored.
 
 ## Pairing and addressing
 

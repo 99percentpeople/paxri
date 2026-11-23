@@ -8,4 +8,4 @@ The gateway uses these extensions to the native endpoint.
 - `PortmapperConfig::Custom` passes the selected mapping protocols to the portmapper client.
 - `Endpoint::watch_network_interfaces` shares the endpoint's OS network notifications. `Endpoint::set_ipv4_source` selects a physical source for new IPv4 paths on the wildcard UDP socket and refreshes address discovery. QUIC can retain its endpoint, existing authenticated connections and explicit path source addresses.
 
-The application tests these APIs in `crates/peerhatch-native/src/relay.rs` and `scripts/check-nat.sh --roam`. Compare these extensions against the published crate when updating iroh.
+The application tests these APIs in `crates/paxri-native/src/relay.rs` and `scripts/check-nat.sh --roam`. Compare these extensions against the published crate when updating iroh.

@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: ghcr.io/99percentpeople/peerhatch:${PEERHATCH_VERSION:-dev}
+    image: ghcr.io/99percentpeople/paxri:${PAXRI_VERSION:-dev}
     network_mode: host
     uts: host
     init: true
@@ -8,7 +8,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - node-data:/var/lib/peerhatch
+      - node-data:/var/lib/paxri
 
 volumes:
   node-data:

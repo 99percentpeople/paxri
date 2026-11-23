@@ -1,0 +1,30 @@
+[package]
+name = "paxri-gateway"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+gethostname = "1"
+getrandom = "0.4"
+toml_edit = "0.25"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "signal", "net", "sync"] }
+paxri-config = { path = "../../crates/paxri-config" }
+paxri-native = { path = "../../crates/paxri-native" }
+paxri-core = { path = "../../crates/paxri-core" }
+paxri-control = { path = "../../crates/paxri-control" }
+
+paxri-terminal = { path = "../../crates/paxri-terminal" }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1", features = ["fs"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Console", "Win32_System_Threading", "Win32_System_JobObjects"] }
+windows-service = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

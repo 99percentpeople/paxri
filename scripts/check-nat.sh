@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the real peerhatch CLI and a private relay inside a disposable Linux test network.
+# Run the real paxri CLI and a private relay inside a disposable Linux test network.
 set -euo pipefail
 family=ipv4
 verify_gateway=0
@@ -21,16 +21,16 @@ else
     fi
 fi
 root=$(cd "$(dirname "$0")/.." && pwd)
-peerhatch=$(realpath "${PEERHATCH_BIN:-$root/target/debug/peerhatch}")
+paxri=$(realpath "${PAXRI_BIN:-$root/target/debug/paxri}")
 relay=$(realpath "${IROH_RELAY_BIN:-$(command -v iroh-relay)}")
-[[ -x "$peerhatch" && -x "$relay" ]]
+[[ -x "$paxri" && -x "$relay" ]]
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
 timeout 110s unshare --user --map-root-user --mount --net --pid --fork --kill-child --mount-proc \
-    bash -seu -o pipefail -- "$tmp" "$peerhatch" "$relay" "$root" "$family" "$@" "$verify_gateway" <<'LAB'
+    bash -seu -o pipefail -- "$tmp" "$paxri" "$relay" "$root" "$family" "$@" "$verify_gateway" <<'LAB'
 cd "$1"
-peerhatch=$2 relay=$3 root=$4 family=$5 mode_a=$6 mode_b=$7
+paxri=$2 relay=$3 root=$4 family=$5 mode_a=$6 mode_b=$7
 mount --make-rprivate /
 mount -t tmpfs tmpfs /run
 ip link set lo up
@@ -155,8 +155,8 @@ for _ in {1..100}; do
     sleep 0.1
 done
 
-a=$("$peerhatch" identity a.key)
-b=$("$peerhatch" identity b.key)
+a=$("$paxri" identity a.key)
+b=$("$paxri" identity b.key)
 for node in a b; do
     peer=$a
     if [[ $node == a ]]; then peer=$b; fi
@@ -170,11 +170,11 @@ if [[ $8 == 2 ]]; then
     ip -n node-c addr flush dev eth0
     ip -n node-c link set eth0 name wifi
     ip -n node-c link set wifi netns node-b
-    python3 "$root/scripts/check-nat-roaming.py" "$peerhatch"
+    python3 "$root/scripts/check-nat-roaming.py" "$paxri"
     exit
 fi
 if [[ $8 == 1 ]]; then
-    gateway_bin=$(dirname "$peerhatch")/peerhatch-gateway
+    gateway_bin=$(dirname "$paxri")/paxri-gateway
     [[ -x "$gateway_bin" ]]
     # Require traffic to traverse the relay even if new direct candidates appear.
     ip netns exec gw-a nft insert rule ip lab forward_traffic ip daddr 203.0.113.20 meta l4proto udp drop
@@ -201,7 +201,7 @@ EOF
     done
     exit 1
 fi
-ip netns exec node-b "$peerhatch" probe listen --key b.key --config b.toml --peer other >ticket.log &
+ip netns exec node-b "$paxri" probe listen --key b.key --config b.toml --peer other >ticket.log &
 listener=$!
 for _ in {1..150}; do
     kill -0 "$listener"
@@ -221,7 +221,7 @@ add rule ip6 lab6 block_peer ip6 daddr 2001:db8:b::2 meta l4proto udp drop
 add rule ip6 lab6 block_peer ip6 saddr 2001:db8:b::2 meta l4proto udp drop
 NFT
 fi
-ip netns exec node-a "$peerhatch" probe connect --key a.key --config a.toml --peer other \
+ip netns exec node-a "$paxri" probe connect --key a.key --config a.toml --peer other \
     "${connect_args[@]}" --count 20 | while IFS= read -r sample; do
         echo "$sample"
         if [[ $family == ipv6 && $sample == "seq=3 "* ]]; then

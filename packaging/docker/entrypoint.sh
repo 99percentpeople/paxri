@@ -2,7 +2,7 @@
 set -eu
 umask 077
 
-state_dir=/var/lib/peerhatch
+state_dir=/var/lib/paxri
 config=$state_dir/node.toml
 key=$state_dir/device.key
 
@@ -16,5 +16,5 @@ if [ ! -e "$config" ]; then
     trap - EXIT
 fi
 
-peerhatch identity "$key" >/dev/null
-exec peerhatch-gateway --config "$config" --key "$key" "$@"
+paxri identity "$key" >/dev/null
+exec paxri-gateway --config "$config" --key "$key" "$@"

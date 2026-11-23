@@ -5733,17 +5733,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pbkdf2"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
-dependencies = [
- "digest 0.10.7",
- "hmac",
-]
-
-[[package]]
-name = "peerhatch-cli"
+name = "paxri-cli"
 version = "0.0.0-dev"
 dependencies = [
  "alacritty_terminal",
@@ -5751,9 +5741,9 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs 5.0.1",
- "peerhatch-config",
- "peerhatch-control",
- "peerhatch-native",
+ "paxri-config",
+ "paxri-control",
+ "paxri-native",
  "qrcode",
  "rustix 1.1.6",
  "serde_json",
@@ -5765,7 +5755,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-config"
+name = "paxri-config"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
@@ -5779,15 +5769,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-control"
+name = "paxri-control"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "interprocess",
- "peerhatch-config",
- "peerhatch-core",
- "peerhatch-files",
- "peerhatch-terminal",
+ "paxri-config",
+ "paxri-core",
+ "paxri-files",
+ "paxri-terminal",
  "rustix 1.1.6",
  "serde",
  "serde_json",
@@ -5797,18 +5787,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-core"
+name = "paxri-core"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
- "peerhatch-config",
+ "paxri-config",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "peerhatch-files"
+name = "paxri-files"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
@@ -5820,18 +5810,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-gateway"
+name = "paxri-gateway"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "clap",
  "gethostname",
  "getrandom 0.4.3",
- "peerhatch-config",
- "peerhatch-control",
- "peerhatch-core",
- "peerhatch-native",
- "peerhatch-terminal",
+ "paxri-config",
+ "paxri-control",
+ "paxri-core",
+ "paxri-native",
+ "paxri-terminal",
  "rustix 1.1.6",
  "tempfile",
  "tokio",
@@ -5841,7 +5831,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-gui"
+name = "paxri-gui"
 version = "0.0.0-dev"
 dependencies = [
  "alacritty_terminal",
@@ -5857,10 +5847,10 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "open",
- "peerhatch-cli",
- "peerhatch-config",
- "peerhatch-control",
- "peerhatch-ui",
+ "paxri-cli",
+ "paxri-config",
+ "paxri-control",
+ "paxri-ui",
  "portable-pty",
  "qrcode",
  "raw-window-handle",
@@ -5873,7 +5863,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-native"
+name = "paxri-native"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
@@ -5885,8 +5875,8 @@ dependencies = [
  "iroh-tickets",
  "netdev 0.45.1",
  "netdev 0.46.3",
- "peerhatch-config",
- "peerhatch-core",
+ "paxri-config",
+ "paxri-core",
  "portmapper",
  "serde",
  "serde_json",
@@ -5895,12 +5885,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-terminal"
+name = "paxri-terminal"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
- "peerhatch-core",
+ "paxri-core",
  "portable-pty",
  "rustix 1.1.6",
  "serde",
@@ -5909,20 +5899,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "peerhatch-ui"
+name = "paxri-ui"
 version = "0.0.0-dev"
 dependencies = [
  "alacritty_terminal",
  "gpui",
  "gpui-pre",
- "peerhatch-config",
- "peerhatch-core",
+ "paxri-config",
+ "paxri-core",
  "portable-pty",
  "raw-window-handle",
  "unicode-segmentation",
  "unicode-width",
  "url",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest 0.10.7",
+ "hmac",
 ]
 
 [[package]]

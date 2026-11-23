@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.98.1 --profile minimal
-      - run: cargo test --locked -p peerhatch-config -p peerhatch-core -p peerhatch-files -p peerhatch-native -p peerhatch-terminal --lib
-      - run: cargo build --locked -p peerhatch-cli -p peerhatch-gateway
+      - run: cargo test --locked -p paxri-config -p paxri-core -p paxri-files -p paxri-native -p paxri-terminal --lib
+      - run: cargo build --locked -p paxri-cli -p paxri-gateway
       - run: python3 scripts/check-gateway.py --file-copy
       - run: python3 scripts/check-gateway.py --pipe-exec
 
@@ -46,7 +46,7 @@ jobs:
           python3 mobile/android/build.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: peerhatch-android-arm64
-          path: target/android/PeerHatch.apk
+          name: paxri-android-arm64
+          path: target/android/paxri.apk
           if-no-files-found: error
           compression-level: 0

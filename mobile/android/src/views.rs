@@ -1,8 +1,8 @@
 use super::*;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
-use peerhatch_core::connection::{peer_state, unix_time_ms};
-use peerhatch_ui::connections::presence_detail;
-use peerhatch_ui::{
+use paxri_core::connection::{peer_state, unix_time_ms};
+use paxri_ui::connections::presence_detail;
+use paxri_ui::{
     components::{
         ButtonVariant::{Ghost, Primary},
         Icon, single_line,
@@ -119,7 +119,7 @@ impl Mobile {
                             .child(Icon::Stop.draw(13.)),
                     )
                     .circular()
-                    .tooltip(peerhatch_ui::components::tooltip("End session".into()))
+                    .tooltip(paxri_ui::components::tooltip("End session".into()))
                     .role(Role::Button)
                     .aria_label("End session")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -367,7 +367,7 @@ impl Mobile {
                                 single_line(ui.muted(format!("Device ID · {}", &id[..12])))
                                     .text_xs()
                                     .id("device-identity")
-                                    .tooltip(peerhatch_ui::components::tooltip(
+                                    .tooltip(paxri_ui::components::tooltip(
                                         id.to_owned().into(),
                                     )),
                             ),

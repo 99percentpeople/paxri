@@ -21,24 +21,24 @@ def main():
     subprocess.run(
         ["cargo", "--config", "packaging/distribution.toml", "build", "--locked",
          "--profile", "distribution", "--target", TARGET,
-         "--target-dir", str(build_dir), "-p", "peerhatch-gateway", "-p", "peerhatch-cli",
-         "-p", "peerhatch-gui"],
+         "--target-dir", str(build_dir), "-p", "paxri-gateway", "-p", "paxri-cli",
+         "-p", "paxri-gui"],
         cwd=ROOT, env=env, check=True,
     )
     binaries = build_dir / TARGET / "distribution"
-    for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
+    for name in ("paxri.exe", "paxri-gateway.exe", "paxri-gui.exe"):
         subprocess.run([str(binaries / name), "--version"], check=True)
     dist = ROOT / "target" / "dist"
     dist.mkdir(parents=True, exist_ok=True)
-    archive = dist / "peerhatch-windows-x64.zip"
+    archive = dist / "paxri-windows-x64.zip"
     # The ZIP must inherit dist's Windows ACL, including when the builder is elevated.
     temp = tempfile.NamedTemporaryFile(dir=dist, suffix=".zip", delete=False)
     staged = Path(temp.name)
     try:
         with temp, zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
-            for name in ("peerhatch.exe", "peerhatch-gateway.exe", "peerhatch-gui.exe"):
+            for name in ("paxri.exe", "paxri-gateway.exe", "paxri-gui.exe"):
                 bundle.write(binaries / name, name)
-            for name, data in runtime_files(binaries / "peerhatch-gateway.exe", ROOT / "target/conpty").items():
+            for name, data in runtime_files(binaries / "paxri-gateway.exe", ROOT / "target/conpty").items():
                 bundle.writestr(name, data)
             bundle.write(ROOT / "packaging/windows/ConPTY-LICENSE.txt", "ConPTY-LICENSE.txt")
             bundle.write(ROOT / "README.md", "README.md")

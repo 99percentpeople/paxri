@@ -12,10 +12,10 @@ case "$target" in
   *) echo "Unsupported distribution target: $target" >&2; exit 1 ;;
 esac
 cargo --config packaging/distribution.toml build --locked --profile distribution \
-    -p peerhatch-cli -p peerhatch-gateway -p peerhatch-gui
+    -p paxri-cli -p paxri-gateway -p paxri-gui
 bins="${CARGO_TARGET_DIR:-target}${CARGO_BUILD_TARGET:+/$target}/distribution"
 if [[ $platform == linux-arm64-musl ]]; then
-    for bin in peerhatch peerhatch-gateway peerhatch-gui; do
+    for bin in paxri paxri-gateway paxri-gui; do
         elf=$(LC_ALL=C readelf -lW "$bins/$bin")
         if [[ $elf != *'/lib/ld-musl-aarch64.so.1]'* ]]; then
             echo "Expected the ARM64 musl loader in $bin" >&2
@@ -24,45 +24,46 @@ if [[ $platform == linux-arm64-musl ]]; then
     done
 fi
 if [[ $target == "$host" ]]; then
-    "$bins/peerhatch" --version
-    "$bins/peerhatch-gateway" --help >/dev/null
-    "$bins/peerhatch-gui" --help >/dev/null
+    "$bins/paxri" --version
+    "$bins/paxri-gateway" --help >/dev/null
+    "$bins/paxri-gui" --help >/dev/null
 fi
 mkdir -p target/dist
 work=$(mktemp -d target/dist/.native.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
-name=peerhatch-$platform
+name=paxri-$platform
 root=$work/$name
 mkdir -p "$root/bin"
 if [[ $platform == macos-* ]]; then
-    app="$root/PeerHatch.app/Contents"
+    app="$root/paxri.app/Contents"
     mkdir -p "$app/MacOS"
-    version=$("$bins/peerhatch" --version | awk '{print $2}')
+    version=$("$bins/paxri" --version | awk '{print $2}')
     # Apple's bundle version fields take the numeric part of the Cargo version.
     version=${version%%[-+]*}
     cat > "$app/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>PeerHatch</string>
+<key>CFBundleName</key><string>paxri</string>
+<!-- Existing macOS installations use this bundle identifier. -->
 <key>CFBundleIdentifier</key><string>org.peerhatch.desktop</string>
-<key>CFBundleExecutable</key><string>peerhatch-gui</string>
+<key>CFBundleExecutable</key><string>paxri-gui</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$version</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-    for bin in peerhatch peerhatch-gateway peerhatch-gui; do
+    for bin in paxri paxri-gateway paxri-gui; do
         install -m 0755 "$bins/$bin" "$app/MacOS/$bin"
         codesign --force --sign - "$app/MacOS/$bin"
-        ln -s "../PeerHatch.app/Contents/MacOS/$bin" "$root/bin/$bin"
+        ln -s "../paxri.app/Contents/MacOS/$bin" "$root/bin/$bin"
     done
-    codesign --force --sign - "$root/PeerHatch.app"
-    codesign --verify --deep --strict "$root/PeerHatch.app"
+    codesign --force --sign - "$root/paxri.app"
+    codesign --verify --deep --strict "$root/paxri.app"
 else
-    for bin in peerhatch peerhatch-gateway peerhatch-gui; do install -m 0755 "$bins/$bin" "$root/bin/$bin"; done
-    cp packaging/linux/{install-systemd.sh,peerhatch-gateway.service} "$root/"
+    for bin in paxri paxri-gateway paxri-gui; do install -m 0755 "$bins/$bin" "$root/bin/$bin"; done
+    cp packaging/linux/{install-systemd.sh,paxri-gateway.service} "$root/"
 fi
 cp README.md docs/installation.md "$root/"
 tar -cf - -C "$work" "$name" | gzip -9n > "$work/$name.tar.gz"

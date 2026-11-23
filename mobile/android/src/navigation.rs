@@ -1,5 +1,5 @@
 use super::*;
-use peerhatch_ui::components::{ButtonVariant::Ghost, Icon, heading};
+use paxri_ui::components::{ButtonVariant::Ghost, Icon, heading};
 use std::time::Instant;
 
 #[derive(Default)]
@@ -103,7 +103,7 @@ impl Mobile {
                     .items_center()
                     .justify_between()
                     .pl_3()
-                    .child(heading("PeerHatch"))
+                    .child(heading("paxri"))
                     .child(
                         ui.icon_button(
                             Ghost,

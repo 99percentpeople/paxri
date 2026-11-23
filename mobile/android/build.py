@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and sign the ARM64 PeerHatch development APK using the Android SDK."""
+"""Build and sign the ARM64 paxri development APK using the Android SDK."""
 import hashlib
 import json
 import os
@@ -78,7 +78,7 @@ def main():
     else:
         run("cargo", "ndk", "-t", "arm64-v8a", "-P", "29", "rustc", "--config", override,
             "--lib", "--locked", *linker_flags)
-    native = Path(metadata["target_directory"]) / TARGET / "debug/libpeerhatch_android.so"
+    native = Path(metadata["target_directory"]) / TARGET / "debug/libpaxri_android.so"
     host = Path(crates["gpui-mobile"]["manifest_path"]).parent / "example/android/gradle/app/src/main"
     version = crates["rustls-platform-verifier-android"]["version"]
     aar = download("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/"
@@ -93,7 +93,7 @@ def main():
     key = OUT / "debug.p12"
     if not key.exists():
         run("keytool", "-genkeypair", "-keystore", key, "-storepass", "android", "-keypass", "android",
-            "-alias", "peerhatch-debug", "-keyalg", "RSA", "-validity", "10000", "-dname", "CN=PeerHatch Debug")
+            "-alias", "paxri-debug", "-keyalg", "RSA", "-validity", "10000", "-dname", "CN=paxri Debug")
     with tempfile.TemporaryDirectory(dir=OUT) as tmp:
         tmp = Path(tmp)
         classes = tmp / "classes"
@@ -146,11 +146,11 @@ def main():
             apk.write(host / "assets/fonts/NotoColorEmoji.ttf", "assets/fonts/NotoColorEmoji.ttf")
         aligned = tmp / "aligned.apk"
         run(tools / "zipalign", "-f", "4", package, aligned)
-        signed = tmp / "PeerHatch.apk"
+        signed = tmp / "paxri.apk"
         run(tools / "apksigner", "sign", "--ks", key, "--ks-pass", "pass:android", "--out", signed, aligned)
         run(tools / "apksigner", "verify", signed)
-        shutil.move(signed, OUT / "PeerHatch.apk")
-    print(OUT / "PeerHatch.apk")
+        shutil.move(signed, OUT / "paxri.apk")
+    print(OUT / "paxri.apk")
 
 
 if __name__ == "__main__":
