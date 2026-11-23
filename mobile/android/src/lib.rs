@@ -1,4 +1,5 @@
 mod client;
+mod fonts;
 mod forwards;
 mod keybar;
 mod navigation;
@@ -402,6 +403,7 @@ enum Page {
 
 struct Mobile {
     android: AndroidApp,
+    ui_font: SharedString,
     font: TerminalFont,
     touch_area: Option<(u64, [i32; 5], Arc<KeybarSettings>)>,
     rt: Handle,
@@ -900,7 +902,7 @@ fn android_main(android: AndroidApp) {
                     }
                 })
                 .detach();
-                touch::init_fonts(cx);
+                let ui_font = fonts::init(cx);
                 let font = cx
                     .global::<theme::fonts::MonospaceFonts>()
                     .resolve(&theme::current(cx).terminal);
@@ -931,6 +933,7 @@ fn android_main(android: AndroidApp) {
                 Mobile {
                     name_input,
                     android,
+                    ui_font,
                     font,
                     touch_area: None,
                     rt: handle,

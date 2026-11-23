@@ -78,12 +78,14 @@ def main():
     override = vertical_scroll_source(crates["gpui-pre"])
     # Align the extracted native library for both 4 KB and 16 KB page devices.
     linker_flags = ["--", "-C", "link-arg=-Wl,-z,max-page-size=16384"]
+    profile_flags = ["--release"] if args.unsigned_release else []
+    rustc_args = ["--lib", "--locked", *profile_flags, *linker_flags]
     if os.environ.get("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"):
-        run("cargo", "--config", override, "rustc", "--lib", "--locked", "--target", TARGET, *linker_flags)
+        run("cargo", "--config", override, "rustc", "--target", TARGET, *rustc_args)
     else:
-        run("cargo", "ndk", "-t", "arm64-v8a", "-P", "29", "rustc", "--config", override,
-            "--lib", "--locked", *linker_flags)
-    native = Path(metadata["target_directory"]) / TARGET / "debug/libpaxri_android.so"
+        run("cargo", "ndk", "-t", "arm64-v8a", "-P", "29", "rustc", "--config", override, *rustc_args)
+    profile_dir = "release" if args.unsigned_release else "debug"
+    native = Path(metadata["target_directory"]) / TARGET / profile_dir / "libpaxri_android.so"
     host = Path(crates["gpui-mobile"]["manifest_path"]).parent / "example/android/gradle/app/src/main"
     version = crates["rustls-platform-verifier-android"]["version"]
     aar = download("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/"
@@ -145,7 +147,7 @@ def main():
             for file in sorted(dex.glob("*.dex")):
                 apk.write(file, file.name)
             apk.write(native, "lib/arm64-v8a/" + native.name)
-            apk.write(host / "assets/fonts/NotoColorEmoji.ttf", "assets/fonts/NotoColorEmoji.ttf")
+            apk.write(APP / "fonts/OFL.txt", "assets/licenses/terminal-fallback.txt")
         aligned = tmp / "aligned.apk"
         run(tools / "zipalign", "-f", "4", package, aligned)
         if args.unsigned_release:

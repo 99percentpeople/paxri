@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 [profile.dev]
 debug = 0
 
-# The APK uses the dev profile on real devices. Optimize the per-frame UI and layout paths.
+# Optimize the per-frame UI and layout paths in development builds.
 [profile.dev.package.gpui-pre]
 opt-level = 2
 
@@ -27,6 +27,11 @@ opt-level = 1
 
 [profile.dev.package.paxri-android]
 opt-level = 1
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = "symbols"
 
 [dependencies]
 paxri-ui = { path = "../../crates/paxri-ui" }
@@ -40,6 +45,7 @@ gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", rev = "5fd
 jni = "0.22"
 iroh = "=1.4.1"
 log = "0.4"
+ndk = { version = "0.9", features = ["api-level-29"] }
 paxri-config = { path = "../../crates/paxri-config" }
 paxri-control = { path = "../../crates/paxri-control" }
 paxri-core = { path = "../../crates/paxri-core" }
@@ -49,6 +55,7 @@ rustls-platform-verifier = "=0.7.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+ttf-parser = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "io-util", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 

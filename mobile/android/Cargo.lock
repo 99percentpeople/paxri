@@ -5453,6 +5453,7 @@ dependencies = [
  "iroh",
  "jni 0.22.4",
  "log",
+ "ndk",
  "paxri-config",
  "paxri-control",
  "paxri-core",
@@ -5464,6 +5465,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "ttf-parser",
  "uuid",
 ]
 

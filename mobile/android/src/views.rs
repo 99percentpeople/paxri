@@ -541,6 +541,7 @@ impl Render for Mobile {
             .pt(px(top))
             .pb(px(bottom))
             .bg(rgb(ui.colors.canvas.background))
+            .font_family(self.ui_font.clone())
             .text_color(rgb(ui.colors.canvas.foreground))
             .child(
                 div()

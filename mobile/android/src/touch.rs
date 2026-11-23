@@ -2,43 +2,6 @@ use super::*;
 use alacritty_terminal::grid::Dimensions;
 use paxri_ui::terminal::mouse::{Cell, WheelTarget, wheel_input};
 
-pub(super) fn init_fonts(cx: &mut App) {
-    use theme::fonts::{Face, MonospaceFonts};
-    let text = cx.text_system();
-    // GPUI's Android bootstrap only registers a subset of the system fonts.
-    // Register additional installed monospace families before resolving the chooser.
-    let fonts = std::fs::read_dir("/system/fonts")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.to_lowercase().contains("mono"))
-        })
-        .filter_map(|path| std::fs::read(path).ok().map(std::borrow::Cow::Owned))
-        .collect();
-    if let Err(error) = text.add_fonts(fonts) {
-        log::warn!("Registering terminal fonts: {error}");
-    }
-    let mut names = text.all_font_names();
-    names.sort_by_cached_key(|name| name.to_lowercase());
-    names.dedup();
-    let installed: Vec<_> = names
-        .into_iter()
-        .filter(|name| name.to_lowercase().contains("mono"))
-        .map(|name| Face::measure(name.into(), text))
-        .collect();
-    let default = installed
-        .iter()
-        .find(|face| face.font.family.as_ref() == "Droid Sans Mono")
-        .or_else(|| installed.first())
-        .cloned()
-        .unwrap_or_else(|| Face::measure(".SystemUIFont".into(), text));
-    cx.set_global(MonospaceFonts { installed, default });
-}
-
 pub(super) enum Gesture {
     Tap,
     Scroll {
