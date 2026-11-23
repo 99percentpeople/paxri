@@ -12,6 +12,7 @@ type SelectAction = Rc<dyn Fn(&mut Window, &mut App)>;
 pub struct DropdownState {
     focus: FocusHandle,
     highlighted: Option<usize>,
+    parent_row: Option<usize>,
     scroll: ScrollHandle,
     trigger_bounds: Option<Bounds<Pixels>>,
     opening_index: usize,
@@ -42,6 +43,7 @@ impl DropdownState {
         Self {
             focus,
             highlighted: None,
+            parent_row: None,
             scroll: ScrollHandle::new(),
             trigger_bounds: None,
             opening_index: 0,
@@ -54,7 +56,32 @@ impl DropdownState {
     }
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.parent_row = None;
         self.highlight(None, cx);
+    }
+
+    pub(super) fn parent_row(&self) -> Option<usize> {
+        self.parent_row
+    }
+
+    pub(super) fn enter(&mut self, parent: usize, selected: usize, cx: &mut Context<Self>) {
+        self.parent_row = Some(parent);
+        self.show_row(selected, cx);
+    }
+
+    pub fn back(&mut self, cx: &mut Context<Self>) {
+        if let Some(parent) = self.parent_row.take() {
+            self.show_row(parent, cx);
+        } else {
+            self.dismiss(cx);
+        }
+    }
+
+    fn show_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.scroll.set_offset(Point::default());
+        self.scroll.scroll_to_item(index);
+        self.highlighted = Some(index);
+        cx.notify();
     }
 
     fn highlight(&mut self, item: Option<usize>, cx: &mut Context<Self>) {
@@ -135,6 +162,7 @@ impl DropdownState {
         event: &KeyDownEvent,
         count: usize,
         checked: Option<usize>,
+        keep_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
@@ -142,11 +170,16 @@ impl DropdownState {
         if key.modifiers.modified() && !(key.key == "tab" && key.modifiers == Modifiers::shift()) {
             return None;
         }
+        let key_name = if self.parent_row.is_some() && key.key == "left" {
+            "escape"
+        } else {
+            key.key.as_str()
+        };
         let action = navigation(
             self.highlighted,
             checked,
             count,
-            key.key.as_str(),
+            key_name,
             event.is_held,
         )?;
         let mut activate = None;
@@ -154,9 +187,11 @@ impl DropdownState {
             MenuAction::Highlight(index) => {
                 self.focus_item(index, count, window, cx);
             }
-            MenuAction::Dismiss => self.dismiss(cx),
+            MenuAction::Dismiss => self.back(cx),
             MenuAction::Activate(index) => {
-                self.dismiss(cx);
+                if !keep_open {
+                    self.dismiss(cx);
+                }
                 activate = Some(index);
             }
             MenuAction::Traverse => {
@@ -233,6 +268,7 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
         state: Entity<DropdownState>,
         actions: Vec<SelectAction>,
         checked: Option<usize>,
+        keep_open: bool,
         cx: &App,
     ) -> T {
         let open = state.read(cx).is_open();
@@ -245,7 +281,7 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
             .track_focus(&state.read(cx).focus)
             .on_key_down(move |event, window, cx| {
                 let selected = key_state.update(cx, |menu, cx| {
-                    menu.key(event, actions.len(), checked, window, cx)
+                    menu.key(event, actions.len(), checked, keep_open, window, cx)
                 });
                 if let Some(index) = selected {
                     actions[index](window, cx);
@@ -320,6 +356,26 @@ impl DropdownContent {
         self
     }
 
+    pub(super) fn checked_index(&self) -> usize {
+        self.checked.unwrap_or(0)
+    }
+
+    pub(super) fn with_parent(self, title: &'static str, state: &Entity<DropdownState>) -> Self {
+        let parent = state.clone();
+        let mut page = Self::new().item("back", Icon::ArrowLeft.label(title), move |_, cx| {
+            parent.update(cx, DropdownState::back);
+        });
+        page.checked = self.checked.map(|i| i + 1);
+        for item in self.items {
+            let parent = state.clone();
+            page = page.item(item.id, item.label, move |w, cx| {
+                parent.update(cx, DropdownState::back);
+                (item.on_select)(w, cx);
+            });
+        }
+        page
+    }
+
     /// A checked row represents the committed value independently of keyboard or pointer focus.
     pub fn checked_item(
         mut self,
@@ -329,7 +385,7 @@ impl DropdownContent {
         on_select: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         if checked {
-            self.checked = Some(self.items.len());
+            self.checked.get_or_insert(self.items.len());
         }
         self.item(id, CheckedLabel { content, checked }, on_select)
     }
@@ -354,6 +410,15 @@ impl DropdownContent {
             .flex_none()
             .whitespace_nowrap()
             .max_w((viewport.width - popup_margin(window) * 2.).max(px(1.)));
+        if layout == DropdownLayout::Filters {
+            list = list.w(px(240.));
+            height = height.min(px(440.));
+        }
+        if layout == DropdownLayout::AboveEnd {
+            height = (viewport.height - FLOATING_ACTION_CLEARANCE - popup_margin(window)).max(MENU_ROW_HEIGHT);
+            offset = -SPACE_2;
+            list = list.min_w(px(176.));
+        }
         if layout == DropdownLayout::Field
             && let Some(trigger) = menu.trigger_bounds
         {
@@ -386,29 +451,38 @@ impl DropdownContent {
         for (index, item) in self.items.into_iter().enumerate() {
             let hover = state.clone();
             let select = state.clone();
-            list = list.child(
-                ui.menu_item(item.id, item.label, index == highlighted)
-                    .on_mouse_move(move |_, _, cx| {
-                        hover.update(cx, |menu, cx| {
-                            if menu.is_open() {
+            let row = ui
+                .menu_item(item.id, item.label, index == highlighted)
+                .when(layout == DropdownLayout::Filters, |row| {
+                    row.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                })
+                .on_mouse_move(move |_, _, cx| {
+                    hover.update(cx, |menu, cx| {
+                        if menu.is_open() {
+                            menu.highlight(Some(index), cx);
+                        }
+                    });
+                })
+                .on_click(move |event, window, cx| {
+                    if event.standard_click() {
+                        select.update(cx, |menu, cx| {
+                            if layout == DropdownLayout::Filters {
                                 menu.highlight(Some(index), cx);
+                            } else {
+                                menu.dismiss(cx);
                             }
                         });
-                    })
-                    .on_click(move |event, window, cx| {
-                        if event.standard_click() {
-                            select.update(cx, DropdownState::dismiss);
-                            (item.on_select)(window, cx);
-                        }
-                    }),
-            );
+                        (item.on_select)(window, cx);
+                    }
+                });
+            list = list.child(row);
         }
         deferred(
             anchored()
-                .anchor(if layout == DropdownLayout::End {
-                    Corner::TopRight
-                } else {
-                    Corner::TopLeft
+                .anchor(match layout {
+                    DropdownLayout::End | DropdownLayout::Filters => Corner::TopRight,
+                    DropdownLayout::AboveEnd => Corner::BottomRight,
+                    _ => Corner::TopLeft,
                 })
                 .offset(point(px(0.), offset))
                 .snap_to_window_with_margin(px(6.))
@@ -488,6 +562,8 @@ impl SelectPlacement {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DropdownLayout {
     End,
+    Filters,
+    AboveEnd,
     Start,
     Field,
 }
@@ -512,6 +588,17 @@ impl<T: InteractiveElement + IntoElement> Dropdown<T> {
             content,
             layout: DropdownLayout::End,
         }
+    }
+
+    /// Grouped filters stay open while the user combines choices.
+    pub(super) fn filters(mut self) -> Self {
+        self.layout = DropdownLayout::Filters;
+        self
+    }
+
+    pub fn above_end(mut self) -> Self {
+        self.layout = DropdownLayout::AboveEnd;
+        self
     }
 
     pub fn align_start(mut self) -> Self {
@@ -568,14 +655,21 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
             .items_center()
             .when(field, |root| root.w_full())
             .when(count == 0, |root| root.opacity(0.5))
-            .child(trigger.bind(state.clone(), actions, content.checked, cx))
+            .child(trigger.bind(
+                state.clone(),
+                actions,
+                content.checked,
+                layout == DropdownLayout::Filters,
+                cx,
+            ))
             .when_some(selected, |root, i| {
                 root.child(
                     div()
                         .absolute()
-                        .bottom_0()
-                        .when(layout != DropdownLayout::End, |anchor| anchor.left_0())
-                        .when(layout == DropdownLayout::End, |anchor| anchor.right_0())
+                        .when(layout == DropdownLayout::AboveEnd, |anchor| anchor.top_0().right_0())
+                        .when(layout != DropdownLayout::AboveEnd, |anchor| anchor.bottom_0())
+                        .when(matches!(layout, DropdownLayout::Start | DropdownLayout::Field), |anchor| anchor.left_0())
+                        .when(matches!(layout, DropdownLayout::End | DropdownLayout::Filters), |anchor| anchor.right_0())
                         .size(px(0.))
                         .child(content.popup(&state, i, layout, window, cx)),
                 )

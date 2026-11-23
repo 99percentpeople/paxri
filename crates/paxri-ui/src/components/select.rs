@@ -61,6 +61,30 @@ impl<T: PartialEq + 'static> Select<T> {
         self
     }
 
+    pub(super) fn append_options(
+        self,
+        mut content: DropdownContent,
+        first: usize,
+    ) -> DropdownContent {
+        for (index, option) in self.options.into_iter().enumerate() {
+            let change = self.change.clone();
+            let checked = Some(&option.value) == self.value.as_ref();
+            content =
+                content.checked_item(first + index, option.content, checked, move |window, cx| {
+                    change(&option.value, window, cx)
+                });
+        }
+        content
+    }
+
+    pub(super) fn selected_label(&self) -> Div {
+        self.options
+            .iter()
+            .find(|option| Some(&option.value) == self.value.as_ref())
+            .map(|option| (option.content)())
+            .unwrap_or_else(|| div().min_w_0().truncate().child(self.placeholder.clone()))
+    }
+
     pub fn placeholder(mut self, label: impl Into<SharedString>) -> Self {
         self.placeholder = label.into();
         self
@@ -71,26 +95,15 @@ impl<T: PartialEq + 'static> RenderOnce for Select<T> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = self
             .state
+            .clone()
             .unwrap_or_else(|| DropdownState::local(self.id.clone(), window, cx));
         let ui = Ui::new(window, cx);
-        let label = self
-            .options
-            .iter()
-            .find(|option| Some(&option.value) == self.value.as_ref())
-            .map(|option| (option.content)())
-            .unwrap_or_else(|| div().min_w_0().truncate().child(self.placeholder));
+        let label = self.selected_label();
         let trigger = ui
-            .button(ButtonVariant::Outline, self.id, label)
+            .button(ButtonVariant::Outline, self.id.clone(), label)
             .field()
             .disclosure(state.read(cx).is_open());
-        let mut content = DropdownContent::new();
-        for (index, option) in self.options.into_iter().enumerate() {
-            let change = self.change.clone();
-            let checked = Some(&option.value) == self.value.as_ref();
-            content = content.checked_item(index, option.content, checked, move |window, cx| {
-                change(&option.value, window, cx)
-            });
-        }
+        let content = self.append_options(DropdownContent::new(), 0);
         Dropdown::new(&state, DropdownTrigger::new(trigger), content).field()
     }
 }

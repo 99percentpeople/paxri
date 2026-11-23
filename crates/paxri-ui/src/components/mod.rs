@@ -2,6 +2,8 @@ mod button;
 pub mod caret;
 mod controls;
 mod dropdown;
+mod filter_toolbar;
+pub use filter_toolbar::FilterToolbar;
 mod select;
 pub use dropdown::{Dropdown, DropdownContent, DropdownState, DropdownTrigger};
 pub use select::Select;

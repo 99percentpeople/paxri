@@ -93,7 +93,10 @@ impl TextInput<false> {
 
     pub fn search(placeholder: &str, cx: &mut App) -> Entity<Self> {
         let field = Self::new("", placeholder, cx);
-        field.update(cx, |field, _| field.search = true);
+        field.update(cx, |field, _| {
+            field.search = true;
+            field.commit_on_finish = cfg!(target_os = "android");
+        });
         field
     }
 

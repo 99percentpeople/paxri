@@ -1,7 +1,7 @@
 use crate::{
     Dashboard, Input,
     components::{
-        ButtonVariant::{Ghost, Primary},
+        ButtonVariant::Primary,
         Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Select, Ui, form_row, heading, row,
     },
 };
@@ -236,22 +236,6 @@ impl Dashboard {
                             .child(heading("Port forwarding"))
                             .when(active && total > 0, |r| {
                                 r.child(ui.muted(format!("{} of {total}", rows.len())).text_xs())
-                            })
-                            .when(filters.has_selections(), |r| {
-                                r.child(
-                                    ui.icon_button(
-                                        Ghost,
-                                        "clear-forward-filters",
-                                        Icon::FilterX,
-                                        "Clear filters",
-                                    )
-                                    .on_click(cx.listener(
-                                        |v, _, _, cx| {
-                                            v.forward_filters.reset(None, cx);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
                             }),
                     )
                     .when(!s.peers.is_empty(), |r| {
@@ -264,7 +248,7 @@ impl Dashboard {
                         )
                     }),
             )
-            .child(filters.toolbar(s, width, cx));
+            .child(filters.toolbar(s, cx));
         let columns = || div().w_full().min_w_0().flex().gap_2().items_center();
         let cell = || div().min_w_0().flex_1().flex().flex_col();
         if let Some(directory) = &s.peer_forwards {

@@ -4,6 +4,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Direction, ForwardStatus, Status};
+use paxri_ui::components::FilterToolbar;
 
 pub(crate) struct ForwardFilters {
     pub(crate) device: Option<String>,
@@ -78,7 +79,7 @@ impl ForwardFilters {
         terms.iter().all(|term| searchable.contains(*term))
     }
 
-    pub(super) fn toolbar(&self, status: &Status, width: Pixels, cx: &Context<Dashboard>) -> Div {
+    pub(super) fn toolbar(&self, status: &Status, cx: &Context<Dashboard>) -> FilterToolbar {
         let mut devices = Select::new(
             "forward-device-filter",
             Some(self.device.clone()),
@@ -119,40 +120,26 @@ impl ForwardFilters {
             states = states.option(Some(state), state);
         }
 
-        let compact = width < px(730.);
-        let field = |basis: f32| {
-            div()
-                .min_w_0()
-                .max_w_full()
-                .flex_grow()
-                .flex_basis(px(basis))
-        };
-        let selects = div()
-            .min_w_0()
-            .max_w_full()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .when(compact, |d| d.w_full())
-            .when(!compact, |d| d.w(px(510.)).flex_none())
-            .child(field(189.).child(devices))
-            .child(field(140.).child(directions))
-            .child(field(119.).child(states));
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .when(compact, |d| d.flex_col())
-            .child(
-                div()
-                    .min_w_0()
-                    .when(compact, |d| d.w_full())
-                    .when(!compact, |d| d.flex_1())
-                    .child(self.search.clone()),
-            )
-            .child(selects)
+        let owner = cx.weak_entity();
+        let active = usize::from(self.device.is_some())
+            + usize::from(self.direction.is_some())
+            + usize::from(self.state.is_some());
+        FilterToolbar::new(
+            "forward-filters",
+            "Filter forwarding rules",
+            &self.search,
+            active,
+        )
+        .group("Device", devices)
+        .group("Direction", directions)
+        .group("State", states)
+        .clear(move |_, cx| {
+            let _ = owner.update(cx, |v, cx| {
+                v.forward_filters.device = None;
+                v.forward_filters.direction = None;
+                v.forward_filters.state = None;
+                cx.notify();
+            });
+        })
     }
 }
