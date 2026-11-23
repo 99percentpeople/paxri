@@ -294,8 +294,8 @@ impl Mobile {
         .h(px(preview_height))
         .max_h(relative(0.35))
         .flex_none();
-        let mut fields = SettingsGroup::new(SECTION);
-        fields.notice = Some(ui.muted("Separate keys with commas.").into_any_element());
+        let mut rows = SettingsGroup::new(SECTION);
+        rows.notice = Some(ui.muted("Separate keys with commas.").into_any_element());
         for (i, row) in editor.rows.iter().enumerate() {
             let id = row.input.entity_id();
             let delete = ui
@@ -310,7 +310,7 @@ impl Mobile {
                         cx.notify();
                     }
                 }));
-            fields.field(
+            rows.field(
                 format!("Row {}", i + 1),
                 div()
                     .flex()
@@ -320,7 +320,7 @@ impl Mobile {
                     .child(delete),
             );
         }
-        fields.footer = Some(
+        rows.footer = Some(
             row()
                 .child(
                     ui.button(Outline, "add-row", "Add row")
@@ -363,17 +363,19 @@ impl Mobile {
         for (mode, label) in HAPTICS {
             feedback = feedback.option(mode, label);
         }
-        fields.add(
+        let mut options = SettingsGroup::new(SECTION);
+        options.add(
             "row_height",
             "Key height",
             "",
             "",
             number_field(editor.height.clone()),
         );
-        fields.add("haptics", "Key vibration", "", "", setting_field(feedback));
+        options.add("haptics", "Key vibration", "", "", setting_field(feedback));
         let form = self
             .settings_body("keybar-fields")
-            .child(fields.render_rows(ui));
+            .child(div().id("keybar-rows").child(rows.render_rows(ui)))
+            .child(options.render_rows(ui));
         div()
             .id("terminal-key-editor")
             .flex_1()
