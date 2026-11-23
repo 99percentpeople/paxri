@@ -18,6 +18,15 @@ pub struct TerminalFont {
     pub cell: CellSize,
 }
 
+impl TerminalFont {
+    pub fn scaled(mut self, scale: f32) -> Self {
+        self.size *= scale;
+        self.cell.width *= scale;
+        self.cell.height *= scale;
+        self
+    }
+}
+
 #[cfg(test)]
 impl TerminalFont {
     pub(crate) fn test_font() -> Self {

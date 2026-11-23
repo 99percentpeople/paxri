@@ -10,12 +10,15 @@ use paxri_ui::{
     terminal::{cursor, display},
 };
 
-const APP_BAR_HEIGHT: f32 = 56.;
+fn app_bar_height(window: &Window) -> f32 {
+    // Keep room for both title lines when the system accessibility text size increases.
+    (2.75 * f32::from(window.rem_size()) + 8.).max(56.)
+}
 
 
 fn keybar_height(window: &Window, keys: &KeybarSettings) -> f32 {
     let [_, top, _, bottom] = *EDGES.lock().unwrap();
-    let available = f32::from(window.viewport_size().height) - top - bottom - APP_BAR_HEIGHT;
+    let available = f32::from(window.viewport_size().height) - top - bottom - app_bar_height(window);
     (keys.rows.len() as f32 * f32::from(keys.row_height)).min((available * 0.45).max(0.))
 }
 
@@ -25,7 +28,7 @@ pub(super) fn initial_size(window: &Window, cell: CellSize, keys: &KeybarSetting
     GridSize::from_viewport(
         size(
             available.width - px(left + right),
-            available.height - px(top + bottom + APP_BAR_HEIGHT + keybar_height(window, keys)),
+            available.height - px(top + bottom + app_bar_height(window) + keybar_height(window, keys)),
         ),
         cell,
     )
@@ -44,7 +47,7 @@ fn floating_button(ui: Ui, id: &'static str, icon: Icon, label: &'static str) ->
 }
 
 impl Mobile {
-    fn app_bar(&self, ui: Ui, cx: &Context<Self>) -> Div {
+    fn app_bar(&self, ui: Ui, window: &Window, cx: &Context<Self>) -> Div {
         let (title, subtitle, back, end) = match &self.page {
             Page::Devices | Page::PairingMenu => {
                 let total = self.peers.len();
@@ -134,7 +137,7 @@ impl Mobile {
         };
         div()
             .w_full()
-            .h(px(APP_BAR_HEIGHT))
+            .h(px(app_bar_height(window)))
             .flex_none()
             .flex()
             .items_center()
@@ -496,6 +499,7 @@ impl Mobile {
 
 impl Render for Mobile {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(px(*SYSTEM_UI_REM.lock().unwrap()));
         let [left, top, right, bottom] = *EDGES.lock().unwrap();
         if bottom > self.bottom_inset
             && let Some(bounds) = self
@@ -550,7 +554,7 @@ impl Render for Mobile {
                     .top_0()
                     .left_0()
                     .right_0()
-                    .h(px(top + APP_BAR_HEIGHT))
+                    .h(px(top + app_bar_height(window)))
                     .bg(rgb(ui.colors.card)),
             )
             .child(
@@ -560,7 +564,7 @@ impl Render for Mobile {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .child(self.app_bar(ui, cx))
+                    .child(self.app_bar(ui, window, cx))
                     .child(match self.page.clone() {
                         Page::Devices | Page::PairingMenu => {
                             self.devices(ui, cx).into_any_element()

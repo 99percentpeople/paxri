@@ -1,5 +1,7 @@
 //! Appearance shared by every workspace connected to this node.
 pub mod fonts;
+mod zoom;
+pub use zoom::Zoom;
 mod palette;
 pub use palette::{DARK, LIGHT};
 pub use palette::{Palette, TerminalPalette};

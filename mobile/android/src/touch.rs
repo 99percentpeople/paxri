@@ -17,6 +17,14 @@ pub(super) enum Gesture {
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_startKeyboardSession(
+    _env: EnvUnowned,
+    _class: JClass,
+) {
+    gpui_mobile::show_keyboard();
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_TerminalKeybar_controlRadius(
     _env: EnvUnowned,
     _class: JClass,
@@ -64,20 +72,6 @@ pub extern "system" fn Java_org_paxri_android_TerminalGestures_zoom(
 }
 
 impl Mobile {
-    fn zoom_font(&mut self, size: f32, cx: &App) {
-        let range = theme::TerminalAppearance::FONT_SIZES;
-        let size = size.clamp(*range.start(), *range.end());
-        let mut style = theme::current(cx).terminal;
-        style.font_size = Some(size);
-        self.font = cx.global::<theme::fonts::MonospaceFonts>().resolve(&style);
-        if let Page::Terminal(id) = self.page
-            && let Some(session) = self.sessions.get_mut(&id)
-        {
-            session.screen.font = self.font.clone();
-            session.wheel = Default::default();
-        }
-    }
-
     pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5], keys: Arc<KeybarSettings>) {
         if self.touch_area.as_ref().is_some_and(|(session, bounds, layout)| {
             *session == id && *bounds == rect && *layout == keys
@@ -98,8 +92,12 @@ impl Mobile {
             return;
         };
         match gesture {
-            Gesture::Tap if s.connected() && s.composing.text.is_empty() => {
-                gpui_mobile::show_keyboard()
+            Gesture::Tap if s.connected() => {
+                if let Err(error) =
+                    activity_action(&self.android, ActivityAction::ShowTerminalKeyboard(id))
+                {
+                    log::warn!("Showing terminal keyboard: {error}");
+                }
             }
             Gesture::Tap => {}
             Gesture::Scroll { dy, x, y, fling } => {
@@ -153,14 +151,7 @@ impl Mobile {
                 }
             }
             Gesture::Zoom { factor, finished } => {
-                if finished {
-                    let size = (self.font.size * 10.).round() / 10.;
-                    if size != theme::current(cx).terminal.size() || size != self.font.size {
-                        self.change_gui(paxri_config::gui::GuiChange::FontSize(Some(size)), cx);
-                    }
-                } else if factor.is_finite() && factor > 0. {
-                    self.zoom_font(self.font.size * factor, cx);
-                }
+                self.apply_zoom(theme::Zoom::Pinch(factor), finished, cx);
             }
         }
     }

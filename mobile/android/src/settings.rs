@@ -84,12 +84,8 @@ impl Mobile {
     pub(super) fn change_gui(&mut self, change: GuiChange, cx: &mut Context<Self>) -> bool {
         match path(&self.android).and_then(|path| file::set_gui(&path, change, true)) {
             Ok(settings) => {
-                self.font = cx
-                    .global::<theme::fonts::MonospaceFonts>()
-                    .resolve(&settings.terminal);
-                for session in self.sessions.values_mut() {
-                    session.screen.font = self.font.clone();
-                }
+                self.font = cx.global::<theme::fonts::MonospaceFonts>().resolve(&settings.terminal);
+                self.update_session_fonts();
                 self.keybar = settings.keybar.clone().unwrap_or_default();
                 theme::apply(settings, cx);
                 cx.notify();

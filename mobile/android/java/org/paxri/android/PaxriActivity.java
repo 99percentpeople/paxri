@@ -3,6 +3,7 @@ package org.paxri.android;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.graphics.Insets;
 import android.database.ContentObserver;
@@ -11,10 +12,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.os.Bundle;
-import android.text.Editable;
 import android.text.InputType;
-import android.text.TextWatcher;
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.inputmethod.BaseInputConnection;
@@ -36,10 +38,12 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static native void activityVisibilityChanged(boolean visible);
     private static native void deviceNameChanged(String name, String model);
     private static native void submitCode(String code);
+    private static native void systemTextSizeChanged(float size);
     private static native void insetsChanged(float left, float top, float right, float bottom);
     private static native boolean goBack();
     private static native void terminalKey(long session, String value, boolean named, int first, int rest);
-    private static native void composingTextChanged(String text);
+    private static native void composingTextChanged(long terminal, String text, int start, int end);
+    private static native void startKeyboardSession();
     private long imeSession;
     private boolean networkReady;
     private Toast toast;
@@ -57,34 +61,46 @@ public final class PaxriActivity extends GpuiInputActivity {
     private Insets previousInsets;
     private float insetDensity;
     private EditText terminalInput;
-    private String lastComposition = "";
+    private long terminalInputSession;
+    private boolean terminalComposing;
 
-    // Sample after the InputConnection batch, when composing spans are final.
-    private final Runnable reportComposition = () -> {
-        if (terminalInput == null) return;
-        Editable text = terminalInput.getText();
-        int start = BaseInputConnection.getComposingSpanStart(text);
-        int end = BaseInputConnection.getComposingSpanEnd(text);
-        String composing = start >= 0 && end >= start ? text.subSequence(start, end).toString() : "";
-        if (!composing.equals(lastComposition)) {
-            lastComposition = composing;
-            composingTextChanged(composing);
+    private void clearTerminalComposition() {
+        if (terminalComposing) {
+            composingTextChanged(terminalInputSession, "", 0, 0);
+            terminalComposing = false;
         }
-    };
-
-    private final TextWatcher compositionWatcher = new TextWatcher() {
-        public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-        public void onTextChanged(CharSequence s, int start, int before, int count) {}
-        public void afterTextChanged(Editable text) {
-            terminalInput.removeCallbacks(reportComposition);
-            terminalInput.post(reportComposition);
-        }
-    };
+    }
 
     private final ContentObserver nameObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
         @Override
         public void onChange(boolean selfChange) { publishDeviceName(); }
     };
+
+    private static native void zoomKey(long session, int direction);
+
+    public float terminalZoom() {
+        android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+        return prefs.getFloat("terminal_zoom", prefs.getFloat("window_zoom", 1f));
+    }
+
+    public void saveTerminalZoom(float scale) {
+        getPreferences(MODE_PRIVATE).edit().putFloat("terminal_zoom", scale).apply();
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (visible && touchSession != 0 && event.isCtrlPressed() && !event.isAltPressed() && !event.isMetaPressed()
+                && !event.isFunctionPressed()) {
+            int symbol = event.getUnicodeChar(event.isShiftPressed() ? KeyEvent.META_SHIFT_ON : 0);
+            int direction;
+            if (symbol == '+' || symbol == '=') direction = 1;
+            else if (symbol == '-' && !event.isShiftPressed()) direction = -1;
+            else if (symbol == '0' && !event.isShiftPressed()) direction = 0;
+            else return super.dispatchKeyEvent(event);
+            if (event.getAction() == KeyEvent.ACTION_DOWN) zoomKey(touchSession, direction);
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
 
     private String systemDeviceName() {
         try {
@@ -136,6 +152,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     @Override
     protected void onCreate(Bundle state) {
         System.loadLibrary("paxri_android");
+        reportSystemTextSize();
         initVerifier(getApplicationContext());
         publishDeviceName();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -228,6 +245,18 @@ public final class PaxriActivity extends GpuiInputActivity {
         }
     }
 
+    @Override
+    public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        reportSystemTextSize();
+    }
+
+    private void reportSystemTextSize() {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float pixels = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16f, metrics);
+        systemTextSizeChanged(pixels / metrics.density);
+    }
+
     private void reportInsets(Insets safe) {
         float density = getResources().getDisplayMetrics().density;
         if (safe.equals(previousInsets) && density == insetDensity) return;
@@ -236,45 +265,43 @@ public final class PaxriActivity extends GpuiInputActivity {
         insetsChanged(safe.left / density, safe.top / density, safe.right / density, safe.bottom / density);
     }
 
-    @Override
-    public void gpuiShowKeyboard(int type, long session) {
+    public void showTerminalKeyboard(long session) {
         runOnUiThread(() -> {
-            super.gpuiShowKeyboard(type, session);
-            imeSession = session;
-            if (getCurrentFocus() instanceof EditText) {
-                EditText field = (EditText) getCurrentFocus();
-                if (touchSession == 0) {
-                    if (terminalInput != null) terminalInput.removeTextChangedListener(compositionWatcher);
-                    terminalInput = null;
-                    lastComposition = "";
-                    int inputType = field.getInputType();
-                    if ((inputType & InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER) {
-                        inputType |= InputType.TYPE_NUMBER_FLAG_SIGNED;
-                    } else {
-                        inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS;
-                    }
-                    field.setRawInputType(inputType);
-                    field.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-                    ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(field);
-                    return;
-                }
-                if (terminalInput != field) {
-                    if (terminalInput != null) terminalInput.removeTextChangedListener(compositionWatcher);
-                    terminalInput = field;
-                    field.addTextChangedListener(compositionWatcher);
-                }
-                // Keep composition for CJK, but never autocorrect shell commands.
-                field.setRawInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                        | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-                field.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
-                ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(field);
+            if (touchSession != session) return;
+            if (terminalInputSession == session && terminalInput != null && terminalInput.hasFocus()) {
+                // Also reopens the same editor after the system Back gesture hides the IME.
+                InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                imm.showSoftInput(terminalInput, InputMethodManager.SHOW_IMPLICIT);
+            } else {
+                startKeyboardSession();
             }
         });
     }
 
     @Override
+    protected void configureIme(EditText field, long session) {
+        clearTerminalComposition();
+        imeSession = session;
+        terminalInputSession = touchSession;
+        terminalInput = touchSession != 0 ? field : null;
+        if (touchSession != 0) {
+            field.setRawInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+            field.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        } else {
+            int type = field.getInputType();
+            field.setRawInputType((type & InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER
+                    ? type | InputType.TYPE_NUMBER_FLAG_SIGNED
+                    : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+            field.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        }
+    }
+
+    @Override
     public void gpuiHideKeyboard(long session) {
         runOnUiThread(() -> {
+            clearTerminalComposition();
+            terminalInputSession = 0;
+            terminalInput = null;
             imeSession = session;
             super.gpuiHideKeyboard(session);
         });
@@ -323,15 +350,20 @@ public final class PaxriActivity extends GpuiInputActivity {
     }
 
     @Override protected void deliverIme(long session, int kind, String text, int start, int end) {
-        if (session != imeSession) return;
+        if (session != imeSession || terminalInputSession != touchSession) return;
         if (touchSession == 0) {
             if (kind == 1 && "\n".equals(text)) kind = 4;
             super.deliverIme(session, kind, text, start, end);
             return;
         }
+        if (kind == 0) {
+            terminalComposing = !text.isEmpty();
+            composingTextChanged(terminalInputSession, text, start, end);
+            return;
+        }
         if (kind == 1 || kind == 2 || kind == 3) {
-            if (keybar == null) return;
             if (kind == 1) {
+                clearTerminalComposition();
                 sendTerminalInput(text, false);
             } else {
                 for (int i = 0; i < start; i++) sendTerminalInput("backspace", true);
@@ -343,6 +375,7 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     @Override public void gpuiResetComposition(long session) {
         runOnUiThread(() -> {
+            clearTerminalComposition();
             imeSession = session;
             super.gpuiResetComposition(session);
         });

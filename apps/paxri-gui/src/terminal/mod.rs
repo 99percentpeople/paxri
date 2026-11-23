@@ -7,7 +7,7 @@ mod session;
 pub(crate) use paxri_ui::terminal::title::TabTitle;
 
 use crate::components::{ButtonVariant::Primary, ScrollMetrics, ScrollSource, Scrollbar, Ui};
-use crate::theme::SPACE_2;
+use crate::theme::{SPACE_2, Zoom};
 use crate::theme::fonts::{CellSize, MonospaceFonts};
 use alacritty_terminal::{
     grid::{Dimensions, Scroll},
@@ -18,6 +18,25 @@ use gpui::{prelude::*, *};
 use session::{Output, Session};
 use std::{ops::Range, path::Path};
 
+/// Shared by terminal views in this process. Window chrome uses the platform DPI.
+struct TerminalZoom(f32);
+impl Global for TerminalZoom {}
+
+impl TerminalZoom {
+    fn current(cx: &App) -> f32 {
+        cx.try_global::<Self>().map_or(1., |zoom| zoom.0)
+    }
+
+    fn apply(zoom: Zoom, window: &mut Window, cx: &mut App) {
+        let current = Self::current(cx);
+        let scale = zoom.scale(current);
+        if current != scale {
+            cx.set_global(Self(scale));
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+}
 
 fn layout_grid(available: Bounds<Pixels>, cell: CellSize) -> (GridSize, Bounds<Pixels>) {
     let grid = GridSize::from_viewport(available.size, cell);
@@ -87,7 +106,7 @@ impl Terminal {
         cx: &mut App,
     ) -> Entity<Self> {
         let appearance = crate::theme::current(cx).terminal;
-        let font = cx.global::<MonospaceFonts>().resolve(&appearance);
+        let font = cx.global::<MonospaceFonts>().resolve(&appearance).scaled(TerminalZoom::current(cx));
         let grid = GridSize::from_viewport(window.viewport_size(), font.cell);
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
@@ -104,6 +123,7 @@ impl Terminal {
                 }
             })
             .detach();
+            cx.observe_global::<TerminalZoom>(|_, cx| cx.notify()).detach();
             let focus = cx.focus_handle();
             cx.spawn(async move |this, cx| {
                 while let Ok(event) = events.recv().await {
@@ -311,6 +331,10 @@ impl Terminal {
     }
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
+        if let Some(zoom) = Zoom::from_key(key) {
+            TerminalZoom::apply(zoom, window, cx);
+            return;
+        }
         let shortcut = if cfg!(target_os = "macos") {
             key.modifiers.platform
         } else {
@@ -350,7 +374,7 @@ impl Render for Terminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::new(window, cx);
         let appearance = crate::theme::current(cx).terminal;
-        self.emulator.font = cx.global::<MonospaceFonts>().resolve(&appearance);
+        self.emulator.font = cx.global::<MonospaceFonts>().resolve(&appearance).scaled(TerminalZoom::current(cx));
         let palette = crate::theme::terminal_palette(appearance.scheme, ui.colors);
         self.emulator.palette = palette;
         let background = display::color(
@@ -465,6 +489,7 @@ impl Render for Terminal {
                     .cursor(CursorStyle::Arrow)
                     .on_any_mouse_down(cx.listener(Self::mouse_down))
                     .on_mouse_move(cx.listener(Self::mouse_hover))
+                    .on_pinch(|event, window, cx| TerminalZoom::apply(Zoom::Pinch(event.scale), window, cx))
                     .on_scroll_wheel(cx.listener(Self::wheel))
                     .child(screen)
                     .child(Scrollbar::vertical("terminal-history", cx.entity())),

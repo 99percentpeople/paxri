@@ -12,7 +12,7 @@
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity android:name="org.paxri.android.PairingScannerActivity" android:exported="false" />
         <activity android:name="org.paxri.android.PaxriActivity" android:exported="true" android:launchMode="singleTop"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|density"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|density|fontScale"
             android:windowSoftInputMode="adjustResize">
             <meta-data android:name="android.app.lib_name" android:value="paxri_android" />
             <intent-filter>

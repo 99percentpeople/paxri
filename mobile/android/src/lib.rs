@@ -49,8 +49,13 @@ enum Update {
     Devices(Peers),
     Paired(Result<Peers, String>),
     PairCode(String),
-    Composing(String),
+    Composing {
+        id: u64,
+        text: String,
+        selection: std::ops::Range<usize>,
+    },
     HardwareText(u64, String),
+    Zoom(u64, theme::Zoom),
     Key {
         id: u64,
         value: String,
@@ -58,7 +63,7 @@ enum Update {
         first: Modifiers,
         held: Modifiers,
     },
-    Insets,
+    DisplayChanged,
     DeviceNameChanged,
     Gesture(u64, touch::Gesture),
     Close,
@@ -148,6 +153,7 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_deviceNameChanged(
 }
 
 static BRIDGE: Mutex<Option<Sender<Update>>> = Mutex::new(None);
+static SYSTEM_UI_REM: Mutex<f32> = Mutex::new(16.);
 static EDGES: Mutex<[f32; 4]> = Mutex::new([0.; 4]);
 static CAN_GO_BACK: AtomicBool = AtomicBool::new(false);
 
@@ -195,14 +201,31 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_submitCode(
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_composingTextChanged(
     mut env: EnvUnowned,
     _class: JClass,
+    id: i64,
     text: JString,
+    start: i32,
+    end: i32,
 ) {
     env.with_env(|_| {
-        post(Update::Composing(text.to_string()));
+        post(Update::Composing {
+            id: id as u64,
+            text: text.to_string(),
+            selection: start.max(0) as usize..end.max(0) as usize,
+        });
         Ok::<_, jni::errors::Error>(())
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
 }
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_systemTextSizeChanged(
+    _env: EnvUnowned, _class: JClass, size: f32,
+) {
+    if size.is_finite() && size > 0. {
+        *SYSTEM_UI_REM.lock().unwrap() = size;
+        post(Update::DisplayChanged);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_insetsChanged(
     _env: EnvUnowned,
@@ -213,8 +236,19 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_insetsChanged(
     bottom: f32,
 ) {
     *EDGES.lock().unwrap() = [left, top, right, bottom];
-    post(Update::Insets);
+    post(Update::DisplayChanged);
 }
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_zoomKey(
+    _env: EnvUnowned, _class: JClass, session: i64, direction: i32,
+) {
+    post(Update::Zoom(session as u64, match direction {
+        1 => theme::Zoom::In,
+        -1 => theme::Zoom::Out,
+        _ => theme::Zoom::Reset,
+    }));
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_goBack(
     _env: EnvUnowned,
@@ -260,6 +294,7 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
 enum ActivityAction<'a> {
     Toast(&'a str),
     SaveDeviceName(&'a str),
+    SaveZoom(f32),
     Pair,
     Scan,
     PairingReady,
@@ -268,6 +303,16 @@ enum ActivityAction<'a> {
     Appearance(bool, &'a theme::Palette),
     TouchArea(u64, [i32; 5], &'a KeybarSettings),
     StopFling(u64),
+    ShowTerminalKeyboard(u64),
+}
+
+fn load_terminal_zoom(app: &AndroidApp) -> f32 {
+    gpui_mobile::android::jni::with_env(|env| {
+        let raw = app.activity_as_ptr().cast();
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
+        env.call_method(activity, jni_str!("terminalZoom"), jni_sig!("()F"), &[])
+            .and_then(|value| value.f()).map_err(|e| e.to_string())
+    }).unwrap_or(1.)
 }
 
 fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), String> {
@@ -281,6 +326,9 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
                 let text = JString::from_str(env, message).map_err(|e| e.to_string())?;
                 env.call_method(activity, jni_str!("showToast"), jni_sig!("(Ljava/lang/String;)V"), &[(&text).into()])
             }
+            ActivityAction::SaveZoom(scale) => env.call_method(
+                activity, jni_str!("saveTerminalZoom"), jni_sig!("(F)V"), &[scale.into()],
+            ),
             ActivityAction::SaveDeviceName(name) => {
                 let value = JString::from_str(env, name).map_err(|e| e.to_string())?;
                 env.call_method(
@@ -314,6 +362,12 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
             ActivityAction::StopFling(id) => env.call_method(
                 activity,
                 jni_str!("stopTerminalFling"),
+                jni_sig!("(J)V"),
+                &[(id as i64).into()],
+            ),
+            ActivityAction::ShowTerminalKeyboard(id) => env.call_method(
+                activity,
+                jni_str!("showTerminalKeyboard"),
                 jni_sig!("(J)V"),
                 &[(id as i64).into()],
             ),
@@ -410,6 +464,7 @@ struct Mobile {
     android: AndroidApp,
     window: AnyWindowHandle,
     ui_font: SharedString,
+    terminal_zoom: f32,
     font: TerminalFont,
     touch_area: Option<(u64, [i32; 5], Arc<KeybarSettings>)>,
     rt: Handle,
@@ -440,6 +495,41 @@ struct Mobile {
 }
 
 impl Mobile {
+    fn apply_zoom(&mut self, zoom: theme::Zoom, save: bool, cx: &mut Context<Self>) {
+        let scale = zoom.scale(self.terminal_zoom);
+        if self.terminal_zoom != scale {
+            self.terminal_zoom = scale;
+            self.update_session_fonts();
+            cx.notify();
+        }
+        if save && let Err(error) = activity_action(&self.android, ActivityAction::SaveZoom(scale)) {
+            log::warn!("Saving terminal zoom: {error}");
+        }
+    }
+
+    fn update_session_fonts(&mut self) {
+        let font = self.font.clone().scaled(self.terminal_zoom);
+        for session in self.sessions.values_mut() {
+            session.screen.font = font.clone();
+        }
+    }
+
+    fn bind_terminal_shortcuts(cx: &mut Context<Self>) {
+        let mobile = cx.weak_entity();
+        let subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            if let Some(zoom) = theme::Zoom::from_key(&event.keystroke) {
+                let _ = mobile.update(cx, |view, cx| {
+                    if matches!(view.page, Page::Terminal(_)) && !view.drawer.open {
+                        view.apply_zoom(zoom, true, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                });
+            }
+        });
+        cx.on_release(move |_, _| drop(subscription)).detach();
+    }
+
     fn bind_input(
         input: &Entity<paxri_ui::components::input::Input>,
         keyboard: gpui_mobile::KeyboardType,
@@ -515,12 +605,10 @@ impl Mobile {
             }
         }
         if let Page::Terminal(id) = &page
-            && let Some(session) = self.sessions.get_mut(id)
+            && let Some(session) = self.sessions.get(id)
+            && session.connected()
         {
-            session.screen.font = self.font.clone();
-            if session.connected() {
-                Self::start_input(session);
-            }
+            Self::start_input(session);
         }
         if let Some(client) = &self.client {
             client.watch_peer(match &page {
@@ -566,13 +654,6 @@ impl Mobile {
         self.navigate(page, cx);
     }
 
-    fn active_mut(&mut self) -> Option<&mut Session> {
-        let Page::Terminal(id) = self.page else {
-            return None;
-        };
-        self.sessions.get_mut(&id)
-    }
-
     fn assign_terminal_defaults(&self, cx: &mut App) {
         let titles = self
             .sessions
@@ -597,7 +678,8 @@ impl Mobile {
         *number += 1;
         self.generation += 1;
         let id = self.generation;
-        let grid = initial_size(window, self.font.cell, &self.keybar);
+        let font = self.font.clone().scaled(self.terminal_zoom);
+        let grid = initial_size(window, font.cell, &self.keybar);
         let size = PtySize {
             cols: grid.cols,
             rows: grid.rows,
@@ -622,7 +704,7 @@ impl Mobile {
                 screen: Emulator::with_palette(
                     grid,
                     &Ui::new(window, cx).colors.terminal,
-                    self.font.clone(),
+                    font,
                 ),
                 wheel: Default::default(),
                 composing: Preedit::default(),
@@ -725,16 +807,18 @@ impl Mobile {
                     .retain(|peer, _| peers.contains_key(peer));
                 self.peers = peers;
             }
-            Update::Insets => {}
+            Update::DisplayChanged => {}
             Update::DeviceNameChanged => {
                 let names = DEVICE_NAME.borrow().clone();
                 self.name_input
                     .update(cx, |input, cx| input.set_placeholder(&names.system, cx));
             }
             Update::Gesture(id, gesture) => self.handle_gesture(id, gesture, cx),
-            Update::Composing(text) => {
-                if let Some(s) = self.active_mut().filter(|s| s.connected()) {
-                    s.composing.replace(None, &text, None);
+            Update::Composing { id, text, selection } => {
+                if self.page == Page::Terminal(id)
+                    && let Some(s) = self.sessions.get_mut(&id).filter(|s| s.connected())
+                {
+                    s.composing.replace(None, &text, Some(selection));
                 }
             }
             Update::Close => {
@@ -751,6 +835,11 @@ impl Mobile {
                     menu.update(cx, |menu, cx| menu.dismiss(cx));
                 } else {
                     self.back(cx);
+                }
+            }
+            Update::Zoom(id, zoom) => {
+                if self.page == Page::Terminal(id) && !self.drawer.open {
+                    self.apply_zoom(zoom, true, cx);
                 }
             }
             Update::HardwareText(id, value) => {
@@ -937,6 +1026,7 @@ fn android_main(android: AndroidApp) {
                     }
                 })
                 .detach();
+                Mobile::bind_terminal_shortcuts(cx);
                 let ui_font = fonts::init(cx);
                 let font = cx
                     .global::<theme::fonts::MonospaceFonts>()
@@ -967,6 +1057,7 @@ fn android_main(android: AndroidApp) {
                 }
                 Mobile {
                     name_input,
+                    terminal_zoom: load_terminal_zoom(&android),
                     android,
                     window: window.window_handle(),
                     ui_font,
