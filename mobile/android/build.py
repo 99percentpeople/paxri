@@ -19,6 +19,13 @@ KOTLIN_HASH = "f31cc53f105a7e48c093683bbd5437561d1233920513774b470805641bedbc09"
 SCANNER_HASH = "4ab03353127c34e55cbb80fbc9a34031decbcfb1ec5e8f991944d2d494621a33"
 ZXING_HASH = "71de5d89341b5fcf5dd89da7f44e84d825d0e084cdf3ec77c9abe26b0f0ceb13"
 
+# Entries are applied in order to the package pinned in Cargo.lock.
+PATCH_SERIES = {
+    "gpui-mobile": ("hardware-shortcuts.patch", "frame-pacing.patch", "ime-composition.patch"),
+    "gpui-pre": ("vertical-scroll.patch",),
+    "gpui-pre-wgpu": ("font-fallback.patch",),
+}
+
 
 def run(*args):
     subprocess.run(args, cwd=APP, check=True)
@@ -37,9 +44,11 @@ def download(url, checksum):
     return path
 
 
-def patched_source(package, patch_name):
-    patch = APP / patch_name
-    digest = hashlib.sha256(patch.read_bytes()).hexdigest()[:16]
+def patched_source(package):
+    name = package["name"]
+    directory = APP / "patches" / name
+    patches = [directory / filename for filename in PATCH_SERIES[name]]
+    digest = hashlib.sha256(b"\0".join(patch.read_bytes() for patch in patches)).hexdigest()[:16]
     cache = OUT / "dependencies"
     cache.mkdir(exist_ok=True)
     source = cache / f"{package['name']}-{package['version']}-{digest}"
@@ -47,7 +56,7 @@ def patched_source(package, patch_name):
         with tempfile.TemporaryDirectory(dir=cache) as tmp:
             staged = Path(tmp) / "gpui"
             shutil.copytree(Path(package["manifest_path"]).parent, staged)
-            subprocess.run(["git", "apply", "--no-index", str(patch)], cwd=staged, check=True,
+            subprocess.run(["git", "apply", "--no-index", *patches], cwd=staged, check=True,
                            env={**os.environ, "GIT_CEILING_DIRECTORIES": tmp})
             try:
                 staged.rename(source)
@@ -73,10 +82,8 @@ def main():
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version=1", "--filter-platform", TARGET], cwd=APP))
     crates = {p["name"]: p for p in metadata["packages"]}
-    override = "paths = " + json.dumps([
-        patched_source(crates["gpui-pre"], "gpui-vertical-scroll.patch"),
-        patched_source(crates["gpui-pre-wgpu"], "gpui-android-font-fallback.patch"),
-    ])
+    sources = {name: patched_source(crates[name]) for name in PATCH_SERIES}
+    override = "paths = " + json.dumps(list(sources.values()))
     # Align the extracted native library for both 4 KB and 16 KB page devices.
     linker_flags = ["--", "-C", "link-arg=-Wl,-z,max-page-size=16384"]
     profile_flags = ["--release"] if args.unsigned_release else []
@@ -87,7 +94,7 @@ def main():
         run("cargo", "ndk", "-t", "arm64-v8a", "-P", "29", "rustc", "--config", override, *rustc_args)
     profile_dir = "release" if args.unsigned_release else "debug"
     native = Path(metadata["target_directory"]) / TARGET / profile_dir / "libpaxri_android.so"
-    host = Path(crates["gpui-mobile"]["manifest_path"]).parent / "example/android/gradle/app/src/main"
+    host = Path(sources["gpui-mobile"]) / "example/android/gradle/app/src/main"
     version = crates["rustls-platform-verifier-android"]["version"]
     aar = download("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/"
                    f"android-release-support/maven/org/rustls/rustls-platform-verifier/{version}/"
@@ -124,20 +131,8 @@ def main():
             "--java", generated, "--extra-packages", "com.google.zxing.client.android",
             "-o", package, *sorted(compiled.glob("*.flat")))
         java = host / "java/dev/gpui/mobile"
-        # Expose committed edits on the Android UI thread so toolbar releases and IME
-        # commits share an event order. Keep the pinned GPUI proxy's batch/composition logic.
-        host_activity = tmp / "GpuiInputActivity.java"
-        source = (java / host_activity.name).read_text()
-        body, declaration, tail = source.partition("    private static native void nativeIme(")
-        if not declaration:
-            raise RuntimeError("The GPUI Android input proxy has changed")
-        hook = """    protected void deliverIme(long session, int kind, String text, int start, int end) {
-        nativeIme(session, kind, text, start, end);
-    }
-"""
-        host_activity.write_text(body.replace("nativeIme(", "deliverIme(") + hook + declaration + tail)
-        support = [host_activity, *(java / (name + ".java") for name in
-                   ("GpuiPlatformView", "GpuiCamera", "GpuiVideoPlayer"))]
+        support = [java / (name + ".java") for name in
+                   ("GpuiInputActivity", "GpuiPlatformView", "GpuiCamera", "GpuiVideoPlayer")]
         classpath = os.pathsep.join(map(str, (platform, scanner_classes, zxing)))
         run("javac", "-proc:none", "-source", "8", "-target", "8", "-cp", classpath, "-d", classes,
             *support, *sorted(generated.rglob("*.java")), *sorted((APP / "java").rglob("*.java")))

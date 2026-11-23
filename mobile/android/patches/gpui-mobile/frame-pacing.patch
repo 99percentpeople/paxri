@@ -1,0 +1,516 @@
+--- a/src/frame_pacer.rs
++++ b/src/frame_pacer.rs
+@@ -5,21 +5,16 @@
+ //! shape for a host whose frame source ticks by itself (a `CADisplayLink`):
+ //! demand resumes the source, the source ticks until a tick finds no demand.
+ //! A loop that polls an `ALooper` has no source of its own; it wants to know
+-//! *when* to draw. `FramePacer` answers that: demand posts one vsync callback
+-//! (`AChoreographer` on Android), the callback marks a frame as due, and the
+-//! loop draws exactly one frame per marked vsync. Demand raised while a
++//! *when* to draw. `FramePacer` combines demand with ticks from the vsync
++//! source (`AChoreographer` on Android). The loop draws at most once per
++//! available tick. Demand raised while a
+ //! callback is posted or a frame is already due is folded into it, so a
+ //! window that is notified fifty times between two vsyncs still draws once.
+ //!
+-//! Waiting for a vsync only makes sense while the loop keeps up with them.
+-//! Once the previous frame took a whole interval or longer, the vsync it
+-//! would wait for has already passed, and waiting for the next one only
+-//! delays the frame (and the input batched behind it — GPUI stamps touches
+-//! when they are dispatched, and a gap over 40 ms between samples kills a
+-//! fling). Such demand is served at once; a loop that is behind draws
+-//! back-to-back, exactly as it did before pacing, and returns to vsync
+-//! pacing as soon as a frame fits the interval again. The first frame after
+-//! an idle period is served at once for the same reason.
++//! Taking a frame arms the next vsync before rendering starts. Demand and
++//! vsync can then arrive in either order: input just after a callback uses
++//! that unused tick, while input before it waits. An unused tick is retained
++//! without drawing or arming another callback, so idle windows go to sleep.
+ //!
+ //! Without a vsync source (no looper on the thread, tests) the pacer falls
+ //! back to a wall clock: demand becomes due one frame interval after the
+@@ -39,15 +34,12 @@
+ pub(crate) struct FramePacer {
+     /// `None` paces by wall clock at `interval`.
+     post_vsync: Option<PostVsync>,
+-    /// The display's refresh interval: how long a frame may take before the
+-    /// next one stops waiting for a vsync, and the spacing of the fallback
+-    /// clock.
++    /// Frame spacing for the fallback clock.
+     interval: Duration,
+-    /// A vsync callback is posted and has not fired yet.
+-    posted: Cell<bool>,
+-    /// A vsync fired (or the fallback clock ran out) and the frame it owes has
+-    /// not been taken yet.
+-    due: Cell<bool>,
++    /// An unused vsync, including the initial opportunity after startup.
++    vsync_ready: Cell<bool>,
++    /// A draw was requested on the vsync path.
++    wanted: Cell<bool>,
+     /// Fallback only: demand is waiting for this instant.
+     fallback_due_at: Cell<Option<Instant>>,
+     /// Fallback only: when the previous frame was taken, to space the next.
+@@ -56,14 +48,13 @@
+ 
+ impl FramePacer {
+     /// A pacer driven by a vsync source: `post_vsync` posts one callback that
+-    /// must end in [`on_vsync`](Self::on_vsync). `interval` is the display's
+-    /// refresh interval.
+-    pub(crate) fn with_vsync(post_vsync: PostVsync, interval: Duration) -> Self {
++    /// must end in [`on_vsync`](Self::on_vsync).
++    pub(crate) fn with_vsync(post_vsync: PostVsync) -> Self {
+         Self {
+             post_vsync: Some(post_vsync),
+-            interval,
+-            posted: Cell::new(false),
+-            due: Cell::new(false),
++            interval: Duration::ZERO,
++            vsync_ready: Cell::new(true),
++            wanted: Cell::new(false),
+             fallback_due_at: Cell::new(None),
+             last_frame_at: Cell::new(None),
+         }
+@@ -74,52 +65,38 @@
+         Self {
+             post_vsync: None,
+             interval,
+-            posted: Cell::new(false),
+-            due: Cell::new(false),
++            vsync_ready: Cell::new(true),
++            wanted: Cell::new(false),
+             fallback_due_at: Cell::new(None),
+             last_frame_at: Cell::new(None),
+         }
+     }
+ 
+-    /// Records demand for a frame. The first demand since the last frame
+-    /// posts a vsync callback; later ones ride on it. Demand that arrives an
+-    /// interval or more after the last frame began is due at once (see the
+-    /// module docs).
++    /// Request a draw. Repeated requests before a tick share that frame.
+     pub(crate) fn schedule(&self, now: Instant) {
+-        if self.posted.get() || self.due.get() || self.fallback_due_at.get().is_some() {
+-            return;
+-        }
+-        let interval_elapsed = self
+-            .last_frame_at
+-            .get()
+-            .is_none_or(|last| now.duration_since(last) >= self.interval);
+-        match &self.post_vsync {
+-            Some(_) if interval_elapsed => self.due.set(true),
+-            Some(post) => {
+-                self.posted.set(true);
+-                post();
++        if self.post_vsync.is_some() {
++            self.wanted.set(true);
++        } else if self.fallback_due_at.get().is_none() {
++            let earliest = self
++                .last_frame_at
++                .get()
++                .map_or(now, |last| last + self.interval);
++            self.fallback_due_at.set(Some(earliest.max(now)));
++        }
++    }
++
++    pub(crate) fn on_vsync(&self) {
++        self.vsync_ready.set(true);
++    }
++
++    pub(crate) fn take_frame(&self, now: Instant) -> bool {
++        if let Some(post) = &self.post_vsync {
++            if !self.wanted.get() || !self.vsync_ready.get() {
++                return false;
+             }
+-            None => {
+-                let earliest = self
+-                    .last_frame_at
+-                    .get()
+-                    .map_or(now, |last| last + self.interval);
+-                self.fallback_due_at.set(Some(earliest.max(now)));
+-            }
+-        }
+-    }
+-
+-    /// The posted vsync callback fired: the frame it owes is now due.
+-    pub(crate) fn on_vsync(&self) {
+-        self.posted.set(false);
+-        self.due.set(true);
+-    }
+-
+-    /// Takes the due frame, if any. The loop draws when this returns `true`
+-    /// and only then; a frame left untaken (window inactive) stays due.
+-    pub(crate) fn take_frame(&self, now: Instant) -> bool {
+-        if self.due.replace(false) {
+-            self.last_frame_at.set(Some(now));
++            self.wanted.set(false);
++            self.vsync_ready.set(false);
++            post();
+             return true;
+         }
+         match self.fallback_due_at.get() {
+@@ -132,20 +109,16 @@
+         }
+     }
+ 
+-    /// Whether a frame is wanted: posted, due, or waiting on the fallback
+-    /// clock.
++    /// Whether a frame was requested.
+     #[cfg(test)]
+     fn has_demand(&self) -> bool {
+-        self.posted.get() || self.due.get() || self.fallback_due_at.get().is_some()
+-    }
+-
+-    /// Forgets a posted callback (the vsync source may have been paused
+-    /// while the app was in the background) and posts afresh so demand that
+-    /// piled up meanwhile is served. A stale callback that fires later marks
+-    /// one extra frame due, which GPUI answers with a no-op when nothing is
+-    /// dirty.
++        self.wanted.get() || self.fallback_due_at.get().is_some()
++    }
++
++    /// Surface recreation can discard an outstanding callback. Allow the
++    /// first frame immediately and arm the source again when it is taken.
+     pub(crate) fn resume(&self, now: Instant) {
+-        self.posted.set(false);
++        self.vsync_ready.set(true);
+         self.schedule(now);
+     }
+ 
+@@ -154,7 +127,7 @@
+     /// `None` when only the vsync callback (delivered through the looper) or
+     /// an unrelated wakeup can bring work.
+     pub(crate) fn poll_timeout(&self, now: Instant) -> Option<Duration> {
+-        if self.due.get() {
++        if self.wanted.get() && self.vsync_ready.get() {
+             return Some(Duration::ZERO);
+         }
+         self.fallback_due_at
+@@ -175,8 +148,7 @@
+     fn vsync_pacer_after_frame(now: Instant) -> (FramePacer, Rc<Cell<u32>>) {
+         let posts = Rc::new(Cell::new(0));
+         let counter = Rc::clone(&posts);
+-        let pacer =
+-            FramePacer::with_vsync(Box::new(move || counter.set(counter.get() + 1)), INTERVAL);
++        let pacer = FramePacer::with_vsync(Box::new(move || counter.set(counter.get() + 1)));
+         pacer.schedule(now);
+         assert!(pacer.take_frame(now), "the first frame is served at once");
+         (pacer, posts)
+@@ -186,8 +158,7 @@
+     fn first_frame_does_not_wait_for_a_vsync() {
+         let posts = Rc::new(Cell::new(0));
+         let counter = Rc::clone(&posts);
+-        let pacer =
+-            FramePacer::with_vsync(Box::new(move || counter.set(counter.get() + 1)), INTERVAL);
++        let pacer = FramePacer::with_vsync(Box::new(move || counter.set(counter.get() + 1)));
+         let now = Instant::now();
+ 
+         pacer.schedule(now);
+@@ -198,7 +169,7 @@
+     }
+ 
+     #[test]
+-    fn demand_posts_one_callback_until_it_fires() {
++    fn demand_shares_the_callback_armed_by_the_previous_frame() {
+         let now = Instant::now();
+         let (pacer, posts) = vsync_pacer_after_frame(now);
+         let now = now + Duration::from_millis(1);
+@@ -218,87 +189,52 @@
+     }
+ 
+     #[test]
+-    fn vsync_makes_one_frame_due_and_the_next_demand_posts_again() {
+-        let now = Instant::now();
+-        let (pacer, posts) = vsync_pacer_after_frame(now);
+-        let now = now + Duration::from_millis(1);
+-
+-        pacer.schedule(now);
+-        pacer.on_vsync();
+-        assert_eq!(pacer.poll_timeout(now), Some(Duration::ZERO));
+-        assert!(pacer.take_frame(now));
+-        assert!(!pacer.take_frame(now), "a vsync owes exactly one frame");
++    fn late_input_uses_the_unused_tick_without_an_idle_draw() {
++        let now = Instant::now();
++        let (pacer, posts) = vsync_pacer_after_frame(now);
++        let tick = now + Duration::from_micros(8333);
++        pacer.on_vsync();
++        assert!(!pacer.take_frame(tick));
++        assert_eq!(pacer.poll_timeout(tick), None);
++        assert_eq!(posts.get(), 1);
++
++        let input = tick + Duration::from_micros(300);
++        pacer.schedule(input);
++        assert!(pacer.take_frame(input));
++        assert_eq!(posts.get(), 2);
++        pacer.schedule(input);
++        assert!(!pacer.take_frame(input));
++        pacer.on_vsync();
++        assert!(pacer.take_frame(tick + Duration::from_micros(8333)));
++    }
++
++    #[test]
++    fn vsync_during_a_slow_draw_is_available_after_it_finishes() {
++        let now = Instant::now();
++        let (pacer, posts) = vsync_pacer_after_frame(now);
++        assert_eq!(posts.get(), 1);
++        pacer.on_vsync();
++        let finish = now + Duration::from_millis(12);
++        pacer.schedule(finish);
++        assert!(pacer.take_frame(finish));
++        assert!(!pacer.take_frame(finish));
++        assert_eq!(posts.get(), 2);
++    }
++
++    #[test]
++    fn untaken_demand_survives_an_inactive_window_and_resume() {
++        let now = Instant::now();
++        let (pacer, posts) = vsync_pacer_after_frame(now);
++        pacer.schedule(now);
++        assert!(pacer.has_demand());
++        let resume = now + Duration::from_secs(5);
++        pacer.resume(resume);
++        assert!(pacer.take_frame(resume));
++        assert_eq!(posts.get(), 2);
++        pacer.on_vsync();
++        pacer.on_vsync();
++        assert!(!pacer.take_frame(resume));
+         assert!(!pacer.has_demand());
+-
+-        pacer.schedule(now + Duration::from_millis(1));
+-        assert_eq!(posts.get(), 2);
+-    }
+-
+-    #[test]
+-    fn demand_while_a_frame_is_due_does_not_post() {
+-        let now = Instant::now();
+-        let (pacer, posts) = vsync_pacer_after_frame(now);
+-        let now = now + Duration::from_millis(1);
+-
+-        pacer.schedule(now);
+-        pacer.on_vsync();
+-        pacer.schedule(now);
+-
+-        assert_eq!(posts.get(), 1);
+-        assert!(pacer.take_frame(now));
+-        assert!(!pacer.take_frame(now));
+-    }
+-
+-    #[test]
+-    fn a_frame_that_overran_the_interval_is_served_at_once() {
+-        let now = Instant::now();
+-        let (pacer, posts) = vsync_pacer_after_frame(now);
+-
+-        // The frame taken at `now` took 40 ms; the vsync it would wait for
+-        // has passed, so the demand it re-raised is due right away.
+-        let later = now + Duration::from_millis(40);
+-        pacer.schedule(later);
+-
+-        assert_eq!(posts.get(), 0);
+-        assert_eq!(pacer.poll_timeout(later), Some(Duration::ZERO));
+-        assert!(pacer.take_frame(later));
+-
+-        // Back within the interval: vsync pacing again.
+-        pacer.schedule(later + Duration::from_millis(5));
+-        assert_eq!(posts.get(), 1);
+-    }
+-
+-    #[test]
+-    fn untaken_frame_stays_due_for_an_inactive_window() {
+-        let now = Instant::now();
+-        let (pacer, _posts) = vsync_pacer_after_frame(now);
+-        let now = now + Duration::from_millis(1);
+-
+-        pacer.schedule(now);
+-        pacer.on_vsync();
+-        // The loop skips drawing while inactive …
+-        assert!(pacer.has_demand());
+-        // … and draws the owed frame once it is active again.
+-        assert!(pacer.take_frame(now + Duration::from_secs(5)));
+-    }
+-
+-    #[test]
+-    fn resume_reposts_a_callback_that_may_never_fire() {
+-        let now = Instant::now();
+-        let (pacer, posts) = vsync_pacer_after_frame(now);
+-        let now = now + Duration::from_millis(1);
+-
+-        pacer.schedule(now);
+-        assert_eq!(posts.get(), 1);
+-
+-        pacer.resume(now);
+-        assert_eq!(posts.get(), 2);
+-
+-        // The stale callback and the fresh one both fire: still one frame.
+-        pacer.on_vsync();
+-        pacer.on_vsync();
+-        assert!(pacer.take_frame(now));
+-        assert!(!pacer.take_frame(now));
+     }
+ 
+     #[test]
+--- a/src/android/frame_source.rs
++++ b/src/android/frame_source.rs
+@@ -15,12 +15,12 @@
+ //!    `schedule_frame` (both forwarded here by `AndroidPlatformWindow`), a
+ //!    surface swap or a resume raise it through [`resume`], and software
+ //!    keyboard input raises it from the UI thread through [`wake`].
+-//! 2. The first demand since the last frame asks the vsync thread to post
+-//!    one `AChoreographer` frame callback. When it fires, the vsync thread
+-//!    marks a frame due and wakes the loop's `ALooper`.
++//! 2. Taking a frame posts one callback on the Activity's UI choreographer
++//!    (the native choreographer for embedded hosts). The callback marks a
++//!    tick available after input delivery and wakes the render loop.
+ //! 3. The loop takes the due frame with [`take_frame`] and ticks GPUI once.
+ //!    A frame that left the window dirty (an animation, a fling) re-raises
+-//!    demand from inside the tick, which posts the next callback.
++//!    demand from inside the tick. A spare tick without demand draws nothing.
+ //!
+ //! Between frames the loop blocks on the looper for as long as
+ //! [`poll_timeout`] allows; input, main-thread tasks and lifecycle commands
+@@ -42,8 +42,9 @@
+     cell::RefCell,
+     ptr,
+     sync::{
++        OnceLock,
+         atomic::{AtomicBool, AtomicPtr, Ordering},
+-        mpsc, OnceLock,
++        mpsc,
+     },
+     time::{Duration, Instant},
+ };
+@@ -54,10 +55,7 @@
+ /// this much latency instead of a frozen app.
+ const IDLE_POLL_CAP: Duration = Duration::from_secs(1);
+ 
+-/// The refresh interval the pacer assumes: a frame slower than this stops
+-/// waiting for vsyncs, and the clock fallback spaces frames by it. 60 Hz is
+-/// the common case; a faster display only makes an overrunning frame wait
+-/// one extra vsync before pacing gives way.
++/// Frame spacing only on devices without a choreographer.
+ const REFRESH_INTERVAL: Duration = Duration::from_micros(16_667);
+ 
+ thread_local! {
+@@ -87,31 +85,61 @@
+ 
+ /// Installs the pacer on the calling thread, which must own an `ALooper`
+ /// (`android-activity`'s native thread, or the host render thread after
+-/// `ALooper_prepare`). Idempotent; spawns the vsync thread on first use.
+-pub(crate) fn install() {
++/// `ALooper_prepare`). The Activity clock delivers input and animation in the same UI traversal.
++pub(crate) fn install(activity_clock: bool) {
+     // SAFETY: plain query of the calling thread's looper.
+     let looper = unsafe { ndk_sys::ALooper_forThread() };
+     MAIN_LOOPER.store(looper, Ordering::Release);
+ 
+-    let has_choreographer = *VSYNC_THREAD.get_or_init(spawn_vsync_thread);
+     PACER.with(|slot| {
+         if slot.borrow().is_some() {
+             return;
+         }
+-        let pacer = if has_choreographer {
+-            FramePacer::with_vsync(
+-                Box::new(|| {
+-                    POST_REQUESTED.store(true, Ordering::Release);
+-                    wake_looper(&VSYNC_LOOPER);
+-                }),
+-                REFRESH_INTERVAL,
+-            )
++        let pacer = if activity_clock && post_activity_frame().is_ok() {
++            FramePacer::with_vsync(Box::new(|| {
++                if let Err(error) = post_activity_frame() {
++                    log::warn!("Activity frame callback unavailable: {error}");
++                    post_native_frame();
++                }
++            }))
++        } else if *VSYNC_THREAD.get_or_init(spawn_vsync_thread) {
++            FramePacer::with_vsync(Box::new(post_native_frame))
+         } else {
+             log::warn!("frame_source: no AChoreographer available; pacing by clock");
+             FramePacer::with_clock(REFRESH_INTERVAL)
+         };
+         *slot.borrow_mut() = Some(pacer);
+     });
++}
++
++// The UI choreographer runs animation callbacks after its input phase.
++fn post_activity_frame() -> Result<(), String> {
++    super::jni::with_env(|env| {
++        let activity = super::jni::activity(env)?;
++        env.call_method(&activity, jni::jni_str!("gpuiPostFrame"), jni::jni_sig!("()V"), &[])
++            .map_err(|err| {
++                env.exception_clear();
++                err.to_string()
++            })?;
++        Ok(())
++    })
++}
++
++fn post_native_frame() {
++    if *VSYNC_THREAD.get_or_init(spawn_vsync_thread) {
++        POST_REQUESTED.store(true, Ordering::Release);
++        wake_looper(&VSYNC_LOOPER);
++    } else {
++        frame_tick();
++    }
++}
++
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeFrameTick(
++    _env: jni::EnvUnowned,
++    _class: jni::objects::JClass,
++) {
++    frame_tick();
+ }
+ 
+ /// Starts the vsync thread and waits until it reports whether it has a
+@@ -172,6 +200,10 @@
+     _frame_time_nanos: std::os::raw::c_long,
+     _data: *mut std::ffi::c_void,
+ ) {
++    frame_tick();
++}
++
++fn frame_tick() {
+     FRAME_DUE.store(true, Ordering::Release);
+     wake_looper(&MAIN_LOOPER);
+ }
+--- a/src/android/jni.rs
++++ b/src/android/jni.rs
+@@ -615,7 +615,7 @@
+     // returned so focus/input events have already been drained.
+     INIT_WINDOW_DONE.store(false, Ordering::Relaxed);
+     // Vsync pacing lives on this thread's looper.
+-    super::frame_source::install();
++    super::frame_source::install(true);
+     let mut iteration: u64 = 0;
+     let mut last_heartbeat = std::time::Instant::now();
+     let mut app_is_active = false;
+--- a/src/android/host.rs
++++ b/src/android/host.rs
+@@ -196,7 +196,7 @@
+     );
+     *LOOPER.lock().expect("poisoned") = Some(LooperPtr(looper));
+     log::info!("gpui-main: render thread started, looper={looper:p}");
+-    super::frame_source::install();
++    super::frame_source::install(false);
+ 
+     // The platform must be built **here**: `AndroidDispatcher::new()` captures
+     // `ALooper_forThread()`, and GPUI compares it against the calling thread forever after.
+--- a/example/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiInputActivity.java
++++ b/example/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiInputActivity.java
+@@ -20,2 +20,16 @@
+ public class GpuiInputActivity extends NativeActivity {
++    private final android.view.Choreographer frameClock = android.view.Choreographer.getInstance();
++    private final java.util.concurrent.atomic.AtomicBoolean framePending =
++            new java.util.concurrent.atomic.AtomicBoolean();
++    private final android.view.Choreographer.FrameCallback frameCallback = time -> {
++        framePending.set(false);
++        nativeFrameTick();
++    };
++
++    public void gpuiPostFrame() {
++        if (framePending.compareAndSet(false, true)) frameClock.postFrameCallback(frameCallback);
++    }
++
++    private static native void nativeFrameTick();
++
+     private InputProxy input;

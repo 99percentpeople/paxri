@@ -1,0 +1,134 @@
+--- a/example/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiInputActivity.java
++++ b/example/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiInputActivity.java
+@@ -14,6 +14,7 @@
+ import android.view.inputmethod.InputConnection;
+ import android.view.inputmethod.InputConnectionWrapper;
+ import android.view.inputmethod.InputMethodManager;
++import android.view.inputmethod.TextAttribute;
+ import android.widget.EditText;
+ 
+ /** NativeActivity with a UI-thread InputConnection for multistage IMEs. */
+@@ -51,6 +52,7 @@
+             }
+             input.setInputType(type);
+             input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
++            configureIme(input, session);
+             input.requestFocus();
+             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+             imm.restartInput(input);
+@@ -96,7 +98,7 @@
+ 
+         @Override public boolean onKeyDown(int code, KeyEvent event) {
+             if (code == KeyEvent.KEYCODE_DEL && getText().length() == 0 && !marked) {
+-                nativeIme(session, 3, "", 1, 0);
++                deliverIme(session, 3, "", 1, 0);
+                 return true;
+             }
+             return super.onKeyDown(code, event);
+@@ -115,7 +117,7 @@
+             Editable text = getText();
+             boolean composing = BaseInputConnection.getComposingSpanStart(text) >= 0;
+             if (composing || marked || text.length() > 0) {
+-                nativeIme(session, composing ? 0 : 1, text.toString(),
++                deliverIme(session, composing ? 0 : 1, text.toString(),
+                         Math.max(0, Selection.getSelectionStart(text)),
+                         Math.max(0, Selection.getSelectionEnd(text)));
+                 marked = composing;
+@@ -129,7 +131,7 @@
+ 
+         @Override public boolean onKeyPreIme(int code, KeyEvent event) {
+             if (code == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
+-                nativeIme(session, 4, "", 0, 0);
++                deliverIme(session, 4, "", 0, 0);
+             }
+             return super.onKeyPreIme(code, event);
+         }
+@@ -138,11 +140,12 @@
+             InputConnection connection = super.onCreateInputConnection(info);
+             if (connection == null) return null;
+             final long connectionSession = session;
+-            return new InputConnectionWrapper(connection, false) {
++            InputConnection guarded = new InputConnectionWrapper(connection, false) {
+                 @Override public boolean beginBatchEdit() {
+                     if (connectionSession != session) return false;
+-                    depth++;
+-                    return super.beginBatchEdit();
++                    if (!super.beginBatchEdit()) return false;
++                    depth++;
++                    return true;
+                 }
+                 @Override public boolean endBatchEdit() {
+                     if (connectionSession != session) return false;
+@@ -183,7 +186,7 @@
+                 @Override public boolean deleteSurroundingText(int before, int after) {
+                     if (connectionSession != session) return false;
+                     if (getText().length() == 0 && !marked) {
+-                        nativeIme(session, 2, "", before, after);
++                        deliverIme(session, 2, "", before, after);
+                         return true;
+                     }
+                     depth++;
+@@ -193,7 +196,7 @@
+                 @Override public boolean deleteSurroundingTextInCodePoints(int before, int after) {
+                     if (connectionSession != session) return false;
+                     if (getText().length() == 0 && !marked) {
+-                        nativeIme(session, 3, "", before, after);
++                        deliverIme(session, 3, "", before, after);
+                         return true;
+                     }
+                     depth++;
+@@ -216,13 +219,52 @@
+                     if (connectionSession != session) return false;
+                     if (action == EditorInfo.IME_ACTION_DONE) {
+                         finishComposingText();
+-                        nativeIme(session, 4, "", 0, 0);
++                        deliverIme(session, 4, "", 0, 0);
+                         return true;
+                     }
+                     return commitText("\n", 1);
+                 }
+             };
+-        }
++            return android.os.Build.VERSION.SDK_INT >= 33 ? new AttributedEdits(guarded) : guarded;
++        }
++    }
++
++    // InputConnectionWrapper forwards the attributed overloads directly to the
++    // editor. Include them in the same batch and session checks as legacy IMEs.
++    @android.annotation.TargetApi(33)
++    private static class AttributedEdits extends InputConnectionWrapper {
++        AttributedEdits(InputConnection target) { super(target, false); }
++
++        @Override public boolean setComposingText(CharSequence text, int cursor, TextAttribute attr) {
++            if (!beginBatchEdit()) return false;
++            try { return super.setComposingText(text, cursor, attr); }
++            finally { endBatchEdit(); }
++        }
++
++        @Override public boolean setComposingRegion(int start, int end, TextAttribute attr) {
++            if (!beginBatchEdit()) return false;
++            try { return super.setComposingRegion(start, end, attr); }
++            finally { endBatchEdit(); }
++        }
++
++        @Override public boolean commitText(CharSequence text, int cursor, TextAttribute attr) {
++            if (!beginBatchEdit()) return false;
++            try { return super.commitText(text, cursor, attr); }
++            finally { endBatchEdit(); }
++        }
++
++        @android.annotation.TargetApi(34)
++        @Override public boolean replaceText(int start, int end, CharSequence text, int cursor, TextAttribute attr) {
++            if (!beginBatchEdit()) return false;
++            try { return super.replaceText(start, end, text, cursor, attr); }
++            finally { endBatchEdit(); }
++        }
++    }
++
++    protected void configureIme(EditText field, long session) {}
++
++    protected void deliverIme(long session, int kind, String text, int start, int end) {
++        nativeIme(session, kind, text, start, end);
+     }
+ 
+     private static native void nativeIme(long session, int kind, String text, int start, int end);

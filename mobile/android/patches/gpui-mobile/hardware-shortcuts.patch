@@ -1,0 +1,33 @@
+--- a/src/android/window.rs
++++ b/src/android/window.rs
+@@ -1507,6 +1507,21 @@
+                     android_key_to_keystroke, AKEY_EVENT_ACTION_DOWN, AKEY_EVENT_ACTION_UP,
+                 };
+ 
++                // A Ctrl shortcut can also produce printable text. Let the focused view
++                // consume the key before sending that text to an editor or a PTY.
++                let mut control_down = false;
++                if key_event.action == AKEY_EVENT_ACTION_DOWN {
++                    if let Some(keystroke) = android_key_to_keystroke(
++                        key_event.key_code, key_event.meta_state, key_event.unicode_char,
++                    ).filter(|key| key.modifiers.control) {
++                        control_down = true;
++                        let result = cb.lock()(gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
++                            keystroke, is_held: false, prefer_character_input: false,
++                        }));
++                        if result.default_prevented { return; }
++                    }
++                }
++
+                 // On KeyDown, dispatch text through the global callback so
+                 // custom TextInput components (PENDING_TEXT) receive it.
+                 if key_event.action == AKEY_EVENT_ACTION_DOWN {
+@@ -1527,6 +1542,8 @@
+                         }
+                     };
+                 }
++
++                if control_down { return; }
+ 
+                 let keystroke = match android_key_to_keystroke(
+                     key_event.key_code,
