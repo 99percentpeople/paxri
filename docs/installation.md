@@ -96,7 +96,7 @@ Compose uses the host network and hostname on native Linux. A forward to `127.0.
 
 ### Offline or local image
 
-Download the Docker artifact for the target CPU and the `paxri-build-info` artifact from the same Actions run. Extract both into the same directory. For example, on ARM64 run:
+Download the Docker `.tar.gz` for the target CPU. Extract `paxri-build-info` from the same Actions run into the directory containing the tarball. For example, on ARM64 run:
 
 ```sh
 docker load -i paxri-docker-linux-arm64.tar.gz

@@ -15,13 +15,12 @@ gh run list --workflow builds.yml --branch main
 
 ## Download a build
 
-Open a successful run and download the artifact for your OS, CPU, and, on Linux, libc. Linux publishes `paxri-linux-amd64-glibc`, `paxri-linux-arm64-glibc`, and `paxri-linux-arm64-musl`. Each contains the CLI, gateway, and GUI under `bin/`, dynamically linked to the selected libc. The `paxri-build-info` artifact contains `SHA256SUMS`, `compose.yaml`, and a `build.env` file that pins the gateway image to that commit. All files used together should come from the same run.
+Download the package for your OS and CPU from the rolling prerelease or an Actions run. Actions serves the original `.zip`, `.tar.gz`, or `.apk` file directly. The `paxri-build-info` artifact groups `SHA256SUMS`, `compose.yaml`, and the `build.env` file that pins the gateway image to the same commit.
 
-For example, from the repository checkout, replace `RUN_ID` with the run ID from the list above. These commands download and verify the ARM64 musl archive.
+For example, to download and verify the current ARM64 musl package from the repository checkout:
 
 ```sh
-gh run download RUN_ID -n paxri-linux-arm64-musl -D download
-gh run download RUN_ID -n paxri-build-info -D download
+gh release download rolling --pattern paxri-linux-arm64-musl.tar.gz --pattern SHA256SUMS --dir download
 (cd download && sha256sum -c --ignore-missing SHA256SUMS)
 ```
 
