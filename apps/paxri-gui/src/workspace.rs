@@ -1,7 +1,7 @@
 //! A workspace window owns its tabs; detached windows share the same gateway controller.
 use super::*;
 use crate::components::{
-    DropdownState, Icon, Ui,
+    Icon, Ui,
     dock::{DockDrag, DockLayout, DockPanel, DockPlacement, DockSettings, DockState, DockTabs},
     observe_window_focus, tooltip,
 };
@@ -127,7 +127,6 @@ pub(super) struct Workspace {
     tabs: Vec<Page>,
     active: Page,
     dock: Entity<DockState<Page>>,
-    session_menu: Entity<DropdownState>,
     rename: Option<TabRename>,
     tab_focus: FocusHandle,
     dragged_tab: Option<TabDrag>,
@@ -226,7 +225,6 @@ impl Workspace {
                     tabs: vec![page.clone()],
                     active: page,
                     dock: DockState::new(settings, w, cx),
-                    session_menu: DropdownState::new(w, cx),
                     rename: None,
                     tab_focus,
                     dragged_tab: None,
@@ -282,7 +280,6 @@ impl Workspace {
             self.dashboard.update(cx, |d, cx| d.inspect_startup(cx));
         }
         self.active = page;
-        self.session_menu.update(cx, DropdownState::dismiss);
         cx.notify();
     }
 
@@ -317,6 +314,11 @@ impl Workspace {
                     .update(cx, |v, w, cx| v.focus_tab(page.clone(), w, cx))
                     .is_ok()
             })
+    }
+
+    pub(crate) fn show_sessions(&mut self, peer: Option<String>, w: &mut Window, cx: &mut Context<Self>) {
+        self.dashboard.update(cx, |d, cx| d.show_sessions(peer, cx));
+        self.show_page(Page::Home, w, cx);
     }
 
     fn show_page(&mut self, page: Page, w: &mut Window, cx: &mut Context<Self>) {
@@ -375,7 +377,6 @@ impl Workspace {
     fn take_tab(&mut self, page: &Page, w: &mut Window, cx: &mut Context<Self>) {
         self.dragged_tab = None;
         self.tab_indent = px(0.);
-        self.session_menu.update(cx, DropdownState::dismiss);
         self.remove_tab(page, w, cx);
     }
 
@@ -470,10 +471,8 @@ impl Workspace {
             .downcast::<Self>()
             .expect("workspace root");
         let mut strip = DockTabs::new("workspace-tab-list", &self.dock)
-            .indent(self.tab_indent);
-        if let Some(menu) = self.new_session_menu(ui, cx) {
-            strip = strip.trailing(menu);
-        }
+            .indent(self.tab_indent)
+            .trailing(self.tab_session_launcher(ui, cx));
         let settings = self.dock.read(cx).settings();
         for page in &self.tabs {
             let editor = self.rename.as_ref().filter(|edit| edit.matches(page));

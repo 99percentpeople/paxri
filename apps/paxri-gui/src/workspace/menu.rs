@@ -1,42 +1,48 @@
 use super::*;
-use crate::components::{
-    Button, ButtonVariant::Ghost, Dropdown, DropdownContent, DropdownTrigger, single_line,
-};
+use crate::components::ButtonVariant::Ghost;
+use paxri_ui::components::directory::SessionLauncher;
 
 impl Workspace {
-    pub(super) fn new_session_menu(&self, ui: Ui, cx: &Context<Self>) -> Option<Dropdown<Button>> {
-        let status = self.dashboard.read(cx).status.as_ref()?;
-        let mut peers = status
-            .peers_by_last_change()
-            .into_iter()
-            .filter(|(name, _)| status.can_open_shell(name))
-            .peekable();
-        peers.peek()?;
-        let dock = self.dock.read(cx);
-        let button = if dock.placement() == DockPlacement::Left {
-            ui.button(
-                Ghost,
-                "new-session",
-                single_line(div()).child("New session"),
-            )
-            .icon(Icon::Terminal)
-            .row()
-            .tooltip(tooltip("New terminal session".into()))
+    pub(super) fn tab_session_launcher(&self, ui: Ui, cx: &Context<Self>) -> SessionLauncher {
+        let peers: Vec<_> =
+            self.dashboard
+                .read(cx)
+                .status
+                .as_ref()
+                .map_or_else(Vec::new, |status| {
+                    status
+                        .peers_by_last_change()
+                        .into_iter()
+                        .filter(|(peer, _)| status.can_open_shell(peer))
+                        .map(|(peer, _)| {
+                            (
+                                peer.clone(),
+                                status.peer_display_name(peer).to_owned(),
+                                status.peer_platform(peer),
+                            )
+                        })
+                        .collect()
+                });
+        let hint = if peers.is_empty() {
+            "No devices available for a terminal session"
         } else {
-            ui.icon_button(Ghost, "new-session", Icon::Terminal, "New terminal session")
+            "New terminal session"
         };
-        let trigger = DropdownTrigger::new(button.pressed(self.session_menu.read(cx).is_open()));
-        let mut content = DropdownContent::new();
-        for (name, _) in peers {
-            let peer = SharedString::from(name.clone());
-            let label = Icon::device(status.peer_platform(name)).label(status.peer_display_name(name).to_owned());
-            let workspace = cx.weak_entity();
-            content = content.item(peer.clone(), label, move |window, cx| {
-                let _ =
-                    workspace.update(cx, |view, cx| view.new_terminal(peer.clone(), window, cx));
-            });
-        }
-        Some(Dropdown::new(&self.session_menu, trigger, content).align_start())
+        let button = match self.dock.read(cx).placement() {
+            DockPlacement::Top => ui.icon_button(Ghost, "new-session-tab", Icon::Plus, hint),
+            DockPlacement::Left => ui
+                .button(Ghost, "new-session-tab", "New session")
+                .icon(Icon::Plus)
+                .row()
+                .tooltip(tooltip(hint.into())),
+        };
+        SessionLauncher::new(
+            button,
+            peers,
+            cx.listener(|v, peer: &String, w, cx| {
+                v.new_terminal(peer.clone().into(), w, cx);
+            }),
+        )
     }
 
     pub(super) fn titlebar_actions(&self, ui: Ui, cx: &Context<Self>) -> Div {
@@ -44,13 +50,24 @@ impl Workspace {
             .flex()
             .flex_none()
             .px_1()
-            .when(matches!(&self.active, Page::Terminal { view, .. } if view.read(cx).is_running()), |row| {
-                row.child(ui.end_session_button()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Page::Terminal { view, .. } = &this.active {
-                            view.update(cx, |terminal, _| terminal.end());
-                        }
-                    })))
+            .when(
+                matches!(&self.active, Page::Terminal { view, .. } if view.read(cx).is_running()),
+                |row| {
+                    row.child(
+                        ui.end_session_button()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Page::Terminal { view, .. } = &this.active {
+                                    view.update(cx, |terminal, _| terminal.end());
+                                }
+                            })),
+                    )
+                },
+            )
+            .when(self.active != Page::Home, |row| {
+                row.child(
+                    ui.icon_button(Ghost, "open-sessions", Icon::Terminal, "Sessions")
+                        .on_click(cx.listener(|v, _, w, cx| v.show_sessions(None, w, cx))),
+                )
             })
             .when(!self.tabs.contains(&Page::Home), |row| {
                 row.child(
