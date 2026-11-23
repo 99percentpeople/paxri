@@ -18,12 +18,12 @@ impl RenderOnce for TerminalPreview {
         let cell_height = font.cell.height;
         let grid = GridSize { rows: 6, cols: 38 };
         let diff = concat!(
-            "\x1b[36m~\x1b[0m $ git diff\r\n",
+            "\x1b[46;30m ~ \x1b[0;36m\x1b[0m git diff\r\n",
             "\x1b[2mdiff --git a/demo b/demo\x1b[0m\r\n",
             "\x1b[36m@@ -1 +1 @@\x1b[0m\r\n",
             "\x1b[31m-hello\x1b[0m\r\n",
             "\x1b[32m+hello, world\x1b[0m\r\n",
-            "\x1b[36m~\x1b[0m $ ",
+            "\x1b[46;30m ~ \x1b[0;36m\x1b[0m $ ",
         );
         let sample = window.use_keyed_state("terminal-appearance-preview", cx, |_, _| {
             let mut screen = Emulator::with_palette(grid, palette, font.clone());

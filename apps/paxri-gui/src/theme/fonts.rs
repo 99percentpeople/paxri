@@ -1,6 +1,10 @@
 //! Local font faces and the character-cell dimensions shared by the terminal and its preview.
 use gpui::App;
-use std::collections::{BTreeSet, HashSet};
+use paxri_ui::theme::fonts::TERMINAL_SYMBOL_FONT;
+use std::{
+    borrow::Cow,
+    collections::{BTreeSet, HashSet},
+};
 
 const PLATFORM_FONT: &str = if cfg!(windows) {
     "Consolas"
@@ -13,6 +17,9 @@ pub(crate) use paxri_ui::theme::fonts::{CellSize, Face, MonospaceFonts};
 
 pub(super) fn init(cx: &mut App) {
     let text = cx.text_system().clone();
+    if let Err(error) = text.add_fonts(vec![Cow::Borrowed(TERMINAL_SYMBOL_FONT)]) {
+        eprintln!("Registering terminal symbol font: {error}");
+    }
     let platform = Face::measure(PLATFORM_FONT.into(), &text);
     cx.set_global(MonospaceFonts {
         installed: Vec::new(),

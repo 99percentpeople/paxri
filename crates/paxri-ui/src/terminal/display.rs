@@ -1,9 +1,15 @@
+mod contrast;
+
 use super::{
-    cursor::{CursorCell, Preedit},
+    cursor::{self, CursorCell, Preedit},
     emulator::Emulator,
+    grid_glyph,
 };
 use crate::components::caret::GlyphSpan;
-use crate::theme::{TerminalPalette, fonts::TerminalFont};
+use crate::theme::{
+    TerminalPalette,
+    fonts::{TERMINAL_SYMBOL_FAMILY, TerminalFont},
+};
 use alacritty_terminal::{
     grid::Dimensions,
     index::{Column, Point as GridPoint},
@@ -14,7 +20,8 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor},
 };
 use gpui::{
-    App, Bounds, FontStyle, FontWeight, Pixels, Point, TextRun, Window, fill, point, px, rgb, size,
+    App, Bounds, ContentMask, FontStyle, FontWeight, Pixels, TextRun, Window, fill, font, point,
+    px, rgb, size,
 };
 
 pub fn color(value: Color, palette: &TerminalPalette, overrides: &Colors) -> u32 {
@@ -71,7 +78,40 @@ fn faint_color(foreground: u32, background: u32) -> u32 {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum GlyphSource {
+    Text,
+    WideText,
+    TerminalSymbol,
+    Grid(char),
+}
+
+impl GlyphSource {
+    fn for_cell(cell: &Cell) -> Self {
+        // Preserve composed text and emoji presentation selectors for the text shaper.
+        if cell.flags.intersects(Flags::HIDDEN | Flags::WIDE_CHAR_SPACER) {
+            return Self::Text;
+        }
+        if cell.flags.contains(Flags::WIDE_CHAR) {
+            return Self::WideText;
+        }
+        if cell.zerowidth().is_some_and(|marks| !marks.is_empty()) {
+            return Self::Text;
+        }
+        match cell.c {
+            '\u{2500}'..='\u{259f}' | '\u{e0b0}'..='\u{e0b3}' => Self::Grid(cell.c),
+            '\u{2190}'..='\u{2195}'
+            | '\u{23ce}'
+            | '\u{2713}'
+            | '\u{2800}'..='\u{28ff}'
+            | '\u{e0a0}'..='\u{e0a3}' => Self::TerminalSymbol,
+            _ => Self::Text,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct Style {
+    glyph: GlyphSource,
     fg: u32,
     bg: u32,
     bold: bool,
@@ -90,6 +130,7 @@ impl Style {
             std::mem::swap(&mut fg, &mut bg);
         }
         Self {
+            glyph: GlyphSource::for_cell(cell),
             fg,
             bg,
             bold: cell.flags.contains(Flags::BOLD),
@@ -97,6 +138,20 @@ impl Style {
             underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct CellPaint {
+    fg: u32,
+    bg: u32,
+    underline: bool,
+    block: bool,
+}
+
+struct PaintSpan {
+    start: u16,
+    end: u16,
+    paint: CellPaint,
 }
 
 fn append_glyph(text: &mut String, cell: &Cell) {
@@ -113,32 +168,26 @@ fn append_glyph(text: &mut String, cell: &Cell) {
     }
 }
 
-fn paint_run(
+fn paint_ink(
     text: &str,
-    cells: u16,
     typography: &TerminalFont,
+    baseline: Pixels,
     style: Style,
-    background: u32,
-    cursor_fill: Option<(Bounds<Pixels>, u32)>,
-    at: Point<Pixels>,
+    bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let width = px(typography.cell.width * f32::from(cells));
-    if style.bg != background {
-        window.paint_quad(fill(
-            Bounds::new(at, size(width, px(typography.cell.height))),
-            rgb(style.bg),
-        ));
-    }
-    if let Some((bounds, color)) = cursor_fill {
-        window.paint_quad(fill(bounds, rgb(color)));
-    }
     let visible = text.trim_end_matches(' ');
-    if !visible.is_empty() {
+    if let GlyphSource::Grid(ch) = style.glyph {
+        grid_glyph::paint(ch, bounds, style.fg, window);
+    } else if !visible.is_empty() {
         // ASCII padding has no glyph ink. Keep the original text for bidirectional shaping.
         let text = if visible.is_ascii() { visible } else { text };
-        let mut face = typography.face.clone();
+        let mut face = if style.glyph == GlyphSource::TerminalSymbol {
+            font(TERMINAL_SYMBOL_FAMILY)
+        } else {
+            typography.face.clone()
+        };
         if style.bold {
             face.weight = FontWeight::BOLD;
         }
@@ -153,12 +202,22 @@ fn paint_run(
             underline: None,
             strikethrough: None,
         };
+        let wide = style.glyph == GlyphSource::WideText;
         let shaped = window.text_system().shape_line(
             text.to_owned().into(),
             px(typography.size),
             &[run],
-            Some(px(typography.cell.width)),
+            (!wide).then(|| px(typography.cell.width)),
         );
+        // Center fullwidth clusters in their grid cells. Use the same primary-font
+        // baseline even when a spinner or a CJK character introduces a fallback face.
+        let x = if wide {
+            (bounds.size.width - shaped.width) / 2.
+        } else {
+            px(0.)
+        };
+        let layout_baseline = (px(typography.cell.height) + shaped.ascent - shaped.descent) / 2.;
+        let at = bounds.origin + point(x, baseline - layout_baseline);
         #[cfg(not(target_os = "android"))]
         let _ = shaped.paint(at, px(typography.cell.height), window, cx);
         #[cfg(target_os = "android")]
@@ -171,34 +230,16 @@ fn paint_run(
             cx,
         );
     }
-    if style.underline {
-        window.paint_quad(fill(
-            Bounds::new(
-                at + point(px(0.), px(typography.cell.height - 2.)),
-                size(width, px(1.)),
-            ),
-            rgb(style.fg),
-        ));
-    }
 }
 
-fn cursor_text_color(background: u32) -> u32 {
-    // Pick black or white using relative luminance so the glyph under a block stays legible.
-    let [_, r, g, b] = background.to_be_bytes();
-    let channel = |c: u8| {
-        let s = f32::from(c) / 255.;
-        if s <= 0.04045 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let luminance = 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-    if luminance > 0.179 {
-        0x000000
-    } else {
-        0xffffff
-    }
+fn paint_underline(bounds: Bounds<Pixels>, fg: u32, window: &mut Window) {
+    window.paint_quad(fill(
+        Bounds::new(
+            point(bounds.left(), bounds.bottom() - px(2.)),
+            size(bounds.size.width, px(1.)),
+        ),
+        rgb(fg),
+    ));
 }
 
 pub fn paint(
@@ -222,14 +263,7 @@ pub fn paint(
         &screen.font.face,
         px(screen.font.size),
         px(screen.font.cell.height),
-        matches!(
-            cursor_shape,
-            Some(CursorShape::Block | CursorShape::Underline)
-        ) && marked.is_none(),
     );
-    let block = cursor
-        .filter(|_| marked.is_none() && cursor_shape == Some(CursorShape::Block))
-        .map(|cell| (cell, cursor_text_color(cursor_color)));
     let origin = |r: u16, c: u16| {
         bounds.origin
             + point(
@@ -237,102 +271,176 @@ pub fn paint(
                 px(f32::from(r) * screen.font.cell.height),
             )
     };
+    let scale = window.scale_factor();
+    let cell = screen.font.cell;
+    let caret = cursor.and_then(|c| {
+        let at = origin(c.point.line.0 as u16, c.point.column.0 as u16);
+        cursor::stroke(cursor_shape?, c.bounds(at, cell), span)
+    });
+    let block = cursor.filter(|_| marked.is_none() && cursor_shape == Some(CursorShape::Block));
+    let block_fg = contrast::black_or_white(cursor_color);
+    let light_surface = contrast::black_or_white(background) == 0x000000;
+    let mut text = String::new();
+    let mut spans: Vec<PaintSpan> = Vec::new();
     for row in 0..grid.screen_lines() as u16 {
         let line = screen.view_line(usize::from(row));
         let coord = |col: u16| GridPoint::new(line, Column(usize::from(col)));
-        let cell_style = |cell: &Cell, col| {
-            let mut style = Style::from_cell(cell, palette, overrides);
-            if selection.is_some_and(|s| s.contains(coord(col))) {
-                style.bg = palette.selection.background;
-                style.fg = palette.selection.foreground;
-            }
-            if let Some((cell, fg)) = block
-                && cell.covers(coord(col))
-            {
-                style.fg = fg;
-            }
-            style
-        };
+        let rect =
+            |start, end| grid_glyph::pixel_bounds(origin(row, start), origin(row + 1, end), scale);
         let mut col = 0;
         while col < cols {
             let first = col;
-            let cell = &grid[coord(col)];
-            let style = cell_style(cell, col);
-            let block_here = block.filter(|(cursor, _)| cursor.covers(coord(first)));
-            let mut text = String::new();
+            let face = Style::from_cell(&grid[coord(first)], palette, overrides);
+            text.clear();
+            spans.clear();
             while col < cols {
-                let cell = &grid[coord(col)];
-                if cell_style(cell, col) != style
-                    || block.is_some_and(|(cursor, _)| cursor.covers(coord(col)))
-                        != block_here.is_some()
-                    || (col > first && cell.flags.contains(Flags::WIDE_CHAR))
+                let start = col;
+                let c = &grid[coord(col)];
+                let style = Style::from_cell(c, palette, overrides);
+                // Shaping depends only on glyphs and font. A highlight, including one
+                // drawn by a TUI using SGR colors, must never move the rest of the row.
+                if col > first
+                    && (style.glyph != face.glyph
+                        || style.bold != face.bold
+                        || style.italic != face.italic
+                        || c.flags.contains(Flags::WIDE_CHAR)
+                        || matches!(face.glyph, GlyphSource::Grid(ch) if !grid_glyph::joins_horizontally(ch)))
                 {
                     break;
                 }
-                append_glyph(&mut text, cell);
+                append_glyph(&mut text, c);
                 col += 1;
-                if cell.flags.contains(Flags::WIDE_CHAR) {
-                    if col < cols && grid[coord(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
-                        col += 1;
-                    }
+                let wide = c.flags.contains(Flags::WIDE_CHAR);
+                if wide && col < cols && grid[coord(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    col += 1;
+                }
+                let selected = selection.is_some_and(|s| {
+                    s.contains(coord(start)) || (wide && s.contains(coord(col - 1)))
+                });
+                let block_here = block.is_some_and(|c| c.covers(coord(start)));
+                let paint = CellPaint {
+                    fg: if block_here {
+                        block_fg
+                    } else if selected {
+                        palette.selection.foreground
+                    } else {
+                        style.fg
+                    },
+                    bg: if selected {
+                        palette.selection.background
+                    } else {
+                        style.bg
+                    },
+                    underline: style.underline,
+                    block: block_here,
+                };
+                if let Some(last) = spans.last_mut()
+                    && last.paint == paint
+                {
+                    last.end = col;
+                } else {
+                    spans.push(PaintSpan {
+                        start,
+                        end: col,
+                        paint,
+                    });
+                }
+                if wide {
                     break;
                 }
             }
-            paint_run(
-                &text,
-                col - first,
-                &screen.font,
-                style,
-                background,
-                block_here
-                    .and_then(|(cursor, _)| {
-                        cursor.stroke(
-                            CursorShape::Block,
-                            origin(row, first),
-                            screen.font.cell,
-                            span,
-                        )
-                    })
-                    .map(|bounds| (bounds, cursor_color)),
-                origin(row, first),
-                window,
-                cx,
-            );
+            let bounds = rect(first, col);
+            for part in &spans {
+                let area = rect(part.start, part.end);
+                let paint = part.paint;
+                if paint.bg != background {
+                    window.paint_quad(fill(area, rgb(paint.bg)));
+                }
+                if paint.block
+                    && let Some(caret) = caret
+                {
+                    window.paint_quad(fill(caret, rgb(cursor_color)));
+                }
+                let mask = (spans.len() > 1).then(|| {
+                    let outer = window.content_mask().bounds;
+                    let left = if part.start == first {
+                        outer.left()
+                    } else {
+                        area.left()
+                    };
+                    let right = if part.end == col {
+                        outer.right()
+                    } else {
+                        area.right()
+                    };
+                    ContentMask {
+                        bounds: Bounds::from_corners(
+                            point(left, outer.top()),
+                            point(right, outer.bottom()),
+                        ),
+                    }
+                });
+                let text_glyph = matches!(face.glyph, GlyphSource::Text | GlyphSource::WideText);
+                let ink = if light_surface && text_glyph && !paint.block {
+                    contrast::readable_text(paint.fg, paint.bg)
+                } else {
+                    paint.fg
+                };
+                window.with_content_mask(mask, |window| {
+                    let style = Style { fg: ink, ..face };
+                    paint_ink(&text, &screen.font, span.baseline, style, bounds, window, cx);
+                });
+                if paint.underline {
+                    paint_underline(area, ink, window);
+                }
+            }
         }
     }
     if let Some(marked) = marked {
         if let Some(preedit) = marked.layout(screen, bounds.origin) {
-            paint_run(
-                preedit.text,
-                preedit.columns,
-                &screen.font,
-                Style {
-                    fg: cursor_text_color(palette.composition),
-                    bg: palette.composition,
-                    bold: false,
-                    italic: false,
-                    underline: true,
-                },
-                background,
-                None,
+            let area = grid_glyph::pixel_bounds(
                 preedit.at,
-                window,
-                cx,
+                preedit.at + point(px(f32::from(preedit.columns) * cell.width), px(cell.height)),
+                scale,
             );
-            let caret = marked.selection.end;
-            window.paint_quad(fill(
-                span.in_row(preedit.bounds_for_range(caret..caret)),
-                rgb(cursor_text_color(palette.composition)),
-            ));
+            let style = Style {
+                glyph: GlyphSource::Text,
+                fg: contrast::black_or_white(palette.composition),
+                bg: palette.composition,
+                bold: false,
+                italic: false,
+                underline: true,
+            };
+            window.paint_quad(fill(area, rgb(style.bg)));
+            let ink = |fg, window: &mut Window, cx: &mut App| {
+                for (text, columns, wide) in preedit.runs() {
+                    let start = preedit.at + point(px(columns.start as f32 * cell.width), px(0.));
+                    let end =
+                        preedit.at + point(px(columns.end as f32 * cell.width), px(cell.height));
+                    let bounds = grid_glyph::pixel_bounds(start, end, scale);
+                    let glyph = if wide { GlyphSource::WideText } else { GlyphSource::Text };
+                    let style = Style { fg, glyph, ..style };
+                    paint_ink(text, &screen.font, span.baseline, style, bounds, window, cx);
+                }
+                paint_underline(area, fg, window);
+            };
+            ink(style.fg, window, cx);
+            if let Some(shape) = cursor_shape
+                && let Some(bounds) =
+                    cursor::stroke(shape, preedit.caret_cell(marked.selection.end), span)
+            {
+                window.paint_quad(fill(bounds, rgb(cursor_color)));
+                if shape == CursorShape::Block {
+                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        ink(block_fg, window, cx)
+                    });
+                }
+            }
         }
-    } else if let Some(cursor) = cursor {
-        let at = origin(cursor.point.line.0 as u16, cursor.point.column.0 as u16);
-        if let Some(bounds) = cursor_shape
-            .filter(|shape| *shape != CursorShape::Block)
-            .and_then(|shape| cursor.stroke(shape, at, screen.font.cell, span))
-        {
-            window.paint_quad(fill(bounds, rgb(cursor_color)));
-        }
+    } else if cursor_shape != Some(CursorShape::Block)
+        && let Some(caret) = caret
+    {
+        window.paint_quad(fill(caret, rgb(cursor_color)));
     }
 }
 
@@ -341,6 +449,23 @@ mod tests {
     use super::*;
     use crate::theme::{Appearance, TerminalScheme};
     use gpui::WindowAppearance;
+
+    #[test]
+    fn powerline_symbols_are_single_cells_and_preserve_presentation_and_concealment() {
+        let mut em = Emulator::new(super::super::emulator::GridSize { rows: 1, cols: 16 });
+        em.process("A│⠕→\u{fe0f}\x1b[8m".as_bytes());
+        let line = &em.term.grid()[em.view_line(0)];
+        let source = |i| GlyphSource::for_cell(&line[Column(i)]);
+        assert!(matches!(source(0), GlyphSource::Text));
+        for (i, ch) in "".chars().enumerate() {
+            assert!(matches!(source(i + 1), GlyphSource::Grid(c) if c == ch));
+        }
+        assert!(matches!(source(5), GlyphSource::TerminalSymbol));
+        assert!(matches!(source(6), GlyphSource::Grid('│')));
+        assert!(matches!(source(7), GlyphSource::TerminalSymbol));
+        assert!(matches!(source(8), GlyphSource::Text));
+        assert!(matches!(source(9), GlyphSource::Text));
+    }
 
     #[test]
     fn concealed_cells_keep_their_position_without_painting_combining_marks() {

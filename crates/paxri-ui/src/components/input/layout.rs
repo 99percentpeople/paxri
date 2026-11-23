@@ -1,4 +1,5 @@
 //! Byte positions and hit testing for the visual rows produced by GPUI's text shaper.
+use crate::components::caret::GlyphSpan;
 use gpui::*;
 use std::{ops::Range, time::Duration};
 
@@ -88,6 +89,17 @@ impl InputLayout {
 
     pub fn origin(&self, row: usize) -> Point<Pixels> {
         self.bounds.origin - self.scroll + point(px(0.), self.height * row)
+    }
+
+    pub fn caret_bounds(&self, byte: usize, hint: Option<usize>) -> Bounds<Pixels> {
+        let row = self.row_at(byte, hint);
+        let line = &self.lines[self.rows[row].logical_line];
+        let span =
+            GlyphSpan::from_metrics(line.font_size(), self.height, line.ascent(), line.descent());
+        span.in_row(Bounds::new(
+            self.origin(row) + point(self.x(row, byte), px(0.)),
+            size(px(1.5), self.height),
+        ))
     }
 
     pub fn hit(&self, pt: Point<Pixels>) -> (usize, usize) {
@@ -221,9 +233,31 @@ fn pan_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::pan_selection;
-    use gpui::px;
-    use std::time::Duration;
+    use super::{InputLayout, pan_selection};
+    use gpui::{Bounds, WrappedLine, point, px, size};
+    use std::{sync::Arc, time::Duration};
+
+    #[test]
+    fn caret_follows_the_scrolled_row_and_includes_descenders() {
+        let lines = [(0., 0.), (13., 4.), (19., 6.)].map(|(ascent, descent)| {
+            let mut line = WrappedLine::default();
+            let wrapped = Arc::get_mut(&mut *line).unwrap();
+            let metrics = Arc::get_mut(&mut wrapped.unwrapped_layout).unwrap();
+            metrics.font_size = px(14.);
+            metrics.ascent = px(ascent);
+            metrics.descent = px(descent);
+            line
+        });
+        let bounds = Bounds::new(point(px(8.), px(10.)), size(px(90.), px(50.)));
+        let mut layout = InputLayout::new(lines.into(), bounds, px(20.));
+        layout.scroll.y = px(5.);
+        for (byte, y, height) in [(0, 8., 14.), (1, 26.5, 17.), (2, 45., 20.)] {
+            assert_eq!(
+                layout.caret_bounds(byte, None),
+                Bounds::new(point(px(8.), px(y)), size(px(1.5), px(height)))
+            );
+        }
+    }
 
     #[test]
     fn holding_the_edge_advances_until_the_end_and_can_reverse() {

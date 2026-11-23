@@ -369,7 +369,7 @@ impl Render for Terminal {
         let hide_pointer = self.hidden_pointer_at.is_some();
         self.emulator
             .set_default_cursor(cursor::default_style(&appearance));
-        let style = self.emulator.term.cursor_style();
+        let style = self.emulator.display_cursor_style();
         let blink =
             style.blinking && self.focused && self.marked.text.is_empty() && self.is_running();
         let cursor_on = cursor::blink_visible(

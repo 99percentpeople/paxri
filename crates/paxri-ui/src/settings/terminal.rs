@@ -241,9 +241,7 @@ impl TerminalSettings {
         );
 
         let selected = fonts
-            .installed
-            .iter()
-            .find(|face| face.font.family.as_ref() == style.font_family)
+            .custom_face(&style.font_family)
             .map(|face| face.font.family.clone())
             .unwrap_or_default();
         let on_font = change.clone();
@@ -252,19 +250,14 @@ impl TerminalSettings {
             selected,
             move |v: &SharedString, w, cx| on_font(GuiChange::FontFamily(v.to_string()), w, cx),
         );
-        for (family, font) in fonts.choices() {
-            let label = if family.is_empty() {
-                "Platform default".into()
-            } else {
-                family.clone()
-            };
+        for (value, font) in fonts.choices() {
             let font = font.clone();
-            families = families.option_with_content(family, move || {
+            families = families.option_with_content(value, move || {
                 div()
                     .min_w_0()
                     .truncate()
                     .font(font.clone())
-                    .child(label.clone())
+                    .child(font.family.clone())
             });
         }
         group.grouped_setting(

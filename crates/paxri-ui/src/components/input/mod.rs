@@ -552,10 +552,10 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         let width = MULTILINE.then(|| (bounds.size.width - px(2.)).max(px(1.)));
         let lines = window
             .text_system()
-            .shape_text(text, px(14.), &[run], width, None)
+            .shape_text(text, rems(0.875).to_pixels(window.rem_size()), &[run], width, None)
             .ok()?;
         let height = if MULTILINE {
-            px(20.)
+            rems(1.25).to_pixels(window.rem_size())
         } else {
             bounds.size.height.max(px(1.))
         };
@@ -614,20 +614,8 @@ impl<const MULTILINE: bool> TextInput<MULTILINE> {
         }
         layout.paint_text(window, cx);
         if focused && caret_on && selection.is_empty() {
-            let row = layout.row_at(self.buffer.cursor, self.row_hint);
-            let x = layout.x(row, self.buffer.cursor);
-            let span = super::caret::GlyphSpan::measure(
-                cx.text_system(),
-                &window.text_style().font(),
-                px(14.),
-                layout.height,
-                false,
-            );
             window.paint_quad(fill(
-                span.in_row(Bounds::new(
-                    layout.origin(row) + point(x, px(0.)),
-                    size(px(1.5), layout.height),
-                )),
+                layout.caret_bounds(self.buffer.cursor, self.row_hint),
                 rgb(colors.ring),
             ));
         }
@@ -682,7 +670,7 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
                     )
             })
             .when(self.inline, |field| {
-                field.h(px(24.)).px(theme::SPACE_1).py_0()
+                field.h(rems(1.5)).px(theme::SPACE_1).py_0()
             })
             .when(MULTILINE, |field| {
                 field

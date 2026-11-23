@@ -69,29 +69,31 @@ impl CursorCell {
                 .contains(&point.column.0)
     }
 
-    pub(super) fn stroke(
-        self,
-        shape: CursorShape,
-        at: Point<Pixels>,
-        cell: CellSize,
-        span: GlyphSpan,
-    ) -> Option<Bounds<Pixels>> {
-        let mut bounds = span.in_row(Bounds::new(
+    pub(super) fn bounds(self, at: Point<Pixels>, cell: CellSize) -> Bounds<Pixels> {
+        Bounds::new(
             at,
             size(px(cell.width * f32::from(self.width)), px(cell.height)),
-        ));
-        match shape {
-            CursorShape::Underline => {
-                let thickness = px(2.).min(bounds.size.height);
-                bounds.origin.y = bounds.bottom() - thickness;
-                bounds.size.height = thickness;
-            }
-            CursorShape::Beam => bounds.size.width = px(2.).min(bounds.size.width),
-            CursorShape::Block => {}
-            _ => return None,
-        }
-        Some(bounds)
+        )
     }
+}
+
+pub(super) fn stroke(
+    shape: CursorShape,
+    cell: Bounds<Pixels>,
+    span: GlyphSpan,
+) -> Option<Bounds<Pixels>> {
+    let mut bounds = span.in_row(cell);
+    match shape {
+        CursorShape::Underline => {
+            let thickness = px(2.).min(bounds.size.height);
+            bounds.origin.y = bounds.bottom() - thickness;
+            bounds.size.height = thickness;
+        }
+        CursorShape::Beam => bounds.size.width = px(2.).min(bounds.size.width),
+        CursorShape::Block => {}
+        _ => return None,
+    }
+    Some(bounds)
 }
 
 #[derive(Default)]
@@ -156,6 +158,7 @@ impl Preedit {
                     px(span.point.line.0 as f32 * cell.height),
                 ),
             columns: span.width,
+            available: screen.term.columns() - span.point.column.0,
             cell,
         })
     }
@@ -166,10 +169,54 @@ pub struct PreeditLayout<'a> {
     pub at: Point<Pixels>,
     pub columns: u16,
     first_utf16: usize,
+    available: usize,
     cell: CellSize,
 }
 
 impl PreeditLayout<'_> {
+    /// Keep narrow text together for shaping and give each fullwidth cluster its own columns.
+    pub(super) fn runs(&self) -> impl Iterator<Item = (&str, Range<usize>, bool)> {
+        let text = self.text;
+        let mut glyphs = text.grapheme_indices(true).peekable();
+        let mut column = 0;
+        std::iter::from_fn(move || {
+            let (start, glyph) = glyphs.next()?;
+            let width = glyph.width();
+            let first = column;
+            column += width;
+            let mut end = start + glyph.len();
+            if width <= 1 {
+                while let Some((byte, glyph)) = glyphs.next_if(|(_, glyph)| glyph.width() <= 1) {
+                    end = byte + glyph.len();
+                    column += glyph.width();
+                }
+            }
+            Some((&text[start..end], first..column, width > 1))
+        })
+    }
+
+    /// The insertion cell may follow the marked text, up to the last visible cell.
+    pub(super) fn caret_cell(&self, offset: usize) -> Bounds<Pixels> {
+        let byte = byte_at_utf16(self.text, offset.saturating_sub(self.first_utf16));
+        let mut column = 0;
+        let mut width = 1;
+        for (index, glyph) in self.text.grapheme_indices(true) {
+            let cells = glyph.width();
+            if byte < index + glyph.len() || column + cells >= self.available {
+                width = cells.max(1);
+                break;
+            }
+            column += cells;
+        }
+        Bounds::new(
+            self.at + point(px(column as f32 * self.cell.width), px(0.)),
+            size(
+                px(width.min(self.available - column) as f32 * self.cell.width),
+                px(self.cell.height),
+            ),
+        )
+    }
+
     pub fn bounds_for_range(&self, range: Range<usize>) -> Bounds<Pixels> {
         let x = |offset: usize| {
             let byte = byte_at_utf16(self.text, offset.saturating_sub(self.first_utf16));
@@ -212,7 +259,7 @@ mod tests {
     };
 
     #[test]
-    fn remote_cursor_overrides_preferences_until_reset_and_reports_its_position() {
+    fn display_keeps_the_configured_shape_while_vt_controls_blink_visibility_and_position() {
         let mut screen = Emulator::new(GridSize { rows: 8, cols: 20 });
         let fallback = CursorStyle {
             shape: CursorShape::Beam,
@@ -231,6 +278,8 @@ mod tests {
                 for byte in format!("\x1b[{code} q").bytes() {
                     screen.process(&[byte]);
                 }
+                assert_eq!(screen.display_cursor_style().shape, fallback.shape);
+                assert_eq!(screen.display_cursor_style().blinking, code == n);
                 assert_eq!(
                     screen.term.cursor_style(),
                     CursorStyle {
@@ -246,6 +295,7 @@ mod tests {
             blinking: false,
         };
         screen.set_default_cursor(new_default);
+        assert_eq!(screen.display_cursor_style().shape, new_default.shape);
         assert_eq!(
             screen.term.cursor_style(),
             CursorStyle {
@@ -274,6 +324,10 @@ mod tests {
         let layout = marked.layout(&screen, origin).unwrap();
         assert_eq!(layout.text, "a😀中");
         assert_eq!(
+            layout.runs().collect::<Vec<_>>(),
+            [("a", 0..1, false), ("😀", 1..3, true), ("中", 3..5, true)]
+        );
+        assert_eq!(
             layout.bounds_for_range(3..3).origin,
             point(px(60.), px(44.))
         );
@@ -295,6 +349,35 @@ mod tests {
     }
 
     #[test]
+    fn ime_caret_uses_the_same_shape_and_respects_graphemes_and_the_right_edge() {
+        let mut screen = Emulator::new(GridSize { rows: 2, cols: 8 });
+        screen.process(b"\x1b[?25l");
+        let span = GlyphSpan::from_metrics(px(15.), px(20.), px(14.), px(-4.));
+        let mut marked = Preedit::default();
+        marked.replace(None, "a中e\u{301}😀", None);
+        let check = |screen: &Emulator, offset, col: f32, width: f32| {
+            let layout = marked.layout(screen, point(px(0.), px(0.))).unwrap();
+            let area = layout.caret_cell(offset);
+            assert_eq!(
+                area,
+                Bounds::new(point(px(col * 9.), px(0.)), size(px(width * 9.), px(20.)))
+            );
+            let block = stroke(CursorShape::Block, area, span).unwrap();
+            let underline = stroke(CursorShape::Underline, area, span).unwrap();
+            let bar = stroke(CursorShape::Beam, area, span).unwrap();
+            assert_eq!(block.size, size(area.size.width, px(18.)));
+            assert_eq!(underline.size, size(area.size.width, px(2.)));
+            assert_eq!(bar.size, size(px(2.), block.size.height));
+        };
+        check(&screen, 1, 1., 2.);
+        check(&screen, 3, 3., 1.);
+        check(&screen, 4, 4., 2.);
+        check(&screen, 6, 6., 1.);
+        screen.process(b"\x1b[1;8H");
+        check(&screen, 6, 6., 2.);
+    }
+
+    #[test]
     fn all_cursor_shapes_align_to_the_whole_wide_character() {
         let mut screen = Emulator::new(GridSize { rows: 3, cols: 8 });
         screen.process("a界b\x1b[1;3H".as_bytes());
@@ -303,25 +386,25 @@ mod tests {
         assert!(cell.covers(GridPoint::new(Line(0), Column(2))));
         assert!(!cell.covers(GridPoint::new(Line(0), Column(3))));
         let at = point(px(30.), px(40.));
-        let span = GlyphSpan {
-            top: px(4.),
-            height: px(12.),
-        };
+        let span = GlyphSpan::from_metrics(px(15.), px(screen.font.cell.height), px(14.), px(-4.));
         for (shape, bounds) in [
             (
                 CursorShape::Underline,
-                Bounds::new(point(px(30.), px(54.)), size(px(18.), px(2.))),
+                Bounds::new(point(px(30.), px(57.)), size(px(18.), px(2.))),
             ),
             (
                 CursorShape::Beam,
-                Bounds::new(point(px(30.), px(44.)), size(px(2.), px(12.))),
+                Bounds::new(point(px(30.), px(41.)), size(px(2.), px(18.))),
             ),
             (
                 CursorShape::Block,
-                Bounds::new(point(px(30.), px(44.)), size(px(18.), px(12.))),
+                Bounds::new(point(px(30.), px(41.)), size(px(18.), px(18.))),
             ),
         ] {
-            assert_eq!(cell.stroke(shape, at, screen.font.cell, span), Some(bounds));
+            assert_eq!(
+                stroke(shape, cell.bounds(at, screen.font.cell), span),
+                Some(bounds)
+            );
         }
         screen.process(b"\x1b[?25l");
         assert!(CursorCell::visible(&screen).is_none());

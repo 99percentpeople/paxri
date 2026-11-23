@@ -422,7 +422,7 @@ impl Mobile {
             s.screen.palette,
             s.screen.term.colors(),
         );
-        let style = s.screen.term.cursor_style();
+        let style = s.screen.display_cursor_style();
         let blink = style.blinking && s.connected() && s.composing.text.is_empty();
         let show_cursor =
             cursor::blink_visible(blink, cursor::CursorCell::visible(&s.screen), window, cx);

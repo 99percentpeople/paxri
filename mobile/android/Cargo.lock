@@ -5571,6 +5571,7 @@ dependencies = [
  "paxri-core",
  "portable-pty",
  "raw-window-handle",
+ "ttf-parser",
  "unicode-segmentation",
  "unicode-width",
  "url",

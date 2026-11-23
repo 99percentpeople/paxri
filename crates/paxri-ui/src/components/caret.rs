@@ -1,39 +1,27 @@
-use gpui::{App, Bounds, Font, Pixels, Task, TextSystem, Window, px};
+use gpui::{App, Bounds, Font, Pixels, Task, TextSystem, Window};
 use std::time::Duration;
 
 /// Vertical extent of the text caret relative to the same baseline used to paint glyphs.
 #[derive(Clone, Copy)]
 pub(crate) struct GlyphSpan {
-    pub top: Pixels,
-    pub height: Pixels,
+    top: Pixels,
+    height: Pixels,
+    pub(crate) baseline: Pixels,
 }
 
 impl GlyphSpan {
-    pub fn measure(
-        text: &TextSystem,
-        font: &Font,
-        size: Pixels,
-        row: Pixels,
-        include_descenders: bool,
-    ) -> Self {
+    pub fn measure(text: &TextSystem, font: &Font, size: Pixels, row: Pixels) -> Self {
         let face = text.resolve_font(font);
-        // Some platform font backends return a signed descender. GPUI's shaped-line
-        // painter centers ascent plus the positive descent in the available row.
-        let ascent = text.ascent(face, size);
-        let descent = text.descent(face, size).abs();
-        let baseline = (row - ascent - descent) / 2. + ascent;
-        let cap = text.cap_height(face, size);
-        let cap = if cap > px(0.) { cap } else { size * 0.72 };
-        let descent = if include_descenders {
-            descent.min(size * 0.2)
-        } else {
-            px(0.)
-        };
-        let top = (baseline - cap).clamp(px(0.), (row - px(1.)).max(px(0.)));
-        let bottom = (baseline + descent).clamp(top + px(1.), row.max(top + px(1.)));
+        Self::from_metrics(size, row, text.ascent(face, size), text.descent(face, size))
+    }
+
+    pub fn from_metrics(size: Pixels, row: Pixels, ascent: Pixels, descent: Pixels) -> Self {
+        // Center the font's line box like the text painter. An empty line can lack metrics.
+        let height = (ascent + descent.abs()).max(size).min(row);
         Self {
-            top,
-            height: bottom - top,
+            top: (row - height) / 2.,
+            height,
+            baseline: (row + ascent - descent.abs()) / 2.,
         }
     }
 

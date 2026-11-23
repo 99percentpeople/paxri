@@ -36,6 +36,8 @@ root=$work/$name
 mkdir -p "$root/bin"
 if [[ $platform == macos-* ]]; then
     app="$root/paxri.app/Contents"
+    install -d "$app/Resources/licenses"
+    install -m 0644 crates/paxri-ui/fonts/OFL.txt "$app/Resources/licenses/terminal-fallback.txt"
     mkdir -p "$app/MacOS"
     version=$("$bins/paxri" --version | awk '{print $2}')
     # Apple's bundle version fields take the numeric part of the Cargo version.
@@ -62,6 +64,8 @@ PLIST
     codesign --force --sign - "$root/paxri.app"
     codesign --verify --deep --strict "$root/paxri.app"
 else
+    install -d "$root/licenses"
+    install -m 0644 crates/paxri-ui/fonts/OFL.txt "$root/licenses/terminal-fallback.txt"
     for bin in paxri paxri-gateway paxri-gui; do install -m 0755 "$bins/$bin" "$root/bin/$bin"; done
     cp packaging/linux/{install-systemd.sh,paxri-gateway.service} "$root/"
 fi

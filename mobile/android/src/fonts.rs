@@ -1,6 +1,6 @@
 use gpui::{App, FallbackFontClass, FontFallbacks, SharedString};
 use ndk::font::{Font, FontMatcher};
-use paxri_ui::theme::fonts::{Face, MonospaceFonts};
+use paxri_ui::theme::fonts::{Face, MonospaceFonts, TERMINAL_SYMBOL_FAMILY, TERMINAL_SYMBOL_FONT};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -8,9 +8,6 @@ use std::{
     path::PathBuf,
 };
 use ttf_parser::{Face as FontFile, name_id};
-
-const FALLBACK: &str = "paxri Terminal Fallback";
-const SUBSET: &[u8] = include_bytes!("../fonts/terminal-fallback.ttf");
 
 fn matched_family(matched: &Font, files: &mut HashMap<PathBuf, Vec<u8>>) -> Option<String> {
     let path = matched.path();
@@ -41,7 +38,7 @@ pub(super) fn init(cx: &mut App) -> SharedString {
     let mut preferred = None;
     // Ask Android for its actual monospace and its fallback runs for the exact
     // console repertoire, including OEM fonts outside /system/fonts.
-    let subset = FontFile::parse(SUBSET, 0).expect("invalid terminal subset");
+    let subset = FontFile::parse(TERMINAL_SYMBOL_FONT, 0).expect("invalid terminal subset");
     let mut console = vec![u16::from(b'M')];
     let cmap = subset
         .tables()
@@ -92,7 +89,7 @@ pub(super) fn init(cx: &mut App) -> SharedString {
     }
     let mut loaded: HashSet<_> = system_files.keys().cloned().collect();
     let mut fonts: Vec<_> = system_files.into_values().map(Cow::Owned).collect();
-    fonts.push(Cow::Borrowed(SUBSET));
+    fonts.push(Cow::Borrowed(TERMINAL_SYMBOL_FONT));
     if let Err(error) = text.add_fonts(fonts) {
         log::warn!("Registering terminal fonts: {error}");
     }
@@ -104,7 +101,7 @@ pub(super) fn init(cx: &mut App) -> SharedString {
         let fallbacks = system_families
             .iter()
             .map(String::as_str)
-            .chain([FALLBACK])
+            .chain([TERMINAL_SYMBOL_FAMILY])
             .filter(|&family| family != name)
             .map(str::to_owned)
             .collect();
@@ -114,8 +111,7 @@ pub(super) fn init(cx: &mut App) -> SharedString {
     let installed: Vec<_> = available
         .iter()
         .filter(|name| {
-            name.as_str() != FALLBACK
-                && (name.to_lowercase().contains("mono") || Some(*name) == preferred.as_ref())
+            name.to_lowercase().contains("mono") || Some(*name) == preferred.as_ref()
         })
         .map(|name| make_face(name))
         .collect();
@@ -123,7 +119,7 @@ pub(super) fn init(cx: &mut App) -> SharedString {
         .as_deref()
         .map(make_face)
         .or_else(|| installed.first().cloned())
-        .unwrap_or_else(|| make_face(FALLBACK));
+        .unwrap_or_else(|| make_face(TERMINAL_SYMBOL_FAMILY));
     cx.set_global(MonospaceFonts { installed, default });
 
     // Let Android locate other scripts on demand instead of bundling them.

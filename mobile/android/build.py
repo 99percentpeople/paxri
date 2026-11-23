@@ -143,7 +143,7 @@ def main():
             for file in sorted(dex.glob("*.dex")):
                 apk.write(file, file.name)
             apk.write(native, "lib/arm64-v8a/" + native.name)
-            apk.write(APP / "fonts/OFL.txt", "assets/licenses/terminal-fallback.txt")
+            apk.write(APP.parents[1] / "crates/paxri-ui/fonts/OFL.txt", "assets/licenses/terminal-fallback.txt")
         aligned = tmp / "aligned.apk"
         run(tools / "zipalign", "-f", "4", package, aligned)
         if args.unsigned_release:

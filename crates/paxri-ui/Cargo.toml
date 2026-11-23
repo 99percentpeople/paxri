@@ -10,6 +10,7 @@ paxri-core = { path = "../paxri-core" }
 url = "2"
 paxri-config = { path = "../paxri-config" }
 portable-pty = "0.9"
+ttf-parser = "0.25"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 

@@ -97,8 +97,8 @@ pub const LETTER_SPACING: SettingSpec = SettingSpec::new(
 pub const CURSOR_SHAPE: SettingSpec = SettingSpec::new(
     "cursor_shape",
     "Cursor shape",
-    "Choose the default shape of the terminal cursor.",
-    "default block bar underline",
+    "Use this cursor shape throughout the terminal, including during text composition.",
+    "block bar underline",
 );
 pub const CURSOR_BLINK: SettingSpec = SettingSpec::new(
     "blink_cursor",

@@ -2,6 +2,8 @@ use super::TerminalAppearance;
 use gpui::{Font, FontFeatures, Global, SharedString, TextSystem, font, px};
 
 pub const FONT_SIZE: f32 = 15.;
+pub const TERMINAL_SYMBOL_FAMILY: &str = "paxri Terminal Fallback";
+pub const TERMINAL_SYMBOL_FONT: &[u8] = include_bytes!("../../fonts/terminal-fallback.ttf");
 
 #[derive(Clone, Copy)]
 pub struct CellSize {
@@ -57,20 +59,29 @@ pub struct MonospaceFonts {
 impl Global for MonospaceFonts {}
 
 impl MonospaceFonts {
+    fn alternatives(&self) -> impl Iterator<Item = &Face> {
+        self.installed.iter().filter(|face| {
+            face.font.family != self.default.font.family
+                && face.font.family.as_ref() != TERMINAL_SYMBOL_FAMILY
+        })
+    }
+
+    pub fn custom_face(&self, family: &str) -> Option<&Face> {
+        self.alternatives()
+            .find(|face| face.font.family.as_ref() == family)
+    }
+
     /// An empty family selects the same platform default that the terminal resolves.
     pub fn choices(&self) -> impl Iterator<Item = (SharedString, &Font)> {
         std::iter::once((SharedString::default(), &self.default.font)).chain(
-            self.installed
-                .iter()
+            self.alternatives()
                 .map(|face| (face.font.family.clone(), &face.font)),
         )
     }
 
     pub fn resolve(&self, style: &TerminalAppearance) -> TerminalFont {
         let face = self
-            .installed
-            .iter()
-            .find(|f| f.font.family.as_ref() == style.font_family)
+            .custom_face(&style.font_family)
             .unwrap_or(&self.default);
         TerminalFont {
             face: face.font.clone(),
@@ -87,6 +98,42 @@ impl MonospaceFonts {
                 },
                 height: style.row_height(style.size()),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picker_and_terminal_agree_on_the_default_family() {
+        let face = |name| Face {
+            font: font(name),
+            advance: 9.,
+        };
+        let fonts = MonospaceFonts {
+            default: face("System Mono"),
+            installed: vec![
+                face("System Mono"),
+                face(TERMINAL_SYMBOL_FAMILY),
+                face("Other Mono"),
+            ],
+        };
+        let choices: Vec<_> = fonts.choices().map(|(key, _)| key.to_string()).collect();
+        assert_eq!(choices, ["", "Other Mono"]);
+        for (saved, expected) in [
+            ("", "System Mono"),
+            ("System Mono", "System Mono"),
+            (TERMINAL_SYMBOL_FAMILY, "System Mono"),
+            ("Unavailable", "System Mono"),
+            ("Other Mono", "Other Mono"),
+        ] {
+            let style = TerminalAppearance {
+                font_family: saved.to_owned(),
+                ..Default::default()
+            };
+            assert_eq!(fonts.resolve(&style).face.family.as_ref(), expected);
         }
     }
 }

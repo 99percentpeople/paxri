@@ -36,8 +36,8 @@ impl GridSize {
         PtySize {
             rows: self.rows,
             cols: self.cols,
-            pixel_width: self.cols * cell.width as u16,
-            pixel_height: self.rows * cell.height as u16,
+            pixel_width: self.cols * cell.width.round() as u16,
+            pixel_height: self.rows * cell.height.round() as u16,
         }
     }
 }
@@ -250,6 +250,11 @@ impl Emulator {
         }
     }
 
+    /// Keep the user's cursor shape when a foreground program changes editing modes.
+    pub fn display_cursor_style(&self) -> CursorStyle {
+        CursorStyle { shape: self.default_cursor.shape, ..self.term.cursor_style() }
+    }
+
     pub fn process(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             let (used, event) = self.redraw.next(bytes);
@@ -339,8 +344,8 @@ impl Emulator {
                 Event::TextAreaSizeRequest(format) => format(WindowSize {
                     num_cols: self.term.columns() as u16,
                     num_lines: self.term.screen_lines() as u16,
-                    cell_width: self.font.cell.width as u16,
-                    cell_height: self.font.cell.height as u16,
+                    cell_width: self.font.cell.width.round() as u16,
+                    cell_height: self.font.cell.height.round() as u16,
                 }),
                 _ => continue,
             };
