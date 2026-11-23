@@ -22,6 +22,8 @@ opt-level = 2
 opt-level = 2
 
 [patch.crates-io]
+# GPUI 0.2.2 with native desktop pinch input.
+gpui = { path = "compat/gpui" }
 # GPUI 0.2.2 pulls zed-async-tar, whose xattr 0.2 uses a removed Linux libc alias.
 xattr = { path = "compat/xattr" }
 # See compat/iroh/LOCAL_CHANGES.md for the native endpoint extensions.
