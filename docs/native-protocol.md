@@ -43,7 +43,7 @@ On an established connection, each peer can open a unidirectional stream to anno
 
 Unpairing commits a local revocation and its pending notification in one settings write, closes the shared session, and releases the affected listeners. The gateway sends `{"unpair":{"pairing_id":"…"}}` on the independent pairing protocol so confirmation can finish after application streams have closed. The recipient can revoke only the authenticated caller and acknowledges after its settings are saved. Already-absent peers acknowledge idempotently. Re-approval establishes a new request ID and cancels old outgoing notices. A recipient retains its newer pairing if it receives an earlier generation. Offline notices survive restarts and are retried using the saved peer address.
 
-A gateway announces its availability to paired peers by establishing the shared session when it starts, learns a new pairing or address, or regains local network or relay connectivity. Each side observes admission and closure on the same connection. A lost connection triggers a reconnect attempt. An offline peer can announce itself when it comes back. Announcements use at most four concurrent dials and open no terminal or application stream.
+A gateway announces its availability to paired peers by establishing the shared session when it starts, learns a new pairing or address, or regains local network or relay connectivity. Each side observes admission and closure on the same connection. A lost connection triggers an immediate dial. Failed dials retry with an exponential delay from two to sixty seconds. An offline peer can also announce itself when it comes back. Announcements use at most four concurrent dials and open no terminal or application stream.
 
 ## Shared connection and stream types
 

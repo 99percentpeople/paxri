@@ -495,45 +495,105 @@ mod tests {
     use std::{net::Ipv4Addr, time::Duration};
     use tokio::io::AsyncWriteExt;
 
+    async fn endpoint() -> Result<Endpoint> {
+        Ok(Endpoint::builder(presets::Minimal)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))?
+            .relay_mode(RelayMode::Disabled)
+            .portmapper_config(PortmapperConfig::Disabled)
+            .bind()
+            .await?)
+    }
+
+    fn pool(
+        local: &Endpoint,
+        remote: &Endpoint,
+    ) -> (
+        Arc<Connections>,
+        mpsc::Receiver<IncomingStream<NativeSession>>,
+        watch::Sender<Arc<Config>>,
+    ) {
+        let config = paxri_config::parse(&format!(
+            "version=1\n[peers.peer]\nendpoint_id=\"{}\"",
+            remote.id()
+        ))
+        .unwrap();
+        let (grants, config) = watch::channel(Arc::new(config));
+        let (tx, rx) = mpsc::channel(4);
+        (
+            Arc::new(Connections::new(
+                local.clone(),
+                config,
+                tx,
+                mpsc::channel(8).0,
+                DeviceInfo {
+                    platform: paxri_config::DevicePlatform::Linux,
+                    capabilities: Default::default(),
+                    device_name: None,
+                },
+            )),
+            rx,
+            grants,
+        )
+    }
+
     #[tokio::test]
-    async fn simultaneous_dials_select_one_connection_for_both_directions() -> Result<()> {
-        async fn endpoint() -> Result<Endpoint> {
-            Ok(Endpoint::builder(presets::Minimal)
-                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-                .relay_mode(RelayMode::Disabled)
-                .portmapper_config(PortmapperConfig::Disabled)
-                .bind()
-                .await?)
-        }
-        fn pool(
-            local: &Endpoint,
-            remote: &Endpoint,
-        ) -> (
-            Arc<Connections>,
-            mpsc::Receiver<IncomingStream<NativeSession>>,
-        ) {
-            let config = paxri_config::parse(&format!(
-                "version=1\n[peers.peer]\nendpoint_id=\"{}\"",
-                remote.id()
-            ))
-            .unwrap();
-            let (_, config) = watch::channel(Arc::new(config));
-            let (tx, rx) = mpsc::channel(4);
-            (
-                Arc::new(Connections::new(
-                    local.clone(),
-                    config,
-                    tx,
-                    mpsc::channel(8).0,
-                    DeviceInfo { platform: paxri_config::DevicePlatform::Linux, capabilities: Default::default(), device_name: None },
-                )),
-                rx,
-            )
-        }
+    async fn device_recovers_after_failed_dials_without_reopening_terminal_streams() -> Result<()> {
+        use super::super::NativeTransport;
         let a = endpoint().await?;
         let b = endpoint().await?;
-        let (pa, mut at_a) = pool(&a, &b);
-        let (pb, mut at_b) = pool(&b, &a);
+        let (pa, _streams_a, grants) = pool(&a, &b);
+        let (pb, mut streams_b, _grants_b) = pool(&b, &a);
+        b.set_alpns(vec![PROTOCOL.to_vec()]);
+        let client = Arc::new(NativeTransport {
+            endpoint: a.clone(),
+            connections: pa.clone(),
+            config: grants,
+            peers: std::sync::RwLock::new(BTreeMap::from([("peer".into(), b.addr())])),
+            presence_refresh: Default::default(),
+        });
+        let announce = tokio::spawn(client.clone().announce_presence());
+        let next = || async {
+            b.accept()
+                .await
+                .context("endpoint closed")?
+                .await
+                .map_err(anyhow::Error::from)
+        };
+        let mut selected = pa.paired_slot(b.id())?.selected.subscribe();
+        timeout(Duration::from_secs(25), async {
+            pb.admit(next().await?).await?;
+            let first = selected.wait_for(|s| s.is_some()).await?.clone().unwrap();
+            let mut terminal = first.open(StreamKind::Terminal).await?;
+            let remote_terminal = streams_b.recv().await.unwrap();
+            assert_eq!(remote_terminal.kind, StreamKind::Terminal);
+            first.conn.close(0u32.into(), b"link lost");
+            selected.wait_for(Option::is_none).await?;
+            // Only A initiates connections. B stays at the same address, refuses two
+            // attempts, then accepts the next retry without notifying A.
+            for _ in 0..2 {
+                next().await?.close(1u32.into(), b"unavailable");
+            }
+            pb.admit(next().await?).await?;
+            let restored = selected.wait_for(|s| s.is_some()).await?.clone().unwrap();
+            assert_ne!(restored.token, first.token);
+            assert!(terminal.read_u8().await.is_err());
+            assert!(restored.status().streams.is_empty());
+            assert!(streams_b.try_recv().is_err());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        a.close().await;
+        b.close().await;
+        announce.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn simultaneous_dials_select_one_connection_for_both_directions() -> Result<()> {
+        let a = endpoint().await?;
+        let b = endpoint().await?;
+        let (pa, mut at_a, _grants_a) = pool(&a, &b);
+        let (pb, mut at_b, _grants_b) = pool(&b, &a);
         let ra = Router::builder(a.clone())
             .accept(PROTOCOL, pa.clone())
             .spawn();

@@ -321,7 +321,10 @@ impl Client {
                 result = changes.changed() => if result.is_err() { break; },
                 result = config.changed() => if result.is_err() { break; },
                 result = viewed.changed() => if result.is_err() { break; },
-                result = foreground.changed() => if result.is_err() { break; },
+                result = foreground.changed() => {
+                    if result.is_err() { break; }
+                    if *foreground.borrow() { transport.refresh_presence(); }
+                }
                 _ = tokio::time::sleep(interval), if visible => {}
             }
         }

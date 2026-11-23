@@ -25,6 +25,7 @@ pub use connections::{NativeSession, NativeStream};
 pub struct NativeTransport {
     endpoint: Endpoint,
     connections: Arc<connections::Connections>,
+    presence_refresh: tokio::sync::Notify,
     peers: RwLock<BTreeMap<String, EndpointAddr>>,
     config: watch::Sender<Arc<Config>>,
 }
@@ -249,6 +250,7 @@ pub async fn start(
         .spawn();
     Ok((
         NativeTransport {
+            presence_refresh: Default::default(),
             endpoint,
             connections,
             peers: RwLock::new(peers),
