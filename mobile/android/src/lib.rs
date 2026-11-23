@@ -430,6 +430,7 @@ struct Session {
 enum SessionState {
     Connecting,
     Connected,
+    Stopping,
     Ended(String),
 }
 
@@ -443,6 +444,7 @@ impl Session {
         let subtitle = match &self.state {
             SessionState::Connected => format!("Session {number}"),
             SessionState::Connecting => format!("Session {number} · Connecting…"),
+            SessionState::Stopping => format!("Session {number} · Stopping…"),
             SessionState::Ended(reason) => format!("Session {number} · {reason}"),
         };
         (self.title.read(cx).label(&self.name), subtitle)
@@ -709,13 +711,22 @@ impl Mobile {
     }
 
     fn end_session(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.get(&id) else { return; };
-        if matches!(session.state, SessionState::Ended(_)) {
-            self.back(cx);
-            self.sessions.remove(&id);
-            cx.notify();
-        } else {
-            let _ = session.input.send(Frame::Exit(0));
+        let Some(session) = self.sessions.get_mut(&id) else { return; };
+        match session.state {
+            SessionState::Connecting | SessionState::Connected => {
+                session.state = SessionState::Stopping;
+                let _ = session.input.send(Frame::Exit(0));
+            }
+            SessionState::Stopping => return,
+            SessionState::Ended(_) => self.dismiss_session(id, cx),
+        }
+        cx.notify();
+    }
+
+    fn dismiss_session(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.sessions.remove(&id).is_some() && self.page == Page::Terminal(id)
+        {
+            self.navigate(self.terminal_return.clone(), cx);
         }
     }
 
@@ -955,7 +966,9 @@ impl Mobile {
                 }
             }
             Update::Connected(id) => {
-                if let Some(s) = self.sessions.get_mut(&id) {
+                if let Some(s) = self.sessions.get_mut(&id)
+                    && matches!(s.state, SessionState::Connecting)
+                {
                     s.state = SessionState::Connected;
                     if self.page == Page::Terminal(id) {
                         Self::start_input(s);
@@ -1025,7 +1038,13 @@ impl Mobile {
                 }
             }
             Update::End(id, result) => {
-                if let Some(s) = self.sessions.get_mut(&id) {
+                let Some(s) = self.sessions.get_mut(&id) else { return; };
+                if result.is_ok() && matches!(s.state, SessionState::Stopping) {
+                    if let Some(hosted) = self.hosted.get_mut(&s.peer) {
+                        hosted.retain(|key| *key != s.key);
+                    }
+                    self.dismiss_session(id, cx);
+                } else {
                     s.composing.clear();
                     if self.page == Page::Terminal(id) {
                         gpui_mobile::set_text_input_callback(None);

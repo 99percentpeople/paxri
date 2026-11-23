@@ -104,21 +104,25 @@ impl Mobile {
                 let id = *id;
                 let session = &self.sessions[&id];
                 let (title, subtitle) = session.labels(cx);
-                let action = if matches!(session.state, SessionState::Ended(_)) {
-                    ui.button(Ghost, "close-session", Icon::Close.draw(20.))
-                        .circular()
-                        .tooltip(paxri_ui::components::tooltip("Close session".into()))
-                        .role(Role::Button)
-                        .aria_label("Close session")
-                } else {
-                    ui.end_session_button()
+                let action = match session.state {
+                    SessionState::Connecting | SessionState::Connected => Some(ui.end_session_button()),
+                    SessionState::Stopping => None,
+                    SessionState::Ended(_) => Some(
+                        ui.button(Ghost, "close-session", Icon::Close.draw(20.))
+                            .circular()
+                            .tooltip(paxri_ui::components::tooltip("Close session".into()))
+                            .role(Role::Button)
+                            .aria_label("Close session"),
+                    ),
                 }
-                .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)));
+                .map(|button| button
+                    .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)))
+                    .into_any_element());
                 (
                     title,
                     Some(subtitle),
                     Some(if matches!(self.terminal_return, Page::Sessions(_)) { "Back to sessions" } else { "Back to device details" }),
-                    Some(action.into_any_element()),
+                    action,
                 )
             }
         };
