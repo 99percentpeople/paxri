@@ -15,7 +15,9 @@ import android.os.Bundle;
 import android.text.InputType;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -204,6 +206,34 @@ public final class PaxriActivity extends GpuiInputActivity {
         if (state != null) scannedCode = state.getString("scannedCode");
         super.onCreate(state);
         SystemBars.install(this, this::reportInsets);
+    }
+
+    @Override
+    public void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            // GPUI samples these native touch positions on the display frame.
+            getWindow().getDecorView().requestUnbufferedDispatch(InputDevice.SOURCE_CLASS_POINTER);
+        }
+        // NativeActivity's input queue follows the window's refresh rate, even
+        // when the Vulkan surface has already requested a higher rate.
+        Display display = getWindowManager().getDefaultDisplay();
+        Display.Mode current = display.getMode();
+        Display.Mode preferred = current;
+        float target = Math.max(120f, current.getRefreshRate());
+        for (Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                    && mode.getPhysicalHeight() == current.getPhysicalHeight()
+                    && Math.abs(mode.getRefreshRate() - target)
+                        < Math.abs(preferred.getRefreshRate() - target)) {
+                preferred = mode;
+            }
+        }
+        if (Math.round(preferred.getRefreshRate()) > 60) {
+            WindowManager.LayoutParams params = getWindow().getAttributes();
+            params.preferredDisplayModeId = preferred.getModeId();
+            getWindow().setAttributes(params);
+        }
     }
 
     public void setChromeAppearance(boolean darkIcons, int panel, int key, int pressed, int text, int selectedText) {

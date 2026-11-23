@@ -18,15 +18,28 @@ debug = 0
 # Optimize the per-frame UI and layout paths in development builds.
 [profile.dev.package.gpui-pre]
 opt-level = 2
+debug-assertions = false
+
+[profile.dev.package.gpui-pre-wgpu]
+opt-level = 2
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2
 
 [profile.dev.package.taffy]
 opt-level = 2
 
+[profile.dev.package.slotmap]
+opt-level = 2
+
 [profile.dev.package.paxri-ui]
-opt-level = 1
+opt-level = 2
 
 [profile.dev.package.paxri-android]
-opt-level = 1
+opt-level = 2
 
 [profile.release]
 opt-level = "s"
