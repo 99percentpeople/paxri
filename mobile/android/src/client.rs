@@ -60,7 +60,7 @@ impl Presence {
 }
 
 pub struct Client {
-    viewed_peer: watch::Sender<Option<String>>,
+    viewed_peer: watch::Sender<(Option<String>, bool)>,
     transport: Arc<NativeTransport>,
     presence: tokio::task::JoinHandle<()>,
     _router: iroh::protocol::Router,
@@ -148,7 +148,7 @@ impl Client {
         transport.set_device_name(name.borrow_and_update().effective());
         let presence = tokio::spawn(transport.clone().announce_presence());
         let mut info = transport.subscribe_device_info();
-        let (viewed_peer, viewed) = watch::channel(None);
+        let (viewed_peer, viewed) = watch::channel((None, false));
         let client = Arc::new(Self {
             viewed_peer,
             transport,
@@ -269,19 +269,19 @@ impl Client {
         Ok(client)
     }
 
-    pub fn watch_peer(&self, id: Option<&str>) {
+    pub fn watch_peer(&self, id: Option<&str>, sessions: bool) {
         self.viewed_peer.send_if_modified(|current| {
-            if current.as_deref() == id {
+            if current.0.as_deref() == id && current.1 == sessions {
                 return false;
             }
-            *current = id.map(str::to_owned);
+            *current = (id.map(str::to_owned), sessions);
             true
         });
     }
 
     async fn watch_connections(
         weak: Weak<Self>,
-        mut viewed: watch::Receiver<Option<String>>,
+        mut viewed: watch::Receiver<(Option<String>, bool)>,
         updates: Sender<Update>,
         connection_state: impl Fn(bool, bool),
     ) {
@@ -313,7 +313,7 @@ impl Client {
                 }
             }
             let visible = *foreground.borrow_and_update();
-            let peer = viewed.borrow_and_update().clone();
+            let (peer, sessions) = viewed.borrow_and_update().clone();
             let mut interval = Duration::from_secs(60);
             let paths = transport.connections();
             let state = (!paths.is_empty(), paths.values().any(|links| !links.is_empty()));
@@ -330,6 +330,7 @@ impl Client {
                 if peer.as_deref().is_some_and(|id| snapshot.online(id)) {
                     interval = Duration::from_secs(1);
                 }
+                if sessions { interval = Duration::from_secs(3); }
                 if updates.send(Update::Presence(snapshot)).await.is_err() {
                     break;
                 }

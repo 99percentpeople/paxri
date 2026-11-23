@@ -85,12 +85,7 @@ impl Ui {
 
 impl Ui {
     pub fn new_session_button(self) -> Button {
-        self.button(
-            ButtonVariant::Primary,
-            "new-terminal-session",
-            "New session",
-        )
-        .icon(Icon::Terminal)
+        self.floating_action("new-terminal-session", Icon::Terminal, "New session")
     }
 
     pub fn end_session_button(self) -> Button {
@@ -104,28 +99,20 @@ impl Ui {
         button.tooltip(tooltip("End session".into()))
     }
 
-    pub fn session_row(self, number: usize, title: SharedString, detail: String) -> Button {
+    pub fn session_row(
+        self,
+        peer: &str,
+        name: &str,
+        number: usize,
+        nonce: u64,
+        title: SharedString,
+        location: directory::SessionLocation,
+    ) -> Button {
         self.navigation_row(
-            ("show-terminal", number),
+            SharedString::from(format!("show-terminal-{peer}-{number}-{nonce}")),
             Icon::Terminal.draw(18.),
             title,
-            detail,
+            format!("{name} · Session {number} · {}", location.label()),
         )
-    }
-
-    pub fn terminal_sessions(
-        self,
-        action: Option<Button>,
-        rows: impl Iterator<Item = Button>,
-    ) -> Div {
-        let section = self
-            .section()
-            .child(row().child(heading("Terminal sessions")).children(action));
-        let mut rows = rows.peekable();
-        if rows.peek().is_none() {
-            section.child(self.muted("No open sessions."))
-        } else {
-            section.child(div().flex().flex_col().children(rows))
-        }
     }
 }

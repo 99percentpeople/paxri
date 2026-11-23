@@ -1,11 +1,15 @@
 use super::*;
 use std::collections::BTreeMap;
 use terminal::Terminal;
+use paxri_ui::components::directory::{SessionLocation, session_entries};
 
 #[derive(Default)]
 pub(crate) struct PeerSessions {
     last_number: usize,
     pub(crate) hosted: Vec<SessionKey>,
+    pub(crate) listing: bool,
+    pub(crate) list_failed: bool,
+    pub(crate) listed: bool,
     open: BTreeMap<SessionKey, WeakEntity<Terminal>>,
 }
 
@@ -24,21 +28,19 @@ impl Dashboard {
         &self,
         peer: &SharedString,
         cx: &App,
-    ) -> Vec<(SessionKey, SharedString)> {
+    ) -> Vec<(SessionKey, SharedString, SessionLocation)> {
         let Some(sessions) = self.terminal_sessions.get(peer) else {
             return Vec::new();
         };
-        let mut rows: BTreeMap<_, _> = sessions
-            .hosted
-            .iter()
-            .map(|&key| (key, peer.clone()))
-            .collect();
-        for (&key, view) in &sessions.open {
-            if let Some(view) = view.upgrade() {
-                rows.insert(key, view.read(cx).title.read(cx).label(peer));
-            }
-        }
-        rows.into_iter().collect()
+        let hosted = sessions.hosted.iter().filter(|_| self.can_open_shell(peer)).copied();
+        let name: SharedString = self.status.as_ref().map_or(peer.as_ref(), |s| s.peer_display_name(peer)).to_owned().into();
+        let local = sessions.open.iter().filter_map(|(&key, weak)| {
+            let view = weak.upgrade()?;
+            let view = view.read(cx);
+            Some((key, view.title.read(cx).label(&name), view.is_running(), ()))
+        });
+        session_entries(name.clone(), hosted, local).into_iter()
+            .map(|(key, (title, state, _))| (key, title, state)).collect()
     }
 
     fn register_terminal(
@@ -145,7 +147,7 @@ impl Workspace {
         let sessions = self.dashboard.read(cx).terminal_sessions.get(&peer);
         if let Some(view) = sessions.and_then(|s| {
             let view = s.open.get(&key)?.upgrade()?;
-            (view.read(cx).is_running() || !s.hosted.contains(&key)).then_some(view)
+            (view.read(cx).is_running() || !s.hosted.contains(&key) || !self.dashboard.read(cx).can_open_shell(&peer)).then_some(view)
         }) {
             self.focus_open_page(&Page::terminal(peer, key, view, cx), w, cx);
         } else if self.dashboard.read(cx).can_open_shell(&peer) {

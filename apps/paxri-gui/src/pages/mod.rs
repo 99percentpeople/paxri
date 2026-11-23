@@ -1,5 +1,6 @@
 mod device;
 mod device_list;
+mod sessions;
 mod forward_filters;
 pub(crate) use forward_filters::ForwardFilters;
 mod home;
@@ -47,19 +48,16 @@ fn overview() -> Div {
 
 
 impl Dashboard {
-    fn gateway_notice(&self, ui: Ui, cx: &mut Context<Self>) -> Div {
+    fn gateway_start_button(&self, ui: Ui, cx: &Context<Self>) -> Option<AnyElement> {
+        (self.error.is_some() && !self.saving).then(|| ui.floating_action("start-gateway", crate::components::Icon::Play, "Start gateway")
+            .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Start, cx))).into_any_element())
+    }
+
+    fn gateway_notice(&self, ui: Ui, cx: &Context<Self>) -> Div {
         ui.section()
             .child(
                 row().child(heading("Local gateway")).child(
                     actions()
-                        .when(self.error.is_some() && !self.saving, |r| {
-                            r.child(
-                                ui.button(Secondary, "start-gateway", "Start gateway")
-                                    .on_click(
-                                        cx.listener(|v, _, _, cx| v.manage(Action::Start, cx)),
-                                    ),
-                            )
-                        })
                         .child(
                             ui.button(Secondary, "retry", "Refresh")
                                 .on_click(cx.listener(|v, _, _, cx| v.send(Command::Status, cx))),

@@ -11,7 +11,7 @@ use gpui::{prelude::*, *};
 use paxri_control::{Command, DevicePlatform, Status};
 
 impl Dashboard {
-    fn new_session(&self, peer: &str, ui: Ui) -> Button {
+    pub(super) fn new_session(&self, peer: &str, ui: Ui) -> Button {
         let peer = SharedString::from(peer.to_owned());
         ui.new_session_button()
             .on_click(move |_, w, cx| {
@@ -21,27 +21,7 @@ impl Dashboard {
             })
     }
 
-    fn sessions(&self, peer: &str, ui: Ui, cx: &Context<Self>) -> Option<Div> {
-        let peer = SharedString::from(peer.to_owned());
-        let mut rows = self
-            .open_sessions(&peer, cx)
-            .into_iter().map(|(key, title)| {
-                let peer = peer.clone();
-                ui.session_row(key.nonce as usize, title, format!("Session {}", key.number))
-                    .on_click(move |_, w, cx| {
-                        if let Some(workspace) = w.root::<Workspace>().flatten() {
-                            workspace
-                                .update(cx, |v, cx| v.show_terminal(peer.clone(), key, w, cx));
-                        }
-                    })
-            })
-            .peekable();
-        let new_session = self
-            .can_open_shell(&peer)
-            .then(|| self.new_session(&peer, ui));
-        (new_session.is_some() || rows.peek().is_some())
-            .then(|| ui.terminal_sessions(new_session, rows))
-    }
+
 }
 
 impl Dashboard {
@@ -127,6 +107,7 @@ impl Dashboard {
                 v.forward_filters.reset(Some(selected.clone()), cx);
                 v.show_devices_pane(DevicesPane::Forwards, cx);
             }));
+        let session_peer = peer.to_owned();
         overview()
             .py_2()
             .child(header)
@@ -141,9 +122,9 @@ impl Dashboard {
                         .child(ui.separator())
                 },
             )
-            .when_some(self.sessions(peer, ui, cx), |page, sessions| {
-                page.child(sessions).child(ui.separator())
-            })
+            .child(ui.navigation_row("device-sessions", Icon::Terminal.draw(18.), "Sessions".into(), "View sessions on this device")
+                .on_click(cx.listener(move |v, _, _, cx| v.show_sessions(Some(session_peer.clone()), cx))))
+            .child(ui.separator())
             // Android uses this gateway to store rules, including its first one.
             .when(count > 0 || status.peer_platform(peer) == DevicePlatform::Android
                 || status.peer_supports_forward_rules(peer), |page| page.child(forwards))

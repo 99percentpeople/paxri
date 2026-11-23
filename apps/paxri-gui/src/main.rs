@@ -10,6 +10,7 @@ use std::{
 use paxri_cli::gateway::{self, Action as GatewayAction};
 use paxri_config::{Native, NativeChange, startup::Startup};
 use paxri_control::{Command, GuiChange, Status};
+use paxri_ui::components::directory::{DeviceFilters, SessionFilters};
 use paxri_ui::connections::ConnectionHistory;
 mod chrome;
 mod components;
@@ -53,7 +54,7 @@ struct GatewayRequest {
 
 enum RequestResult {
     Gateway(Box<Status>, Option<Native>),
-    Peer(paxri_control::PeerStatus, Option<Vec<paxri_control::terminal::managed::Key>>),
+    Peer(paxri_control::PeerStatus),
     OfflineGui(theme::GuiSettings),
     OfflineNative(Native),
     Stopped(Startup, Option<Native>),
@@ -74,9 +75,8 @@ struct Dashboard {
     gateway_details: bool,
     pairing_input: Entity<Input>,
     review_request: Option<String>,
-    peer_search: Entity<Input>,
-    peer_filter_open: bool,
-    peer_system: Option<paxri_control::DevicePlatform>,
+    device_filters: DeviceFilters,
+    session_filters: SessionFilters,
     local_code: Entity<Input>,
     pairing_qr: Option<std::rc::Rc<qrcode::QrCode>>,
     saving: bool,
@@ -243,12 +243,7 @@ impl Dashboard {
             let command = match command {
                 Operation::Api(Command::PeerStatus { peer, check }) => {
                     let snapshot = paxri_control::peer_status(&path, &peer, check).await?;
-                    let hosted = if snapshot.state == "Connected" && snapshot.capabilities.is_some_and(|c| c.managed_terminals) {
-                        tokio::time::timeout(Duration::from_secs(2), paxri_control::managed_terminal(
-                            &path, peer, paxri_control::terminal::managed::Request::List,
-                        )).await.ok().and_then(|r| r.ok()).map(|(_, keys)| keys)
-                    } else { None };
-                    return Ok(RequestResult::Peer(snapshot, hosted));
+                    return Ok(RequestResult::Peer(snapshot));
                 }
                 Operation::Api(Command::Status) => {
                     let mut status = gateway::discover(selected.as_deref(), selected_config.as_deref()).await?;
@@ -318,10 +313,7 @@ impl Dashboard {
                 view.gateway_action = None;
                 let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 match result {
-                    Ok(RequestResult::Peer(peer, hosted)) => {
-                        if let Some(keys) = hosted && view.status.as_ref().and_then(|s| s.peers.get(&peer.peer)) == Some(&peer.device_id) {
-                            view.terminal_sessions.entry(peer.peer.clone().into()).or_default().hosted = keys;
-                        }
+                    Ok(RequestResult::Peer(peer)) => {
                         if let Some(status) = &mut view.status
                             && status.peers.get(&peer.peer) == Some(&peer.device_id)
                             && let Some(links) = status.peer_connections.as_mut().and_then(|all| all.get_mut(&peer.peer))
@@ -374,6 +366,9 @@ impl Dashboard {
                         view.watch_presence(&status, cx);
                         if let Some(peer) = saved_peer && view.forward_filters.device.is_some() {
                             view.forward_filters.device = Some(peer);
+                        }
+                        if let Some(old) = &view.status {
+                            view.terminal_sessions.retain(|name, _| status.peers.get(name.as_ref()).is_some_and(|id| Some(id) == old.peers.get(name.as_ref())));
                         }
                         view.reconcile_device_selection(&status);
                         view.profile_native = legacy;
@@ -464,8 +459,6 @@ impl Dashboard {
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
-        let peer_search = Input::search("Search", cx);
-        cx.observe(&peer_search, |_, _, cx| cx.notify()).detach();
         let mut view = Self {
             presence_watch: None,
             refresh_presence: false,
@@ -483,9 +476,8 @@ impl Dashboard {
             pairing_qr: None,
             review_request: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),
-            peer_search,
-            peer_filter_open: false,
-            peer_system: None,
+            device_filters: DeviceFilters::new("Search", cx),
+            session_filters: SessionFilters::new("Search sessions…", cx),
             saving: false,
             gateway_action: None,
             address,
@@ -520,6 +512,9 @@ impl Dashboard {
                 if this
                     .update(cx, |view, cx| {
                         if tick == 3 {
+                            if Workspace::shows_devices(&cx.entity(), cx) {
+                                view.refresh_hosted_sessions(cx);
+                            }
                             if view.busy {
                                 view.refresh_presence = true;
                             } else {

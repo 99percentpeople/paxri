@@ -48,6 +48,9 @@ impl Mobile {
                     .then(|| format!("{connected} of {total} connected"));
                 (SharedString::from("Devices"), subtitle, None, None)
             }
+            Page::Sessions(origin) => (
+                "Sessions".into(), None, origin.as_ref().map(|_| "Back to device details"), None,
+            ),
             Page::Peer(id) => (
                 self.peers[id].name.clone().into(),
                 None,
@@ -114,7 +117,7 @@ impl Mobile {
                 (
                     title,
                     Some(subtitle),
-                    Some("Back to device details"),
+                    Some(if matches!(self.terminal_return, Page::Sessions(_)) { "Back to sessions" } else { "Back to device details" }),
                     Some(action.into_any_element()),
                 )
             }
@@ -149,7 +152,7 @@ impl Mobile {
                     .aria_expanded(self.drawer.open)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.drawer.set_open(true);
-                        this.sync_back();
+                        this.sync_back(cx);
                         cx.notify();
                     })),
             })
@@ -249,9 +252,12 @@ impl Mobile {
 
     fn devices(&self, ui: Ui, cx: &Context<Self>) -> Div {
         let now = unix_time_ms();
+        let filters = &self.device_filters;
+        let query = filters.query(cx);
         let mut peers: Vec<_> = self
             .peers
             .iter()
+            .filter(|(id, peer)| filters.matches(&query, &peer.name, "", id, peer.platform, peer_state(self.presence.paths_for(id), true)))
             .map(|(id, peer)| {
                 let changed = self
                     .presence
@@ -263,6 +269,7 @@ impl Mobile {
             })
             .collect();
         peers.sort_by_key(|(_, peer, changed)| (std::cmp::Reverse(*changed), &peer.name));
+        let no_matches = peers.is_empty() && !self.peers.is_empty();
         let rows = peers.into_iter().map(|(id, peer, changed)| {
             let id = id.clone();
             ui.device_row(
@@ -284,6 +291,8 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
+            .when(!self.peers.is_empty(), |page| page.child(filters.controls(|v| &mut v.device_filters, cx).with_state(&self.filter_menu)))
+            .when(no_matches, |page| page.child(ui.muted("No devices match your filters.")))
             .when(self.client.is_none(), |page| {
                 page.child(ui.muted(if self.starting_network { "Starting network…" } else { "Network unavailable" }))
             })
@@ -311,28 +320,6 @@ impl Mobile {
         let peer = &self.peers[id];
         let paths = self.presence.paths_for(id);
         let can_connect = self.presence.online(id) && peer.supports_shell();
-        let hosted = self.hosted.get(id).map(Vec::as_slice).unwrap_or_default();
-        let mut rows = self
-            .sessions
-            .values()
-            .filter(|s| s.peer == id && !(can_connect && matches!(s.state, SessionState::Ended(_)) && hosted.contains(&s.key)))
-            .map(|s| {
-                let id = s.id;
-                let (title, detail) = s.labels(cx);
-                ui.session_row(s.key.nonce as usize, title, detail)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.navigate(Page::Terminal(id), cx);
-                        cx.notify();
-                    }))
-            })
-            .chain(hosted.iter().copied().filter(|key| can_connect && !self.sessions.values().any(|s|
-                s.peer == id && s.key == *key && !matches!(s.state, SessionState::Ended(_)))).map(|key| {
-                let target = id.to_owned();
-                ui.session_row(key.nonce as usize, peer.name.clone().into(), format!("Session {}", key.number))
-                    .on_click(cx.listener(move |this, _, w, cx| this.open(target.clone(), Some(key), w, cx)))
-            }))
-            .peekable();
-        let show_sessions = can_connect || rows.peek().is_some();
         let body = div()
             .id("device-page")
             .flex_1()
@@ -391,10 +378,12 @@ impl Mobile {
                 )
             })
             .when(can_connect, |page| page.pb(FLOATING_ACTION_CLEARANCE))
-            .when(show_sessions, |page| {
-                page.child(ui.separator())
-                    .child(ui.terminal_sessions(None, rows))
-            });
+            .child(ui.separator())
+            .child(ui.navigation_row("device-sessions", Icon::Terminal.draw(18.), "Sessions".into(), "View sessions on this device")
+                .on_click(cx.listener({
+                    let id = id.to_owned();
+                    move |this, _, _, cx| this.show_sessions(Some(id.clone()), cx)
+                })));
         div()
             .relative()
             .flex()
@@ -404,7 +393,7 @@ impl Mobile {
             .child(body)
             .when(can_connect, |page| {
                 let target = id.to_owned();
-                let button = ui.floating_action("new-terminal-session", Icon::Terminal, "New session")
+                let button = ui.new_session_button()
                     .on_click(cx.listener(move |this, _, w, cx| this.open(target.clone(), None, w, cx)));
                 page.child(floating_corner().child(button))
             })
@@ -572,6 +561,7 @@ impl Render for Mobile {
                         Page::Forwards(peer) => self
                             .forward_list(peer.as_deref(), ui, cx)
                             .into_any_element(),
+                        Page::Sessions(_) => self.sessions_page(ui, cx).into_any_element(),
                         Page::Peer(id) => self.peer(&id, ui, cx).into_any_element(),
                         Page::Terminal(id) => self.terminal(id, window, cx).into_any_element(),
                     })

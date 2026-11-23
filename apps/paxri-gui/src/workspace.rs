@@ -578,9 +578,11 @@ impl Render for Workspace {
         let tabs = self.tab_bar(ui, window, cx);
         let panel = self.active_panel(ui, window.viewport_size().width, cx);
         let dock = DockLayout::new("paxri", tabs, panel, self.titlebar_actions(ui, cx));
+        let sessions_visible = self.active == Page::Home && self.dashboard.read(cx).devices_pane == Some(pages::DevicesPane::Sessions);
         let dock = dock
-            .when(self.active == Page::Settings, |dock| {
-                let search = self.dashboard.read(cx).settings_editor.search.clone();
+            .when(self.active == Page::Settings || sessions_visible, |dock| {
+                let dashboard = self.dashboard.read(cx);
+                let search = if sessions_visible { dashboard.session_filters.search.clone() } else { dashboard.settings_editor.search.clone() };
                 dock.capture_key_down(move |event, window, cx| {
                     let key = &event.keystroke;
                     let shortcut = Modifiers::secondary_key();

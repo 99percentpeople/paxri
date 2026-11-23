@@ -4,6 +4,7 @@ mod forwards;
 mod keybar;
 mod navigation;
 mod settings;
+mod sessions;
 mod touch;
 mod views;
 
@@ -40,7 +41,8 @@ use paxri_ui::{
         fonts::{CellSize, TerminalFont},
     },
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use paxri_ui::components::directory::{DeviceFilters, SessionFilters};
 use views::initial_size;
 use paxri_terminal::managed::{Key as SessionKey, Request as TerminalRequest};
 
@@ -455,6 +457,7 @@ impl Drop for Session {
 #[derive(Clone, PartialEq)]
 enum Page {
     Devices,
+    Sessions(Option<String>),
     PairingMenu,
     Settings,
     Forwards(Option<String>),
@@ -485,7 +488,12 @@ struct Mobile {
     sessions: BTreeMap<u64, Session>,
     last_session_number: BTreeMap<String, usize>,
     hosted: BTreeMap<String, Vec<SessionKey>>,
-    listing_peer: Option<String>,
+    listing_peers: BTreeSet<String>,
+    session_list_errors: BTreeSet<String>,
+    filter_menu: Entity<paxri_ui::components::DropdownState>,
+    device_filters: DeviceFilters,
+    session_filters: SessionFilters,
+    terminal_return: Page,
     page: Page,
     drawer: Drawer,
     name_input: Entity<paxri_ui::components::input::Input>,
@@ -619,25 +627,33 @@ impl Mobile {
         {
             Self::start_input(session);
         }
-        if let Some(client) = &self.client {
-            client.watch_peer(match &page {
-                Page::Peer(id) => Some(id),
-                Page::Terminal(id) => self.sessions.get(id).map(|s| s.peer.as_str()),
-                _ => None,
-            });
+        if matches!(page, Page::Terminal(_)) && !matches!(self.page, Page::Terminal(_)) {
+            self.terminal_return = self.page.clone();
         }
         if self.page != page {
+            self.filter_menu.update(cx, |menu, cx| menu.dismiss(cx));
             self.settings_scroll.set_offset(Point::default());
         }
         self.page = page;
+        self.watch_current_page();
         self.refresh_sessions();
         self.sync_forwards(false);
         self.drawer.set_open(false);
-        self.sync_back();
+        self.sync_back(cx);
     }
 
-    fn sync_back(&self) {
-        let enabled = self.drawer.open || self.page != Page::Devices;
+    fn watch_current_page(&self) {
+        if let Some(client) = &self.client {
+            client.watch_peer(match &self.page {
+                Page::Peer(id) => Some(id),
+                Page::Terminal(id) => self.sessions.get(id).map(|s| s.peer.as_str()),
+                _ => None,
+            }, matches!(self.page, Page::Sessions(_)));
+        }
+    }
+
+    fn sync_back(&self, cx: &App) {
+        let enabled = self.drawer.open || self.page != Page::Devices || self.filter_menu.read(cx).is_open();
         if CAN_GO_BACK.swap(enabled, Ordering::AcqRel) != enabled
             && let Err(error) = activity_action(&self.android, ActivityAction::BackEnabled(enabled))
         {
@@ -648,17 +664,15 @@ impl Mobile {
     fn back(&mut self, cx: &mut Context<Self>) {
         if self.drawer.open {
             self.drawer.set_open(false);
-            self.sync_back();
+            self.sync_back(cx);
             return;
         }
         let page = match self.page {
             Page::SettingsCategory(_) => Page::Settings,
             Page::ForwardEdit { ref scope, .. } => Page::Forwards(scope.clone()),
             Page::Forwards(Some(ref id)) => Page::Peer(id.clone()),
-            Page::Terminal(id) => self
-                .sessions
-                .get(&id)
-                .map_or(Page::Devices, |s| Page::Peer(s.peer.clone())),
+            Page::Sessions(Some(ref peer)) => Page::Peer(peer.clone()),
+            Page::Terminal(_) => self.terminal_return.clone(),
             _ => Page::Devices,
         };
         self.navigate(page, cx);
@@ -674,17 +688,24 @@ impl Mobile {
     }
 
     fn refresh_sessions(&mut self) {
-        let Page::Peer(peer) = &self.page else { return; };
-        let Some(client) = self.client.clone() else { return; };
-        if self.listing_peer.is_some() || !self.presence.online(peer) ||
-            !self.peers.get(peer).and_then(|p| p.capabilities).is_some_and(|c| c.managed_terminals) { return; }
-        let peer = peer.clone();
-        self.listing_peer = Some(peer.clone());
-        let updates = self.updates.clone();
-        self.rt.spawn(async move {
-            let keys = client.manage_terminal(&peer, TerminalRequest::List).await.ok();
-            let _ = updates.send(Update::Hosted(peer, keys)).await;
-        });
+        let Some(client) = &self.client else { return };
+        for (peer, saved) in &self.peers {
+            match &self.page {
+                Page::Sessions(_) => {}
+                Page::Peer(selected) if selected == peer => {}
+                _ => continue,
+            }
+            if !self.presence.online(peer) || !saved.capabilities.is_some_and(|c| c.managed_terminals)
+                || !self.listing_peers.insert(peer.clone()) { continue; }
+            let peer = peer.clone();
+            let client = client.clone();
+            let updates = self.updates.clone();
+            self.rt.spawn(async move {
+                let keys = tokio::time::timeout(std::time::Duration::from_secs(2), client.manage_terminal(&peer, TerminalRequest::List))
+                    .await.ok().and_then(Result::ok);
+                let _ = updates.send(Update::Hosted(peer, keys)).await;
+            });
+        }
     }
 
     fn end_session(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -782,6 +803,8 @@ impl Mobile {
             Update::Ready(client, peers) => {
                 self.client = Some(client);
                 self.peers = peers;
+                self.watch_current_page();
+                self.refresh_sessions();
                 self.starting_network = false;
                 if let Err(error) = activity_action(&self.android, ActivityAction::PairingReady) {
                     Toast::show(error, self.window, cx);
@@ -822,7 +845,7 @@ impl Mobile {
             }
             Update::Devices(peers) => {
                 let revoked = match &mut self.page {
-                    Page::Peer(id) | Page::Forwards(Some(id)) => !peers.contains_key(id),
+                    Page::Peer(id) | Page::Sessions(Some(id)) | Page::Forwards(Some(id)) => !peers.contains_key(id),
                     Page::ForwardEdit { owner, scope } => {
                         if scope.as_ref().is_some_and(|id| !peers.contains_key(id)) {
                             *scope = None;
@@ -841,7 +864,7 @@ impl Mobile {
                     | Page::PairingMenu
                     | Page::Settings
                     | Page::SettingsCategory(_)
-                    | Page::Forwards(None) => false,
+                    | Page::Sessions(None) | Page::Forwards(None) => false,
                 };
                 if revoked {
                     self.navigate(Page::Devices, cx);
@@ -851,6 +874,13 @@ impl Mobile {
                 }
                 self.sessions.retain(|_, s| peers.contains_key(&s.peer));
                 self.hosted.retain(|peer, _| peers.contains_key(peer));
+                self.session_list_errors.retain(|peer| peers.contains_key(peer));
+                if self.session_filters.scope.device.as_ref().is_some_and(|id| !peers.contains_key(id)) {
+                    self.session_filters.scope.device = None;
+                }
+                if matches!(&self.terminal_return, Page::Sessions(Some(id)) | Page::Peer(id) if !peers.contains_key(id)) {
+                    self.terminal_return = Page::Sessions(None);
+                }
                 self.last_session_number
                     .retain(|peer, _| peers.contains_key(peer));
                 self.peers = peers;
@@ -874,13 +904,14 @@ impl Mobile {
                     .terminal_menus
                     .iter()
                     .chain([
+                        &self.filter_menu,
                         &self.keybar_menu,
                         &self.rule_form.device_menu,
                         &self.rule_form.direction_menu,
                     ])
                     .find(|menu| menu.read(cx).is_open())
                 {
-                    menu.update(cx, |menu, cx| menu.dismiss(cx));
+                    menu.update(cx, |menu, cx| menu.back(cx));
                 } else {
                     self.back(cx);
                 }
@@ -932,11 +963,13 @@ impl Mobile {
                 }
             }
             Update::Hosted(peer, keys) => {
-                self.listing_peer = None;
-                if let Some(keys) = keys && self.peers.contains_key(&peer) {
-                    if self.hosted.get(&peer) == Some(&keys) { return; }
+                self.listing_peers.remove(&peer);
+                if !self.peers.contains_key(&peer) { return; }
+                if let Some(keys) = keys {
+                    let recovered = self.session_list_errors.remove(&peer);
+                    if !recovered && self.hosted.get(&peer) == Some(&keys) { return; }
                     self.hosted.insert(peer, keys);
-                }
+                } else if !self.session_list_errors.insert(peer) { return; }
             }
             Update::Output(id, bytes, replay) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
@@ -1098,7 +1131,16 @@ fn android_main(android: AndroidApp) {
                 let name_input = paxri_ui::components::input::Input::setting(&names.system, cx);
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
                 use gpui_mobile::KeyboardType;
-                let mut inputs = vec![(name_input.clone(), KeyboardType::Default)];
+                let filter_menu = paxri_ui::components::DropdownState::new(window, cx);
+                cx.observe(&filter_menu, |this: &mut Mobile, _, cx| this.sync_back(cx))
+                    .detach();
+                let device_filters = DeviceFilters::new("Search devices…", cx);
+                let session_filters = SessionFilters::new("Search sessions…", cx);
+                let mut inputs = vec![
+                    (name_input.clone(), KeyboardType::Default),
+                    (device_filters.search.clone(), KeyboardType::Default),
+                    (session_filters.search.clone(), KeyboardType::Default),
+                ];
                 let rule_form = forwards::RuleForm::new(window, cx);
                 inputs.extend(
                     rule_form
@@ -1133,7 +1175,12 @@ fn android_main(android: AndroidApp) {
                     sessions: BTreeMap::new(),
                     last_session_number: BTreeMap::new(),
                     hosted: BTreeMap::new(),
-                    listing_peer: None,
+                    listing_peers: BTreeSet::new(),
+                    session_list_errors: BTreeSet::new(),
+                    filter_menu,
+                    device_filters,
+                    session_filters,
+                    terminal_return: Page::Devices,
                     forwards: Default::default(),
                     rule_form,
                     page: Page::Devices,

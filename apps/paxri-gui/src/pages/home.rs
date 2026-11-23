@@ -15,6 +15,7 @@ use paxri_control::{Command, DevicePlatform, PairingPeer, PairingStatus};
 pub(crate) enum DevicesPane {
     Peer(String),
     Forwards,
+    Sessions,
 }
 
 impl Dashboard {
@@ -29,6 +30,9 @@ impl Dashboard {
                 .peers_by_last_change()
                 .first()
                 .map(|(name, _)| DevicesPane::Peer(name.to_string()));
+        }
+        if self.session_filters.scope.device.as_ref().is_some_and(|p| !status.peers.contains_key(p)) {
+            self.session_filters.scope.device = None;
         }
         if self
             .forward_filters
@@ -58,16 +62,6 @@ impl Dashboard {
 
     fn device_sidebar(&self, ui: Ui, cx: &Context<Self>) -> DockNavigation {
         let requests = self.status.as_ref().map_or(0, |s| s.pairing.incoming.len());
-        let label = div()
-            .min_w_0()
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(single_line(div()).child("Add Device"))
-            .when(requests > 0, |r| {
-                r.child(ui.muted(requests.to_string()).text_xs())
-            });
         let state = if self.status.is_some() {
             "Gateway online"
         } else if self.error.is_some() {
@@ -75,12 +69,6 @@ impl Dashboard {
         } else {
             "Connecting…"
         };
-        let add = ui
-            .button(Ghost, "add-device", label)
-            .row()
-            .icon(Icon::Plus)
-            .tooltip(crate::components::tooltip("Pair a device".into()))
-            .on_click(cx.listener(|v, _, w, cx| v.open_pairing(w, cx)));
         let body = div()
             .min_h_0()
             .min_w_0()
@@ -98,7 +86,6 @@ impl Dashboard {
                     .when_some(self.status.as_ref(), |d, s| {
                         d.child(self.paired_devices(ui, s, cx))
                     })
-                    .child(add)
                     .when_some(self.status.as_ref().filter(|s| !s.pairing.pending_unpairs.is_empty()), |d, s| {
                         d.child(ui.muted(format!(
                             "Awaiting unpair confirmation: {}",
@@ -106,6 +93,14 @@ impl Dashboard {
                         )).text_xs())
                     }),
             )
+            .when(self.status.as_ref().is_some_and(|s| !s.peers.is_empty() || requests > 0), |sidebar| {
+                let label = if requests > 0 { format!("Pair a device ({requests})") } else { "Pair a device".to_owned() };
+                sidebar.child(ui.button(Ghost, "add-device", label).icon(Icon::Plus).row()
+                    .on_click(cx.listener(|v, _, w, cx| v.open_pairing(w, cx))))
+            })
+            .child(ui.button(Ghost, "all-sessions", "Sessions").icon(Icon::Terminal).row()
+                .pressed(self.devices_pane == Some(DevicesPane::Sessions))
+                .on_click(cx.listener(|v, _, _, cx| v.show_sessions(None, cx))))
             .child(
                 ui.button(Ghost, "all-forwards", "Port forwarding")
                     .icon(Icon::Forward)
@@ -137,13 +132,19 @@ impl Dashboard {
     }
 
     pub(crate) fn home(&self, ui: Ui, width: Pixels, cx: &mut Context<Self>) -> DockPanel {
-        let content = match (&self.devices_pane, &self.status) {
-            (_, None) => self.gateway_notice(ui, cx),
+        let (content, action) = match (&self.devices_pane, &self.status) {
+            (_, None) => (self.gateway_notice(ui, cx), self.gateway_start_button(ui, cx)),
+            (Some(DevicesPane::Sessions), Some(status)) => self.sessions_page(status, ui, cx),
             (Some(DevicesPane::Peer(peer)), Some(status)) => {
-                self.device_detail(peer, status, ui, cx)
+                let action = self.can_open_shell(peer).then(|| self.new_session(peer, ui).into_any_element());
+                (self.device_detail(peer, status, ui, cx), action)
             }
-            (Some(DevicesPane::Forwards), Some(status)) => self.forwarding(status, ui, width, cx),
-            (_, Some(status)) => overview()
+            (Some(DevicesPane::Forwards), Some(status)) => {
+                let action = (!status.peers.is_empty()).then(|| ui.floating_action("add-rule", Icon::Plus, "Add forwarding rule")
+                    .on_click(cx.listener(|v, _, w, cx| v.open_rule(None, None, w, cx))).into_any_element());
+                (self.forwarding(status, ui, width, cx), action)
+            }
+            (_, Some(status)) => (overview()
                 .child(ui.device_heading(
                     ui.muted("This device").text_xs().flex_none(),
                     self.local_name.clone(),
@@ -158,11 +159,13 @@ impl Dashboard {
                     ui.section()
                         .child(crate::components::heading("Paired devices"))
                         .child(ui.muted(
-                            "Choose Add Device in the device list to pair your first device.",
+                            "Use the + button to pair your first device.",
                         )),
-                ),
+                ), Some(ui.floating_action("pair-first-device", Icon::Plus, "Pair a device")
+                    .on_click(cx.listener(|v, _, w, cx| v.open_pairing(w, cx))).into_any_element())),
         };
         DockPanel::scroll("devices-content", self.home_scroll.clone(), content)
+            .with_action(action)
             .with_navigation(self.device_sidebar(ui, cx))
     }
 

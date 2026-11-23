@@ -49,7 +49,7 @@ impl Mobile {
         let close = || {
             cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.drawer.set_open(false);
-                this.sync_back();
+                this.sync_back(cx);
                 cx.notify();
             })
         };
@@ -67,7 +67,11 @@ impl Mobile {
             .aria_label(label)
             .aria_selected(selected)
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.navigate(page.clone(), cx);
+                if matches!(page, Page::Sessions(_)) {
+                    this.show_sessions(None, cx);
+                } else {
+                    this.navigate(page.clone(), cx);
+                }
                 cx.notify();
             }))
         };
@@ -123,6 +127,7 @@ impl Mobile {
                 Icon::Monitor,
                 Page::Devices,
             ))
+            .child(destination("nav-sessions", "Sessions", Icon::Terminal, Page::Sessions(None)))
             .child(destination(
                 "nav-forwards",
                 "Port forwarding",

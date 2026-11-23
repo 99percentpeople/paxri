@@ -2,7 +2,7 @@ use crate::{
     Dashboard, Input,
     components::{
         ButtonVariant::Primary,
-        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Select, Ui, form_row, heading, row,
+        Dialog, DialogContent, DialogMode, DialogSuccess, Select, Ui, form_row, heading, row,
     },
 };
 use gpui::{prelude::*, *};
@@ -238,15 +238,6 @@ impl Dashboard {
                                 r.child(ui.muted(format!("{} of {total}", rows.len())).text_xs())
                             }),
                     )
-                    .when(!s.peers.is_empty(), |r| {
-                        r.child(
-                            ui.button(Primary, "add-rule", "Add rule")
-                                .icon(Icon::Plus)
-                                .on_click(
-                                    cx.listener(|v, _, w, cx| v.open_rule(None, None, w, cx)),
-                                ),
-                        )
-                    }),
             )
             .child(filters.toolbar(s, cx));
         let columns = || div().w_full().min_w_0().flex().gap_2().items_center();
