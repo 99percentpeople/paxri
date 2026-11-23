@@ -300,6 +300,7 @@ enum ActivityAction<'a> {
     Pair,
     Scan,
     PairingReady,
+    DeviceConnections { paired: bool, connected: bool },
     HardwareText(u64, &'a str),
     BackEnabled(bool),
     Appearance(bool, &'a theme::Palette),
@@ -324,6 +325,10 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
         let activity =
             unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
         match action {
+            ActivityAction::DeviceConnections { paired, connected } => env.call_method(
+                activity, jni_str!("setDeviceConnections"), jni_sig!("(ZZ)V"),
+                &[paired.into(), connected.into()],
+            ),
             ActivityAction::Toast(message) => {
                 let text = JString::from_str(env, message).map_err(|e| e.to_string())?;
                 env.call_method(activity, jni_str!("showToast"), jni_sig!("(Ljava/lang/String;)V"), &[(&text).into()])
@@ -1042,10 +1047,15 @@ fn android_main(android: AndroidApp) {
         *BRIDGE.lock().unwrap() = Some(controls);
         let disk = android.internal_data_path();
         let events = tx.clone();
+        let network_activity = android.clone();
         handle.spawn(async move {
             let result = async {
                 let dir = disk.ok_or_else(|| anyhow::anyhow!("App storage unavailable"))?;
-                Client::start(&dir, events.clone()).await
+                Client::start(&dir, events.clone(), move |paired, connected| {
+                    if let Err(error) = activity_action(&network_activity, ActivityAction::DeviceConnections { paired, connected }) {
+                        log::warn!("Updating background connection service: {error}");
+                    }
+                }).await
             }
             .await;
             let event = match result {

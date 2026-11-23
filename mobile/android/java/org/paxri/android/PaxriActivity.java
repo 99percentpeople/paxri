@@ -57,6 +57,10 @@ public final class PaxriActivity extends GpuiInputActivity {
     private ScrollView keybarScroll;
     private Rect touchArea = new Rect();
     private boolean visible;
+    private boolean deviceConnected;
+    private boolean connectionServiceStarted;
+    private final Handler connectionHandler = new Handler(Looper.getMainLooper());
+    private final Runnable stopConnections = this::stopConnectionService;
     private String scannedCode;
     private Insets previousInsets;
     private float insetDensity;
@@ -125,10 +129,51 @@ public final class PaxriActivity extends GpuiInputActivity {
         publishDeviceName();
     }
 
+    public void setDeviceConnections(boolean paired, boolean connected) {
+        runOnUiThread(() -> {
+            if (isDestroyed() || isFinishing()) return;
+            deviceConnected = connected;
+            connectionHandler.removeCallbacks(stopConnections);
+            if (connected) {
+                startConnectionServiceIfVisible();
+            } else if (!paired) {
+                stopConnectionService();
+            } else if (connectionServiceStarted) {
+                // Keep the process eligible for reconnect during the gateway's offline grace period.
+                connectionHandler.postDelayed(stopConnections, 5 * 60 * 1000L);
+            }
+        });
+    }
+
+    private void startConnectionServiceIfVisible() {
+        if (!visible || !deviceConnected || connectionServiceStarted) return;
+        try {
+            startForegroundService(new Intent(this, ConnectionService.class));
+            connectionServiceStarted = true;
+        } catch (IllegalStateException | SecurityException error) {
+            android.util.Log.w("paxri", "Starting background device connections", error);
+        }
+    }
+
+    private void stopConnectionService() {
+        if (connectionServiceStarted) {
+            stopService(new Intent(this, ConnectionService.class));
+            connectionServiceStarted = false;
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        connectionHandler.removeCallbacks(stopConnections);
+        stopConnectionService();
+        super.onDestroy();
+    }
+
     @Override
     protected void onStart() {
         super.onStart();
         visible = true;
+        startConnectionServiceIfVisible();
         updateTerminalTouch();
         activityVisibilityChanged(true);
         try {

@@ -114,7 +114,11 @@ impl Client {
         paxri_control::forwarding::query(name, session, action).await
     }
 
-    pub async fn start(dir: &Path, updates: Sender<Update>) -> Result<Arc<Self>> {
+    pub async fn start(
+        dir: &Path,
+        updates: Sender<Update>,
+        connection_state: impl Fn(bool, bool) + Send + 'static,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let key = paxri_native::identity::init(&dir.join("device.key"))?;
         let file = dir.join("peers.json");
@@ -157,6 +161,7 @@ impl Client {
             Arc::downgrade(&client),
             viewed,
             updates.clone(),
+            connection_state,
         ));
         let weak = Arc::downgrade(&client);
         tokio::spawn(async move {
@@ -278,6 +283,7 @@ impl Client {
         weak: Weak<Self>,
         mut viewed: watch::Receiver<Option<String>>,
         updates: Sender<Update>,
+        connection_state: impl Fn(bool, bool),
     ) {
         let Some(transport) = weak.upgrade().map(|c| c.transport.clone()) else {
             return;
@@ -286,6 +292,7 @@ impl Client {
         let mut config = transport.subscribe_config();
         let mut times = BTreeMap::new();
         let mut foreground = crate::ACTIVITY_VISIBLE.subscribe();
+        let mut last_service_state = None;
         loop {
             let latest = changes.borrow_and_update().clone();
             if times != latest {
@@ -308,9 +315,15 @@ impl Client {
             let visible = *foreground.borrow_and_update();
             let peer = viewed.borrow_and_update().clone();
             let mut interval = Duration::from_secs(60);
+            let paths = transport.connections();
+            let state = (!paths.is_empty(), paths.values().any(|links| !links.is_empty()));
+            if last_service_state != Some(state) {
+                connection_state(state.0, state.1);
+                last_service_state = Some(state);
+            }
             if visible {
                 let snapshot = Presence {
-                    paths: transport.connections(),
+                    paths,
                     changed_at: times.clone(),
                 };
                 // Sample the visible connection's graphs each second. The list only needs to age its labels.
