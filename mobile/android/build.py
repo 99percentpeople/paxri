@@ -37,14 +37,12 @@ def download(url, checksum):
     return path
 
 
-def vertical_scroll_source(package):
-    # The pinned GPUI recognizer discards Y when a pan starts mostly horizontally.
-    # Apply the Android client's vertical viewport policy without editing Cargo's registry cache.
-    patch = APP / "gpui-vertical-scroll.patch"
+def patched_source(package, patch_name):
+    patch = APP / patch_name
     digest = hashlib.sha256(patch.read_bytes()).hexdigest()[:16]
     cache = OUT / "dependencies"
     cache.mkdir(exist_ok=True)
-    source = cache / f"gpui-pre-{package['version']}-{digest}"
+    source = cache / f"{package['name']}-{package['version']}-{digest}"
     if not source.is_dir():
         with tempfile.TemporaryDirectory(dir=cache) as tmp:
             staged = Path(tmp) / "gpui"
@@ -56,7 +54,7 @@ def vertical_scroll_source(package):
             except OSError:
                 if not source.is_dir():
                     raise
-    return "paths = " + json.dumps([str(source)])
+    return str(source)
 
 
 def main():
@@ -75,7 +73,10 @@ def main():
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version=1", "--filter-platform", TARGET], cwd=APP))
     crates = {p["name"]: p for p in metadata["packages"]}
-    override = vertical_scroll_source(crates["gpui-pre"])
+    override = "paths = " + json.dumps([
+        patched_source(crates["gpui-pre"], "gpui-vertical-scroll.patch"),
+        patched_source(crates["gpui-pre-wgpu"], "gpui-android-font-fallback.patch"),
+    ])
     # Align the extracted native library for both 4 KB and 16 KB page devices.
     linker_flags = ["--", "-C", "link-arg=-Wl,-z,max-page-size=16384"]
     profile_flags = ["--release"] if args.unsigned_release else []
