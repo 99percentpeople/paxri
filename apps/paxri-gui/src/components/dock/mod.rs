@@ -25,6 +25,7 @@ pub struct DockPanel {
     content: AnyElement,
     scroll: Option<(ElementId, ScrollHandle)>,
     navigation: Option<DockNavigation>,
+    action: Option<AnyElement>,
 }
 
 impl DockPanel {
@@ -33,7 +34,13 @@ impl DockPanel {
             content: content.into_any_element(),
             scroll: None,
             navigation: None,
+            action: None,
         }
+    }
+
+    pub(crate) fn with_action(mut self, action: Option<AnyElement>) -> Self {
+        self.action = action;
+        self
     }
 
     pub(crate) fn with_navigation(mut self, navigation: DockNavigation) -> Self {
@@ -50,6 +57,7 @@ impl DockPanel {
             content: content.into_any_element(),
             scroll: Some((id.into(), handle)),
             navigation: None,
+            action: None,
         }
     }
 }
@@ -57,7 +65,7 @@ impl DockPanel {
 impl RenderOnce for DockPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let panel = div().flex_1().min_h_0().min_w_0();
-        match self.scroll {
+        let content = match self.scroll {
             Some((id, handle)) => panel
                 .relative()
                 .child(
@@ -67,6 +75,7 @@ impl RenderOnce for DockPanel {
                         .overflow_y_scroll()
                         .track_scroll(&handle)
                         .p(SPACE_4)
+                        .when(self.action.is_some(), |d| d.pb(paxri_ui::components::FLOATING_ACTION_CLEARANCE))
                         .child(self.content),
                 )
                 .child(Scrollbar::vertical((id, "bar"), handle))
@@ -75,7 +84,9 @@ impl RenderOnce for DockPanel {
                 .overflow_hidden()
                 .child(self.content)
                 .into_any_element(),
-        }
+        };
+        div().relative().min_w_0().min_h_0().flex_1().flex().flex_col().child(content)
+            .when_some(self.action, |panel, action| panel.child(paxri_ui::components::floating_corner().child(action)))
     }
 }
 

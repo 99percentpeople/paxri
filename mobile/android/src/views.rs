@@ -4,8 +4,8 @@ use paxri_core::connection::{peer_state, unix_time_ms};
 use paxri_ui::connections::presence_detail;
 use paxri_ui::{
     components::{
-        ButtonVariant::{Ghost, Primary},
-        Button, Icon, single_line,
+        ButtonVariant::Ghost,
+        Icon, single_line, floating_corner, FLOATING_ACTION_CLEARANCE,
     },
     terminal::{cursor, display},
 };
@@ -32,18 +32,6 @@ pub(super) fn initial_size(window: &Window, cell: CellSize, keys: &KeybarSetting
         ),
         cell,
     )
-}
-
-fn floating_corner() -> Div {
-    div().absolute().bottom_4().right_4()
-}
-
-fn floating_button(ui: Ui, id: &'static str, icon: Icon, label: &'static str) -> Button {
-    ui.button(Primary, id, icon.draw(24.))
-        .floating()
-        .occlude()
-        .role(Role::Button)
-        .aria_label(label)
 }
 
 impl Mobile {
@@ -235,8 +223,7 @@ impl Mobile {
                 )
             })
             .child(
-                floating_button(
-                    ui,
+                ui.floating_action(
                     "pair-device",
                     toggle_icon,
                     if expanded {
@@ -315,7 +302,7 @@ impl Mobile {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .pb(px(88.))
+                    .pb(FLOATING_ACTION_CLEARANCE)
                     .children(rows),
             )
     }
@@ -403,7 +390,7 @@ impl Mobile {
                     })),
                 )
             })
-            .when(can_connect, |page| page.pb(px(88.)))
+            .when(can_connect, |page| page.pb(FLOATING_ACTION_CLEARANCE))
             .when(show_sessions, |page| {
                 page.child(ui.separator())
                     .child(ui.terminal_sessions(None, rows))
@@ -417,7 +404,7 @@ impl Mobile {
             .child(body)
             .when(can_connect, |page| {
                 let target = id.to_owned();
-                let button = floating_button(ui, "new-terminal-session", Icon::Terminal, "New session")
+                let button = ui.floating_action("new-terminal-session", Icon::Terminal, "New session")
                     .on_click(cx.listener(move |this, _, w, cx| this.open(target.clone(), None, w, cx)));
                 page.child(floating_corner().child(button))
             })
@@ -607,7 +594,7 @@ impl Render for Mobile {
                     })
                     .when(show_add_rule, |page| {
                         page.child(floating_corner().child(
-                            floating_button(ui, "add-forward", Icon::Plus, "Add forwarding rule")
+                            ui.floating_action("add-forward", Icon::Plus, "Add forwarding rule")
                                 .on_click(cx.listener(|this, _, _, cx| this.open_rule(None, cx))),
                         ))
                     })

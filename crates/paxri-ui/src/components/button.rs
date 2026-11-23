@@ -34,6 +34,13 @@ pub struct Button {
     layout: ButtonLayout,
 }
 
+/// Space below the last item of a scrolling page with a floating primary action.
+pub const FLOATING_ACTION_CLEARANCE: Pixels = px(88.);
+
+pub fn floating_corner() -> Div {
+    div().absolute().bottom_4().right_4()
+}
+
 impl Ui {
     pub fn button(
         self,
@@ -51,6 +58,14 @@ impl Ui {
             pressed: false,
             layout: ButtonLayout::Label,
         }
+    }
+
+    pub fn floating_action(self, id: &'static str, icon: Icon, label: &'static str) -> Button {
+        let button = self.button(ButtonVariant::Primary, id, icon.draw(if cfg!(target_os = "android") { 24. } else { 21. }))
+            .floating().occlude().tooltip(tooltip(label.into()));
+        #[cfg(target_os = "android")]
+        let button = button.role(Role::Button).aria_label(label);
+        button
     }
 
     pub fn icon_button(
@@ -191,7 +206,7 @@ impl RenderOnce for Button {
             ButtonLayout::Key => root.flex_1().min_w_0().px(SPACE_1),
             ButtonLayout::Icon => root.w(BUTTON_HEIGHT),
             ButtonLayout::Circular => root.size(BUTTON_HEIGHT).rounded_full(),
-            ButtonLayout::Floating => root.size(px(56.)).rounded_full().shadow_md(),
+            ButtonLayout::Floating => root.size(px(if cfg!(target_os = "android") { 56. } else { 48. })).rounded_full().shadow_md(),
             ButtonLayout::Row => root
                 .w_full()
                 .min_w_0()

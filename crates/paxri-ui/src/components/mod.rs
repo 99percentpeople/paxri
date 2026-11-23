@@ -13,7 +13,7 @@ mod tooltip;
 mod toast;
 pub use toast::Toast;
 use crate::theme::{self, CONTROL_RADIUS, Palette, SPACE_1, SPACE_2, SPACE_3, SPACE_4};
-pub use button::{Button, ButtonVariant};
+pub use button::{Button, ButtonVariant, FLOATING_ACTION_CLEARANCE, floating_corner};
 use gpui::{prelude::*, *};
 pub use icons::Icon;
 pub use list_item::ListItem;
