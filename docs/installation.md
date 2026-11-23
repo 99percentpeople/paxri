@@ -1,8 +1,8 @@
 # Install paxri
 
-Download your system's archive and `SHA256SUMS` from the **paxri rolling build** prerelease. The release notes identify the source commit. Save both files in the same directory. On Linux run `sha256sum -c --ignore-missing SHA256SUMS`. On Windows compare `Get-FileHash -Algorithm SHA256 FILE` with the entry for that file in `SHA256SUMS`. [Download the rolling build](../../../releases/tag/rolling)
+Download your system's package and `SHA256SUMS` from the **paxri rolling build** prerelease. The release notes identify the source commit. Save both files in the same directory. On Linux run `sha256sum -c --ignore-missing SHA256SUMS`. On Windows compare `Get-FileHash -Algorithm SHA256 FILE` with the entry for that file in `SHA256SUMS`. [Download the rolling build](../../../releases/tag/rolling)
 
-| System | Archive |
+| System | Package |
 | --- | --- |
 | Windows on Intel or AMD | `paxri-windows-x64.zip` |
 | AMD64 Linux with glibc (e.g. Debian or Ubuntu) | `paxri-linux-amd64-glibc.tar.gz` |
@@ -10,6 +10,7 @@ Download your system's archive and `SHA256SUMS` from the **paxri rolling build**
 | ARM64 Linux with musl (e.g. Alpine or OpenWrt) | `paxri-linux-arm64-musl.tar.gz` |
 | Apple Silicon | `paxri-macos-arm64.tar.gz` |
 | Intel Mac | `paxri-macos-amd64.tar.gz` |
+| ARM64 Android | `paxri.apk` |
 
 On Windows, extract the whole ZIP into one directory. Keep `conpty.dll` and `OpenConsole.exe` beside the gateway to support mouse input and screen switching in remote terminal applications. Restart the gateway after updating those files.
 
