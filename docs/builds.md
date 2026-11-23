@@ -13,6 +13,10 @@ gh workflow run builds.yml --ref main
 gh run list --workflow builds.yml --branch main
 ```
 
+## Android signing
+
+The `android-signing` GitHub Actions environment allows only the `main` branch. It stores `ANDROID_KEYSTORE_BASE64` (the base64-encoded PKCS#12 keystore with alias `paxri-release`) and `ANDROID_KEYSTORE_PASSWORD`. Main builds sign the APK and check its certificate SHA-256 against the public fingerprint in the workflow before uploading it. PRs and manual runs on other branches use a development key. To restore release signing in another repository, configure the same secrets from the original keystore and password. [Build workflow](../.github/workflows/builds.yml)
+
 ## Download a build
 
 Download the package for your OS and CPU from the rolling prerelease or an Actions run. Actions serves the original `.zip`, `.tar.gz`, or `.apk` file directly. The `paxri-build-info` artifact groups `SHA256SUMS`, `compose.yaml`, and the `build.env` file that pins the gateway image to the same commit.

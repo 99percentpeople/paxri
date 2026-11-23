@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build and sign the ARM64 paxri development APK using the Android SDK."""
+"""Build the ARM64 paxri APK using the Android SDK."""
+import argparse
 import hashlib
 import json
 import os
@@ -59,6 +60,10 @@ def vertical_scroll_source(package):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--unsigned-release", action="store_true",
+                        help="build an aligned, non-debuggable APK for release signing")
+    args = parser.parse_args()
     sdk_path = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
     if not sdk_path:
         raise SystemExit("Set ANDROID_HOME to the Android SDK directory.")
@@ -90,10 +95,6 @@ def main():
                        "4.3.0/zxing-android-embedded-4.3.0.aar", SCANNER_HASH)
     zxing = download("https://repo.maven.apache.org/maven2/com/google/zxing/core/"
                      "3.5.4/core-3.5.4.jar", ZXING_HASH)
-    key = OUT / "debug.p12"
-    if not key.exists():
-        run("keytool", "-genkeypair", "-keystore", key, "-storepass", "android", "-keypass", "android",
-            "-alias", "paxri-debug", "-keyalg", "RSA", "-validity", "10000", "-dname", "CN=paxri Debug")
     with tempfile.TemporaryDirectory(dir=OUT) as tmp:
         tmp = Path(tmp)
         classes = tmp / "classes"
@@ -115,7 +116,8 @@ def main():
         compiled.mkdir()
         run(tools / "aapt2", "compile", "--dir", tmp / "res", "-o", compiled)
         package = tmp / "base.apk"
-        run(tools / "aapt2", "link", "--debug-mode", "-I", platform, "--manifest", APP / "AndroidManifest.xml",
+        debug_flags = [] if args.unsigned_release else ["--debug-mode"]
+        run(tools / "aapt2", "link", *debug_flags, "-I", platform, "--manifest", APP / "AndroidManifest.xml",
             "--java", generated, "--extra-packages", "com.google.zxing.client.android",
             "-o", package, *sorted(compiled.glob("*.flat")))
         java = host / "java/dev/gpui/mobile"
@@ -146,11 +148,20 @@ def main():
             apk.write(host / "assets/fonts/NotoColorEmoji.ttf", "assets/fonts/NotoColorEmoji.ttf")
         aligned = tmp / "aligned.apk"
         run(tools / "zipalign", "-f", "4", package, aligned)
-        signed = tmp / "paxri.apk"
-        run(tools / "apksigner", "sign", "--ks", key, "--ks-pass", "pass:android", "--out", signed, aligned)
-        run(tools / "apksigner", "verify", signed)
-        shutil.move(signed, OUT / "paxri.apk")
-    print(OUT / "paxri.apk")
+        if args.unsigned_release:
+            output = OUT / "paxri-unsigned.apk"
+            aligned.replace(output)
+        else:
+            key = OUT / "debug.p12"
+            if not key.exists():
+                run("keytool", "-genkeypair", "-keystore", key, "-storepass", "android", "-keypass", "android",
+                    "-alias", "paxri-debug", "-keyalg", "RSA", "-validity", "10000", "-dname", "CN=paxri Debug")
+            signed = tmp / "paxri.apk"
+            run(tools / "apksigner", "sign", "--ks", key, "--ks-pass", "pass:android", "--out", signed, aligned)
+            run(tools / "apksigner", "verify", signed)
+            output = OUT / "paxri.apk"
+            signed.replace(output)
+    print(output)
 
 
 if __name__ == "__main__":

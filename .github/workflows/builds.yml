@@ -35,13 +35,16 @@ jobs:
     name: Android APK (arm64-v8a)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'android-signing' || 'android-preview' }}
+      deployment: false
     env:
       CARGO_INCREMENTAL: '0'
       NDK_VERSION: 26.1.10909125
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install ${{ env.RUSTUP_TOOLCHAIN }} --profile minimal --target aarch64-linux-android
-      - name: Build and verify the development APK
+      - name: Build the APK
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
           export PATH="$JAVA_HOME/bin:$PATH"
@@ -53,7 +56,27 @@ jobs:
           export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
           export RANLIB_aarch64_linux_android="$ndk_bin/llvm-ranlib"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
-          python3 mobile/android/build.py
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            python3 mobile/android/build.py --unsigned-release
+          else
+            python3 mobile/android/build.py
+          fi
+      - name: Sign the rolling APK and verify its certificate
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CERT_SHA256: 3eec85f0124da768814f023d75d2092de7e80a480986cb7d2e39457b730cc616
+        run: |
+          umask 077
+          key=$(mktemp "$RUNNER_TEMP/paxri-key.XXXXXXXX")
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "${ANDROID_KEYSTORE_BASE64:?Missing Android release keystore}" | base64 --decode > "$key"
+          signer="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$signer" sign --ks "$key" --ks-key-alias paxri-release --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --out target/android/paxri.apk target/android/paxri-unsigned.apk
+          "$signer" verify --verbose --print-certs target/android/paxri.apk | grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: target/android/paxri.apk

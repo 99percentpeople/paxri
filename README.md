@@ -81,7 +81,7 @@ Open `http://127.0.0.1:8080` on this computer to reach port 3000 on `home`. Both
 
 The ARM64 Android client uses GPUI for the device list and terminal, the Android input method for typing, and the desktop gateway's pairing and PTY protocols. It requires Android 10 or later and a Vulkan-capable GPU.
 
-Download `paxri.apk` from the rolling prerelease. Pull requests also build the APK and upload it directly as the `paxri.apk` Actions artifact. Each run uses a fresh development signing key. [Rolling prerelease](../../releases/tag/rolling) · [Build runs](../../actions/workflows/builds.yml)
+Download `paxri.apk` from the rolling prerelease. Rolling builds use a fixed signing key so you can install updates over an existing fixed-signature build and keep your pairings and settings. Moving from an earlier development-signed APK requires a one-time uninstall, which clears its app data. Pull requests still produce a development-signed APK. [Rolling prerelease](../../releases/tag/rolling) · [Build runs](../../actions/workflows/builds.yml)
 
 To build the development APK, install JDK 17, Python 3, Android SDK Platform 35, Build Tools 35.0.0 and the NDK (tested with r26b). Set `ANDROID_HOME` to the SDK directory and `ANDROID_NDK_HOME` to the NDK directory. From the repository root run:
 
