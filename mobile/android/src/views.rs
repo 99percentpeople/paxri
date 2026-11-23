@@ -102,31 +102,22 @@ impl Mobile {
             ),
             Page::Terminal(id) => {
                 let id = *id;
-                let (title, subtitle) = self.sessions[&id].labels(cx);
-                let action = ui
-                    .button(
-                        Ghost,
-                        "close-session",
-                        div()
-                            .size(px(22.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .border(px(1.5))
-                            .border_color(rgb(ui.colors.destructive.background))
-                            .text_color(rgb(ui.colors.destructive.background))
-                            .child(Icon::Stop.draw(13.)),
-                    )
-                    .circular()
-                    .tooltip(paxri_ui::components::tooltip("End session".into()))
-                    .role(Role::Button)
-                    .aria_label("End session")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.back(cx);
-                        this.sessions.remove(&id);
-                        cx.notify();
-                    }));
+                let session = &self.sessions[&id];
+                let (title, subtitle) = session.labels(cx);
+                let action = if matches!(session.state, SessionState::Ended(_)) {
+                    ui.button(Ghost, "close-session", Icon::Close.draw(20.))
+                        .circular()
+                        .tooltip(paxri_ui::components::tooltip("Close session".into()))
+                        .role(Role::Button)
+                        .aria_label("Close session")
+                } else {
+                    ui.end_session_button()
+                }
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.back(cx);
+                    this.sessions.remove(&id);
+                    cx.notify();
+                }));
                 (
                     title,
                     Some(subtitle),

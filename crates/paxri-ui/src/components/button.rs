@@ -60,9 +60,9 @@ impl Ui {
         icon: Icon,
         tooltip: impl Into<SharedString>,
     ) -> Button {
-        let mut button = self.button(variant, id, icon.draw(16.));
-        button.layout = ButtonLayout::Icon;
-        button.tooltip(super::tooltip(tooltip.into()))
+        self.button(variant, id, icon.draw(16.))
+            .icon_only()
+            .tooltip(super::tooltip(tooltip.into()))
     }
 
     pub fn choice_card(
@@ -95,6 +95,11 @@ impl Ui {
 }
 
 impl Button {
+    pub(super) fn icon_only(mut self) -> Self {
+        self.layout = ButtonLayout::Icon;
+        self
+    }
+
     pub fn circular(mut self) -> Self {
         self.layout = ButtonLayout::Circular;
         self

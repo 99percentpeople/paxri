@@ -69,7 +69,7 @@ impl Page {
 
     fn icon(&self) -> Icon {
         match self {
-            Self::Home => Icon::Home,
+            Self::Home => Icon::Monitor,
             Self::Settings => Icon::Settings,
             Self::Terminal { .. } => Icon::Terminal,
         }

@@ -19,11 +19,11 @@ impl Workspace {
                 "new-session",
                 single_line(div()).child("New session"),
             )
-            .icon(Icon::Plus)
+            .icon(Icon::Terminal)
             .row()
             .tooltip(tooltip("New terminal session".into()))
         } else {
-            ui.icon_button(Ghost, "new-session", Icon::Plus, "New terminal session")
+            ui.icon_button(Ghost, "new-session", Icon::Terminal, "New terminal session")
         };
         let trigger = DropdownTrigger::new(button.pressed(self.session_menu.read(cx).is_open()));
         let mut content = DropdownContent::new();
@@ -44,9 +44,18 @@ impl Workspace {
             .flex()
             .flex_none()
             .px_1()
+            .when(matches!(&self.active, Page::Terminal { view, .. } if view.read(cx).is_running()), |row| {
+                row.child(ui.end_session_button()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let page = this.active.clone();
+                        if matches!(page, Page::Terminal { .. }) {
+                            this.close_tab(&page, window, cx);
+                        }
+                    })))
+            })
             .when(!self.tabs.contains(&Page::Home), |row| {
                 row.child(
-                    ui.icon_button(Ghost, "open-devices", Icon::Home, "Open Devices")
+                    ui.icon_button(Ghost, "open-devices", Icon::Monitor, "Open Devices")
                         .on_click(cx.listener(|v, _, w, cx| v.show_page(Page::Home, w, cx))),
                 )
             })

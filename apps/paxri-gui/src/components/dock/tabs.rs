@@ -243,7 +243,7 @@ impl Ui {
             .justify_center()
             .rounded(SPACE_1)
             .text_color(rgb(self.colors.muted_foreground))
-            .child("×")
+            .child(Icon::Close.draw(14.))
     }
 
     pub fn tab_close_button(

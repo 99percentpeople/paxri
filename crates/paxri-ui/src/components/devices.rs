@@ -93,6 +93,17 @@ impl Ui {
         .icon(Icon::Terminal)
     }
 
+    pub fn end_session_button(self) -> Button {
+        // Desktop toolbar icons leave a one-pixel inset on their 16 px grid.
+        let size = if cfg!(target_os = "android") { 22. } else { 14. };
+        let button = self.button(ButtonVariant::Ghost, "end-session", Icon::Stop.draw(size));
+        #[cfg(not(target_os = "android"))]
+        let button = button.icon_only();
+        #[cfg(target_os = "android")]
+        let button = button.circular().role(Role::Button).aria_label("End session");
+        button.tooltip(tooltip("End session".into()))
+    }
+
     pub fn session_row(self, number: usize, title: SharedString, detail: String) -> Button {
         self.navigation_row(
             ("show-terminal", number),

@@ -1,3 +1,4 @@
+//! Monochrome interface icons shared by the desktop and mobile apps.
 use gpui::{prelude::*, *};
 use paxri_config::DevicePlatform;
 
@@ -23,6 +24,9 @@ pub enum Icon {
     Settings,
     Search,
     Close,
+    Minimize,
+    Maximize,
+    Restore,
     Server,
     Ellipsis,
     Pencil,
@@ -82,7 +86,7 @@ impl Icon {
             Self::Menu => &[
                 &[(2., 3.5), (14., 3.5)], &[(2., 8.), (14., 8.)], &[(2., 12.5), (14., 12.5)],
             ],
-            Self::Stop => &[&[(3., 3.), (13., 3.), (13., 13.), (3., 13.), (3., 3.)]],
+            Self::Stop => &[&[(5.1, 5.1), (10.9, 5.1), (10.9, 10.9), (5.1, 10.9), (5.1, 5.1)]],
             Self::Android => &[
                 &[(1., 12.5), (1.3, 10.), (2.4, 7.6), (4.1, 5.9), (6.3, 4.9),
                   (8., 4.7), (9.7, 4.9), (11.9, 5.9), (13.6, 7.6), (14.7, 10.),
@@ -263,6 +267,12 @@ impl Icon {
                 &[(14.8, 10.5), (10.8, 14.5)],
             ],
             Self::Close => &[&[(4., 4.), (12., 12.)], &[(12., 4.), (4., 12.)]],
+            Self::Minimize => &[&[(3., 8.), (13., 8.)]],
+            Self::Maximize => &[&[(3., 3.), (13., 3.), (13., 13.), (3., 13.), (3., 3.)]],
+            Self::Restore => &[
+                &[(5.5, 5.5), (5.5, 3.), (13., 3.), (13., 10.5), (10.5, 10.5)],
+                &[(3., 5.5), (10.5, 5.5), (10.5, 13.), (3., 13.), (3., 5.5)],
+            ],
             Self::Search => &[
                 &[
                     (11.1, 6.4),
@@ -332,6 +342,13 @@ impl Icon {
             |_, _, _| (),
             move |bounds, _, window, _| {
                 let scale = size / 16.;
+                let color = window.text_style().color;
+                if self == Self::Stop {
+                    window.paint_quad(quad(
+                        bounds, px(size / 2.), transparent_black(), px(1.5), color,
+                        BorderStyle::default(),
+                    ));
+                }
                 let mut path = match self {
                     Self::Windows | Self::Ellipsis | Self::Stop => PathBuilder::fill(),
                     _ => PathBuilder::stroke(px(1.4 * scale)),
@@ -347,7 +364,7 @@ impl Icon {
                 path.scale(scale);
                 path.translate(bounds.origin);
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, window.text_style().color);
+                    window.paint_path(path, color);
                 }
             },
         )

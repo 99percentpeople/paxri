@@ -1,5 +1,5 @@
 //! Client-drawn window frames shared by workspaces and device terminals.
-use crate::components::Ui;
+use crate::components::{Icon, Ui};
 use gpui::{prelude::*, *};
 
 pub(super) const TITLEBAR_HEIGHT: f32 = 40.;
@@ -249,41 +249,12 @@ enum Control {
 
 impl Control {
     fn button(self, maximized: bool, ui: Ui) -> Stateful<Div> {
-        let (id, paths): (_, &[&[(f32, f32)]]) = match self {
-            Self::Minimize => ("minimize-window", &[&[(1., 7.), (11., 7.)]]),
-            Self::Maximize if maximized => (
-                "restore-window",
-                &[
-                    &[(3.5, 3.5), (3.5, 1.), (11., 1.), (11., 8.5), (8.5, 8.5)],
-                    &[(1., 3.5), (8.5, 3.5), (8.5, 11.), (1., 11.), (1., 3.5)],
-                ],
-            ),
-            Self::Maximize => (
-                "maximize-window",
-                &[&[(1., 1.), (11., 1.), (11., 11.), (1., 11.), (1., 1.)]],
-            ),
-            Self::Close => (
-                "close-window",
-                &[&[(1., 1.), (11., 11.)], &[(11., 1.), (1., 11.)]],
-            ),
+        let (id, icon) = match self {
+            Self::Minimize => ("minimize-window", Icon::Minimize),
+            Self::Maximize if maximized => ("restore-window", Icon::Restore),
+            Self::Maximize => ("maximize-window", Icon::Maximize),
+            Self::Close => ("close-window", Icon::Close),
         };
-        let icon = canvas(
-            |_, _, _| (),
-            move |b, _, w, _| {
-                let mut path = PathBuilder::stroke(px(1.2));
-                for points in paths {
-                    let (first, rest) = points.split_first().unwrap();
-                    path.move_to(b.origin + point(px(first.0), px(first.1)));
-                    for &(x, y) in rest {
-                        path.line_to(b.origin + point(px(x), px(y)));
-                    }
-                }
-                if let Ok(path) = path.build() {
-                    w.paint_path(path, w.text_style().color);
-                }
-            },
-        )
-        .size(px(12.));
         let button = div()
             .id(id)
             .w(px(WINDOW_BUTTON_WIDTH))
@@ -299,7 +270,7 @@ impl Control {
                     .text_color(rgb(ui.colors.destructive.foreground)),
                 _ => s.bg(rgb(ui.colors.secondary_hover)),
             })
-            .child(icon);
+            .child(icon.draw(16.));
         match self {
             Self::Close => button.on_click(close_window),
             // The native maximize hit area also enables the Windows snap menu.
