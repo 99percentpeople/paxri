@@ -22,7 +22,7 @@ use paxri_native::{
 use paxri_terminal::Frame;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, mpsc, watch},
+    sync::{Mutex, mpsc, oneshot, watch},
     time::timeout,
 };
 
@@ -397,22 +397,47 @@ impl Client {
         self.devices.lock().await.peers.clone()
     }
 
-    pub async fn pair(&self, code: &str) -> Result<Peers> {
-        let invite = Invitation::parse(code)?;
-        ensure!(
-            invite.ticket.endpoint_addr().id.to_string() != self.transport.id(),
-            "Choose another device’s invitation"
-        );
+    pub async fn pair(&self, invite: Invitation, mut cancel: oneshot::Receiver<()>) -> Result<Option<Peers>> {
+        let id = invite.ticket.endpoint_addr().id.to_string();
+        ensure!(id != self.transport.id(), "Choose another device’s invitation");
+        ensure!(!self.devices.lock().await.peers.contains_key(&id), "Device already paired");
         let attempt = uuid::Uuid::new_v4().simple().to_string();
-        let contact = self
-            .transport
-            .contact(crate::DEVICE_NAME.borrow().effective());
-        let decision = timeout(
-            Duration::from_secs(120),
-            self.transport.request_pairing(&invite, &contact, &attempt),
-        )
-        .await
-        .context("Pairing approval timed out")??;
+        let mut pending = tokio::select! {
+            biased;
+            _ = &mut cancel => return Ok(None),
+            result = self.transport.request_private_pairing(&invite, &attempt) => result?,
+        };
+        let answer = tokio::select! {
+            biased;
+            _ = &mut cancel => None,
+            result = timeout(Duration::from_secs(120), pending.decision()) => Some(result),
+        };
+        let decision = match answer {
+            Some(Ok(decision)) => decision?,
+            withdrawn => {
+                pending.withdraw();
+                // Approval may already have been written by the gateway. Revoke only this attempt.
+                let notice = PendingUnpair {
+                    name: format!("Device {}", paxri_config::peer_id::default_prefix(&id)),
+                    ticket: invite.ticket.to_string(),
+                    request_id: uuid::Uuid::new_v4().simple().to_string(),
+                    pairing_id: Some(attempt),
+                };
+                let mut devices = self.devices.lock().await;
+                if devices.pending_unpairs.contains_key(&id) {
+                    // Keep an older local unpair until the remote has acknowledged it.
+                    drop(devices);
+                    self.transport.notify_unpair(&id, &notice).await?;
+                } else {
+                    let mut next = devices.clone();
+                    next.pending_unpairs.insert(id, notice);
+                    self.save(&next)?;
+                    *devices = next;
+                }
+                if withdrawn.is_some() { bail!("Pairing approval timed out"); }
+                return Ok(None);
+            }
+        };
         let peer = match decision {
             Decision::Accepted(contact) => contact,
             Decision::Rejected(reason) => bail!("{reason}"),
@@ -435,7 +460,7 @@ impl Client {
         self.save(&next)?;
         self.transport.remember_contact(&peer);
         *devices = next;
-        Ok(devices.peers.clone())
+        Ok(Some(devices.peers.clone()))
     }
 
     pub async fn unpair(&self, id: &str, generation: Option<&str>) -> Result<Peers> {

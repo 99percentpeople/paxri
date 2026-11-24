@@ -1,5 +1,5 @@
 use super::*;
-use paxri_ui::components::{ListState, ListView};
+use paxri_ui::components::{ButtonVariant::Secondary, ListState, ListView};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use paxri_core::connection::{peer_state, unix_time_ms};
 use paxri_ui::connections::presence_detail;
@@ -258,7 +258,7 @@ impl Mobile {
             })
             .collect();
         peers.sort_by_key(|(_, peer, changed)| (std::cmp::Reverse(*changed), &peer.name));
-        let no_matches = peers.is_empty() && !self.peers.is_empty();
+        let no_matches = peers.is_empty() && !self.peers.is_empty() && self.pairing.is_none();
         let rows = peers.into_iter().map(|(id, peer, changed)| {
             let id = id.clone();
             ui.device_row(
@@ -286,14 +286,39 @@ impl Mobile {
             .when(self.client.is_none(), |page| {
                 page.child(if self.starting_network { ListState::loading("Starting network…") } else { ListState::empty(Icon::Server, "Network unavailable") }.render(ui))
             })
-            .when(self.pairing, |page| page.child(ui.muted("Approve the request on your computer.")))
             .when(
-                self.peers.is_empty() && self.client.is_some() && !self.pairing,
+                self.peers.is_empty() && self.client.is_some() && self.pairing.is_none(),
                 |page| page.child(ListState::empty(Icon::Monitor, "No paired devices").detail("Tap + to pair a computer.").render(ui)),
             )
-            .when(!no_matches && !self.peers.is_empty(), |page| page.child(
+            .when(!no_matches && (!self.peers.is_empty() || self.pairing.is_some()), |page| page.child(
                 ListView::scrollable("paired-devices")
-                    .with_floating_action(self.client.is_some() && !self.pairing)
+                    .with_floating_action(self.client.is_some() && self.pairing.is_none())
+                    .when_some(self.pairing.as_ref(), |list, pending| {
+                        let short_id = paxri_config::peer_id::default_prefix(&pending.peer_id);
+                        let waiting = pending.cancel.is_some();
+                        let row = ui.device_item(
+                            paxri_config::DevicePlatform::Unknown,
+                            format!("Device {short_id}").into(),
+                            false,
+                            if waiting { "Waiting for approval" } else { "Canceling…" }.into(),
+                        );
+                        let row = if waiting {
+                            row.trailing(
+                                ui.button(Secondary, "cancel-pairing", "Cancel")
+                                    .role(Role::Button)
+                                    .aria_label("Cancel pairing request")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(cancel) = this.pairing.as_mut().and_then(|p| p.cancel.take()) {
+                                            let _ = cancel.send(());
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        } else {
+                            row
+                        };
+                        list.child(row.inset_row())
+                    })
                     .children(rows),
             ))
     }
@@ -585,7 +610,7 @@ impl Render for Mobile {
                                 })),
                         )
                     })
-                    .when(devices && self.client.is_some() && !self.pairing, |page| {
+                    .when(devices && self.client.is_some() && self.pairing.is_none(), |page| {
                         page.child(self.pairing_actions(expanded, ui, cx))
                     })
                     .when(show_add_rule, |page| {

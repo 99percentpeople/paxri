@@ -70,6 +70,18 @@ impl ListItem {
         )
     }
 
+    /// Match a button row's content bounds while keeping trailing actions independent.
+    pub fn inset_row(self) -> Div {
+        button::row_layout(div())
+            .flex_none()
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(transparent_black())
+            .text_sm()
+            .child(self)
+    }
+
     pub fn button(mut self, ui: Ui, id: impl Into<ElementId>, label: SharedString) -> Button {
         self.body = single_line(self.body);
         #[cfg(target_os = "android")]

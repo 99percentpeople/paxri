@@ -41,6 +41,16 @@ pub fn floating_corner() -> Div {
     div().absolute().bottom_4().right_4()
 }
 
+pub(super) fn row_layout<E: Styled>(row: E) -> E {
+    row.w_full()
+        .min_w_0()
+        .h_auto()
+        .min_h(BUTTON_HEIGHT)
+        .px(SPACE_3)
+        .justify_start()
+        .overflow_hidden()
+}
+
 impl Ui {
     pub fn button(
         self,
@@ -207,14 +217,7 @@ impl RenderOnce for Button {
             ButtonLayout::Icon => root.w(BUTTON_HEIGHT),
             ButtonLayout::Circular => root.size(BUTTON_HEIGHT).rounded_full(),
             ButtonLayout::Floating => root.size(px(if cfg!(target_os = "android") { 56. } else { 48. })).rounded_full().shadow_md(),
-            ButtonLayout::Row => root
-                .w_full()
-                .min_w_0()
-                .h_auto()
-                .min_h(BUTTON_HEIGHT)
-                .px(SPACE_3)
-                .justify_start()
-                .overflow_hidden(),
+            ButtonLayout::Row => row_layout(root),
             ButtonLayout::Field => root.w_full().px(SPACE_3).justify_between(),
             ButtonLayout::Card(width) => root.w(width).max_w_full().h_auto().p(SPACE_2),
         };

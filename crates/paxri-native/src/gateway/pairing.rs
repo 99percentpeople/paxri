@@ -29,6 +29,16 @@ pub struct Contact {
 }
 
 impl Contact {
+    fn undisclosed(id: EndpointId) -> Self {
+        Self {
+            name: format!("Device {}", paxri_config::peer_id::default_prefix(&id.to_string())),
+            ticket: EndpointTicket::new(iroh::EndpointAddr::new(id)),
+            supports_unpair: true,
+            platform: None,
+            capabilities: None,
+        }
+    }
+
     pub fn id(&self) -> EndpointId {
         self.ticket.endpoint_addr().id
     }
@@ -89,6 +99,26 @@ struct Request {
 pub enum Decision {
     Accepted(Contact),
     Rejected(String),
+}
+
+pub struct PendingApproval {
+    connection: Connection,
+    response: iroh::endpoint::RecvStream,
+}
+
+impl PendingApproval {
+    pub async fn decision(&mut self) -> Result<Decision> {
+        let bytes = self.response.read_to_end(MAX_FRAME).await?;
+        let decision: Decision = serde_json::from_slice(&bytes)?;
+        if let Decision::Accepted(contact) = &decision {
+            contact.validate(self.connection.remote_id())?;
+        }
+        Ok(decision)
+    }
+
+    pub fn withdraw(self) {
+        self.connection.close(0u32.into(), b"pairing withdrawn");
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -236,6 +266,21 @@ impl NativeTransport {
         local: &Contact,
         request_id: &str,
     ) -> Result<Decision> {
+        self.send_pairing_request(invite, local, request_id).await?.decision().await
+    }
+
+    /// Device details and reachable addresses are exchanged over the paired session.
+    pub async fn request_private_pairing(
+        &self,
+        invite: &Invitation,
+        request_id: &str,
+    ) -> Result<PendingApproval> {
+        self.send_pairing_request(invite, &Contact::undisclosed(self.endpoint.id()), request_id).await
+    }
+
+    async fn send_pairing_request(
+        &self, invite: &Invitation, local: &Contact, request_id: &str,
+    ) -> Result<PendingApproval> {
         let dest = invite.ticket.endpoint_addr();
         let bytes = serde_json::to_vec(&Request {
             request_id: request_id.into(),
@@ -243,21 +288,15 @@ impl NativeTransport {
             contact: local.clone(),
         })?;
         ensure!(bytes.len() <= MAX_FRAME, "Pairing request too large");
-        let (_conn, mut rx) = timeout(CONNECT_TIMEOUT, async {
+        timeout(CONNECT_TIMEOUT, async {
             let conn = super::addresses::dial(&self.endpoint, dest.clone(), PROTOCOL).await?;
             let (mut tx, rx) = conn.open_bi().await?;
             tx.write_all(&bytes).await?;
             tx.finish()?;
-            Ok::<_, anyhow::Error>((conn, rx))
+            Ok::<_, anyhow::Error>(PendingApproval { connection: conn, response: rx })
         })
         .await
-        .context("Could not reach the device for pairing")??;
-        let bytes = rx.read_to_end(MAX_FRAME).await?;
-        let decision: Decision = serde_json::from_slice(&bytes)?;
-        if let Decision::Accepted(contact) = &decision {
-            contact.validate(dest.id)?;
-        }
-        Ok(decision)
+        .context("Could not reach the device for pairing")?
     }
 }
 
@@ -265,6 +304,23 @@ impl NativeTransport {
 mod tests {
     use super::*;
     use paxri_config::DevicePlatform;
+
+    #[test]
+    fn private_pairing_request_only_identifies_the_authenticated_endpoint() -> Result<()> {
+        let id = iroh::SecretKey::from_bytes(&[3; 32]).public();
+        let body = serde_json::to_value(Request {
+            token: "invitation".into(),
+            request_id: "attempt".into(),
+            contact: Contact::undisclosed(id),
+        })?;
+        let contact = &body["contact"];
+        assert_eq!(contact["name"], format!("Device {}", &id.to_string()[..8]));
+        assert!(contact.get("platform").is_none() && contact.get("capabilities").is_none());
+        let ticket: EndpointTicket = serde_json::from_value(contact["ticket"].clone())?;
+        assert_eq!(ticket.endpoint_addr().id, id);
+        assert!(ticket.endpoint_addr().is_empty());
+        Ok(())
+    }
 
     #[test]
     fn contacts_accept_legacy_and_future_platforms() -> Result<()> {

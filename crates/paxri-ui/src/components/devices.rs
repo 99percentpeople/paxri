@@ -69,15 +69,13 @@ impl Ui {
             )
     }
 
-    pub fn device_row(
+    pub fn device_item(
         self,
-        id: impl Into<ElementId>,
         platform: DevicePlatform,
         name: SharedString,
         online: bool,
         detail: String,
-    ) -> Button {
-        let label = SharedString::from(format!("{name} · {} · {detail}", platform.label()));
+    ) -> ListItem {
         let dot = div()
             .size(px(7.))
             .rounded_full()
@@ -88,10 +86,22 @@ impl Ui {
                 dot.bg(rgb(self.colors.success))
                     .border_color(rgb(self.colors.success))
             });
-        let item = ListItem::new(name)
+        ListItem::new(name)
             .leading(self.device_icon(platform))
             .detail(detail)
-            .detail_icon(dot);
+            .detail_icon(dot)
+    }
+
+    pub fn device_row(
+        self,
+        id: impl Into<ElementId>,
+        platform: DevicePlatform,
+        name: SharedString,
+        online: bool,
+        detail: String,
+    ) -> Button {
+        let label = SharedString::from(format!("{name} · {} · {detail}", platform.label()));
+        let item = self.device_item(platform, name, online, detail);
         #[cfg(target_os = "android")]
         let item = item.chevron(self);
         item.button(self, id, label)

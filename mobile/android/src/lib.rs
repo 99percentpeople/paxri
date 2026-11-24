@@ -22,7 +22,7 @@ use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
+use tokio::{runtime::Handle, sync::{mpsc, oneshot}, task::JoinHandle};
 
 use alacritty_terminal::{grid::{Dimensions, Scroll}, term::TermMode};
 use client::{Client, Peers, Presence};
@@ -46,11 +46,16 @@ use paxri_ui::components::directory::{DeviceFilters, SessionFilters};
 use views::initial_size;
 use paxri_terminal::managed::{Key as SessionKey, Request as TerminalRequest};
 
+struct PendingPairing {
+    peer_id: String,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
 enum Update {
     Ready(Arc<Client>, Peers),
     Error(String),
     Devices(Peers),
-    Paired(Result<Peers, String>),
+    Paired(Result<Option<Peers>, String>),
     PairCode(String),
     Unpair { id: String, generation: Option<String> },
     Composing {
@@ -582,7 +587,7 @@ struct Mobile {
     editing_input: Option<Entity<paxri_ui::components::input::Input>>,
     generation: u64,
     starting_network: bool,
-    pairing: bool,
+    pairing: Option<PendingPairing>,
 }
 
 impl Mobile {
@@ -961,28 +966,38 @@ impl Mobile {
                 let Some(client) = self.client.clone() else {
                     return;
                 };
-                if self.pairing {
+                if self.pairing.is_some() {
                     return;
                 }
-                if self.page == Page::PairingMenu {
-                    self.navigate(Page::Devices, cx);
-                }
-                self.pairing = true;
+                let invite = match paxri_native::gateway::pairing::Invitation::parse(&code) {
+                    Ok(invite) => invite,
+                    Err(error) => {
+                        Toast::show(error.to_string(), self.window, cx);
+                        return;
+                    }
+                };
+                let (cancel, canceled) = oneshot::channel();
+                self.pairing = Some(PendingPairing {
+                    peer_id: invite.ticket.endpoint_addr().id.to_string(),
+                    cancel: Some(cancel),
+                });
+                self.navigate(Page::Devices, cx);
                 let tx = self.updates.clone();
                 self.rt.spawn(async move {
-                    let outcome = client.pair(&code).await;
+                    let outcome = client.pair(invite, canceled).await;
                     let _ = tx
                         .send(Update::Paired(outcome.map_err(|e| format!("{e:#}"))))
                         .await;
                 });
             }
             Update::Paired(result) => {
-                self.pairing = false;
+                self.pairing = None;
                 match result {
-                    Ok(peers) => {
+                    Ok(Some(peers)) => {
                         self.peers = peers;
                         Toast::show("Device paired", self.window, cx);
                     }
+                    Ok(None) => Toast::show("Pairing canceled", self.window, cx),
                     Err(error) => Toast::show(error, self.window, cx),
                 }
             }
@@ -1393,7 +1408,7 @@ fn android_main(android: AndroidApp) {
                     }),
                     generation: 0,
                     starting_network: true,
-                    pairing: false,
+                    pairing: None,
                 }
             })
         })
