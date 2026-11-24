@@ -95,7 +95,11 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_activityVisibilityCh
     _class: JClass,
     visible: bool,
 ) {
-    ACTIVITY_VISIBLE.send_replace(visible);
+    ACTIVITY_VISIBLE.send_if_modified(|old| {
+        let changed = *old != visible;
+        *old = visible;
+        changed
+    });
 }
 
 #[derive(Clone, PartialEq)]
@@ -1200,6 +1204,10 @@ fn android_main(android: AndroidApp) {
         .build()
         .expect("Android runtime");
     let handle = rt.handle().clone();
+    // A busy PTY must not crowd out Back, pairing or window-inset events.
+    let (controls, platform_events) = async_channel::unbounded();
+    *BRIDGE.lock().unwrap() = Some(controls.clone());
+    CAN_GO_BACK.store(false, Ordering::Release);
     Application::with_platform(platform.into_rc()).run(move |cx| {
         let (preferences, settings_error) = match settings::load(&android) {
             Ok(settings) => (settings, None),
@@ -1214,9 +1222,6 @@ fn android_main(android: AndroidApp) {
             activity_action(&activity, ActivityAction::Toast(message)).is_ok()
         }, cx);
         let (tx, rx) = async_channel::bounded(128);
-        // A busy PTY must not crowd out Back, pairing or window-inset events.
-        let (controls, platform_events) = async_channel::unbounded();
-        *BRIDGE.lock().unwrap() = Some(controls);
         let disk = android.internal_data_path();
         let events = tx.clone();
         let network_activity = android.clone();
@@ -1245,7 +1250,7 @@ fn android_main(android: AndroidApp) {
                 Toast::show(error, window.window_handle(), cx);
             }
             cx.new(|cx| {
-                cx.spawn(async move |this, cx| {
+                let event_task = cx.spawn(async move |this, cx| {
                     while let Ok(event) = tokio::select! {
                         control = platform_events.recv() => control,
                         network = rx.recv() => network,
@@ -1257,8 +1262,10 @@ fn android_main(android: AndroidApp) {
                             break;
                         }
                     }
-                })
-                .detach();
+                });
+                // Cancel the receiver on its owner thread before network shutdown
+                // can wake it from a Tokio worker after the window has gone.
+                cx.on_release(move |_, _| drop(event_task)).detach();
                 Mobile::bind_terminal_shortcuts(cx);
                 let ui_font = fonts::init(cx);
                 let font = cx
@@ -1347,8 +1354,16 @@ fn android_main(android: AndroidApp) {
         .expect("open Android window");
         cx.activate(true);
     });
-    CAN_GO_BACK.store(false, Ordering::Release);
+    // Android may have started the replacement window before destroying this one.
+    {
+        let mut bridge = BRIDGE.lock().unwrap();
+        if bridge.as_ref().is_some_and(|active| active.same_channel(&controls)) {
+            bridge.take();
+            CAN_GO_BACK.store(false, Ordering::Release);
+        }
+    }
+    controls.close();
     gpui_mobile::set_text_input_callback(None);
-    BRIDGE.lock().unwrap().take();
-    rt.shutdown_background();
+    rt.shutdown_timeout(std::time::Duration::from_secs(1));
+    gpui_mobile::android::jni::shutdown_platform();
 }

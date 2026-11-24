@@ -61,6 +61,8 @@ public final class PaxriActivity extends GpuiInputActivity {
     private ScrollView keybarScroll;
     private Rect touchArea = new Rect();
     private boolean visible;
+    private static int startedActivities;
+    private static PaxriActivity connectionServiceOwner;
     private boolean deviceConnected;
     private boolean connectionServiceStarted;
     private final Handler connectionHandler = new Handler(Looper.getMainLooper());
@@ -154,6 +156,7 @@ public final class PaxriActivity extends GpuiInputActivity {
         try {
             startForegroundService(new Intent(this, ConnectionService.class));
             connectionServiceStarted = true;
+            connectionServiceOwner = this;
         } catch (IllegalStateException | SecurityException error) {
             android.util.Log.w("paxri", "Starting background device connections", error);
         }
@@ -161,7 +164,10 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     private void stopConnectionService() {
         if (connectionServiceStarted) {
-            stopService(new Intent(this, ConnectionService.class));
+            if (connectionServiceOwner == this) {
+                stopService(new Intent(this, ConnectionService.class));
+                connectionServiceOwner = null;
+            }
             connectionServiceStarted = false;
         }
     }
@@ -180,7 +186,7 @@ public final class PaxriActivity extends GpuiInputActivity {
         visible = true;
         startConnectionServiceIfVisible();
         updateTerminalTouch();
-        activityVisibilityChanged(true);
+        if (++startedActivities == 1) activityVisibilityChanged(true);
         try {
             getContentResolver().registerContentObserver(
                     Settings.Global.getUriFor(Settings.Global.DEVICE_NAME), false, nameObserver);
@@ -194,7 +200,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     protected void onStop() {
         visible = false;
         dismissTerminalTouch();
-        activityVisibilityChanged(false);
+        if (--startedActivities == 0) activityVisibilityChanged(false);
         getContentResolver().unregisterContentObserver(nameObserver);
         super.onStop();
     }
