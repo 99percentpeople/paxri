@@ -150,6 +150,7 @@ pub struct Xdnd {
 
 #[derive(Debug)]
 struct PointerDeviceState {
+    direct_touch: bool,
     horizontal: ScrollAxisState,
     vertical: ScrollAxisState,
 }
@@ -1076,12 +1077,27 @@ impl X11Client {
                 window.handle_input(PlatformInput::KeyUp(crate::KeyUpEvent { keystroke }));
             }
             Event::XinputTouchBegin(event) => {
-                let mut state = self.0.borrow_mut();
                 let position = point(event.event_x, event.event_y)
-                    .map(|v| px(v as f32 / 65536. / state.scale_factor));
-                state
-                    .contacts
-                    .down(event.detail, (event.event, event.sourceid), position);
+                    .map(|v| px(v as f32 / 65536. / self.0.borrow().scale_factor));
+                let window = self.get_window(event.event)?;
+                let direct = self
+                    .0
+                    .borrow()
+                    .pointer_device_states
+                    .get(&event.sourceid)
+                    .is_some_and(|d| d.direct_touch);
+                let claimed = direct
+                    && window.dispatch_input(PlatformInput::DirectTouch(crate::DirectTouchEvent {
+                        id: event.detail,
+                        position,
+                        phase: crate::ContactPhase::Down,
+                    }));
+                self.0.borrow_mut().contacts.down(
+                    event.detail,
+                    (event.event, event.sourceid),
+                    position,
+                    claimed,
+                );
             }
             Event::XinputTouchUpdate(event) => {
                 let mut state = self.0.borrow_mut();
@@ -1096,11 +1112,14 @@ impl X11Client {
                 self.get_window(id)?.handle_input(input);
             }
             Event::XinputTouchEnd(event) => {
-                let ((id, _), inputs) = self
-                    .0
-                    .borrow_mut()
-                    .contacts
-                    .up(event.detail, modifiers_from_xinput_info(event.mods))?;
+                let scale = self.0.borrow().scale_factor;
+                let end =
+                    point(event.event_x, event.event_y).map(|v| px(v as f32 / 65536. / scale));
+                let ((id, _), inputs) = self.0.borrow_mut().contacts.up(
+                    event.detail,
+                    Some(end),
+                    modifiers_from_xinput_info(event.mods),
+                )?;
                 let window = self.get_window(id)?;
                 for input in inputs {
                     window.handle_input(input);
@@ -2154,12 +2173,18 @@ fn current_pointer_device_states(
                     .iter()
                     .find(|data| data.scroll_type == xinput::ScrollType::VERTICAL)
                     .map(|data| scroll_data_to_axis_state(data, old_vertical));
-                if horizontal.is_none() && vertical.is_none() {
+                let direct_touch = info
+                    .classes
+                    .iter()
+                    .filter_map(|c| c.data.as_touch())
+                    .any(|t| t.mode == xinput::TouchMode::DIRECT);
+                if !direct_touch && horizontal.is_none() && vertical.is_none() {
                     None
                 } else {
                     Some((
                         info.deviceid,
                         PointerDeviceState {
+                            direct_touch,
                             horizontal: horizontal.unwrap_or_else(Default::default),
                             vertical: vertical.unwrap_or_else(Default::default),
                         },

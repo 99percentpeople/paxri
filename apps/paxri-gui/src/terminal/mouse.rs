@@ -52,7 +52,7 @@ impl Terminal {
         self.mouse.reset();
     }
 
-    fn mouse_cell(&self, position: Point<Pixels>) -> Cell {
+    pub(super) fn mouse_cell(&self, position: Point<Pixels>) -> Cell {
         let (row, x) = self.cell_at(position);
         Cell {
             col: x
@@ -63,7 +63,7 @@ impl Terminal {
         }
     }
 
-    fn mouse_enabled(&self) -> bool {
+    pub(super) fn mouse_enabled(&self) -> bool {
         self.is_running()
             && self.emulator.term.grid().display_offset() == 0
             && self.emulator.term.mode().intersects(TermMode::MOUSE_MODE)
@@ -75,6 +75,8 @@ impl Terminal {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_touch();
+        self.touch.handles = false;
         if self.mouse_enabled()
             && !e.modifiers.shift
             && !self.selecting

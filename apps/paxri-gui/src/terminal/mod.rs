@@ -4,6 +4,7 @@ use paxri_ui::terminal::emulator;
 use paxri_ui::terminal::keys;
 mod mouse;
 mod session;
+mod touch;
 pub(crate) use paxri_ui::terminal::title::TabTitle;
 
 use crate::components::{ScrollMetrics, ScrollSource, Scrollbar, Ui};
@@ -57,6 +58,7 @@ pub struct Terminal {
     viewport: Bounds<Pixels>,
     selecting: bool,
     mouse: mouse::Mouse,
+    touch: touch::Touch,
     hidden_pointer_at: Option<Point<Pixels>>,
     focused: bool,
     focus_observers: Option<(WindowId, [Subscription; 3])>,
@@ -155,6 +157,7 @@ impl Terminal {
                 marked: cursor::Preedit::default(),
                 viewport: Bounds::default(),
                 selecting: false,
+                touch: Default::default(),
                 mouse: mouse::Mouse::default(),
                 hidden_pointer_at: None,
                 focused: false,
@@ -258,6 +261,7 @@ impl Terminal {
                 self.marked.clear();
                 self.selecting = false;
                 self.hidden_pointer_at = None;
+                self.cancel_touch();
                 self.release_pointer();
             }
             if self.emulator.term.mode().contains(TermMode::FOCUS_IN_OUT) {
@@ -301,6 +305,8 @@ impl Terminal {
     fn write(&mut self, bytes: Vec<u8>, window: &Window) {
         if self.is_running() && !bytes.is_empty() {
             self.hidden_pointer_at = self.typing_pointer_position(window);
+            self.cancel_touch();
+            self.touch.handles = false;
             self.emulator.input_started();
             self.emulator.term.selection = None;
             self.selecting = false;
@@ -398,8 +404,12 @@ impl Render for Terminal {
         let sizing = entity.clone();
         let focus = self.focus.clone();
         let screen = canvas(
-            move |bounds, _, cx| sizing.update(cx, |view, cx| view.resize(bounds, cx)),
-            move |_, bounds, window, cx| {
+            move |bounds, w, cx| {
+                let grid = sizing.update(cx, |view, cx| view.resize(bounds, cx));
+                (grid, w.insert_hitbox(grid, HitboxBehavior::Normal))
+            },
+            move |_, (bounds, hitbox), window, cx| {
+                Self::listen_touch(&entity, hitbox, window);
                 if hide_pointer {
                     window.set_window_cursor_style(CursorStyle::None);
                 }
@@ -413,7 +423,8 @@ impl Render for Terminal {
                         palette,
                         window,
                         cx,
-                    )
+                    );
+                    view.paint_grips(window);
                 });
                 let moving = entity.downgrade();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
@@ -474,7 +485,21 @@ impl Render for Terminal {
                     .on_pinch(|event, window, cx| TerminalZoom::apply(Zoom::Pinch(event.scale), window, cx))
                     .on_scroll_wheel(cx.listener(Self::wheel))
                     .child(screen)
-                    .child(Scrollbar::vertical("terminal-history", cx.entity())),
+                    .child(Scrollbar::vertical("terminal-history", cx.entity()))
+                    .when(self.touch.handles && self.emulator.selected_range().is_some(), |screen| screen.child(
+                        div().absolute().right_3().top_2().occlude().child(
+                            ui.button(crate::components::ButtonVariant::Outline, "copy-touch-selection", "Copy")
+                                .on_click(cx.listener(|v, _, w, cx| {
+                                    if let Some(text) = v.emulator.selected_text() {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
+                                    v.touch.handles = false;
+                                    v.emulator.term.selection = None;
+                                    v.focus.focus(w);
+                                    cx.notify();
+                                }))
+                        )
+                    )),
             )
     }
 }

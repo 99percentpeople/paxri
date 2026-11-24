@@ -1004,10 +1004,16 @@ impl X11WindowStatePtr {
         }
     }
 
+    pub(super) fn dispatch_input(&self, input: PlatformInput) -> bool {
+        self.callbacks
+            .borrow_mut()
+            .input
+            .as_mut()
+            .is_some_and(|f| !f(input).propagate)
+    }
+
     pub fn handle_input(&self, input: PlatformInput) {
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().input
-            && !fun(input.clone()).propagate
-        {
+        if self.dispatch_input(input.clone()) {
             return;
         }
         if let PlatformInput::KeyDown(event) = input {

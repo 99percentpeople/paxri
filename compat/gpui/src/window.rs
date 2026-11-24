@@ -3612,6 +3612,10 @@ impl Window {
                 self.capslock = modifiers_changed.capslock;
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
+            PlatformInput::DirectTouch(touch) => {
+                self.mouse_position = touch.position;
+                PlatformInput::DirectTouch(touch)
+            }
             PlatformInput::Pinch(pinch) => {
                 self.mouse_position = pinch.position;
                 PlatformInput::Pinch(pinch)

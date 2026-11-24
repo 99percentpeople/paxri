@@ -358,6 +358,37 @@ impl MouseMoveEvent {
     }
 }
 
+/// A contact on a direct touch display, in logical window coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectTouchEvent {
+    /// Stable for the lifetime of this contact.
+    pub id: u32,
+    /// Contact location.
+    pub position: Point<Pixels>,
+    /// Contact lifecycle.
+    pub phase: ContactPhase,
+}
+
+/// A canceled contact must not produce a tap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactPhase {
+    /// First contact.
+    Down,
+    /// Contact changed position.
+    Move,
+    /// Finger lifted.
+    Up,
+    /// The platform revoked this contact.
+    Cancel,
+}
+impl Sealed for DirectTouchEvent {}
+impl InputEvent for DirectTouchEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::DirectTouch(self)
+    }
+}
+impl MouseEvent for DirectTouchEvent {}
+
 /// A two-finger magnification gesture from the platform.
 #[derive(Clone, Debug)]
 pub struct PinchEvent {
@@ -576,6 +607,8 @@ pub enum PlatformInput {
     MouseMove(MouseMoveEvent),
     /// The mouse exited the window.
     MouseExited(MouseExitEvent),
+    /// A direct touch. Consuming the down opts the view into the entire contact.
+    DirectTouch(DirectTouchEvent),
     /// The distance between two fingers changed.
     Pinch(PinchEvent),
     /// The scroll wheel was used.
@@ -594,6 +627,7 @@ impl PlatformInput {
             PlatformInput::MouseUp(event) => Some(event),
             PlatformInput::MouseMove(event) => Some(event),
             PlatformInput::MouseExited(event) => Some(event),
+            PlatformInput::DirectTouch(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
@@ -609,6 +643,7 @@ impl PlatformInput {
             PlatformInput::MouseUp(_) => None,
             PlatformInput::MouseMove(_) => None,
             PlatformInput::MouseExited(_) => None,
+            PlatformInput::DirectTouch(_) => None,
             PlatformInput::Pinch(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::FileDrop(_) => None,

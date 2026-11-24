@@ -53,6 +53,7 @@ pub struct WindowsWindowState {
     pub click_state: ClickState,
     pub current_cursor: Option<HCURSOR>,
     pub pinch_distance: Option<u32>,
+    pub touch_contacts: std::collections::BTreeMap<u32, Point<Pixels>>,
     pub nc_button_pressed: Option<u32>,
 
     pub display: WindowsDisplay,
@@ -140,6 +141,7 @@ impl WindowsWindowState {
             click_state,
             current_cursor,
             pinch_distance: None,
+            touch_contacts: Default::default(),
             nc_button_pressed,
             display,
             fullscreen,

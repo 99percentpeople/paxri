@@ -1161,7 +1161,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                 if touch.version() >= 3 {
                     touch.release();
                 }
-                state.contacts = Default::default();
+                drop(state);
+                cancel_touches(&client);
+                state = client.borrow_mut();
             }
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 let keyboard = seat.get_keyboard(qh, ());
@@ -1196,6 +1198,18 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
     }
 }
 
+fn cancel_touches(client: &Rc<RefCell<WaylandClientState>>) {
+    let mut state = client.borrow_mut();
+    let canceled: Vec<_> = state.contacts.cancel().collect();
+    for (surface, input) in canceled {
+        if let Some(window) = get_window(&mut state, &surface) {
+            drop(state);
+            window.handle_input(input);
+            state = client.borrow_mut();
+        }
+    }
+}
+
 impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
     fn event(
         this: &mut Self,
@@ -1212,9 +1226,22 @@ impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
             wl_touch::Event::Down {
                 surface, id, x, y, ..
             } => {
-                state
+                let surface = surface.id();
+                let Some(window) = get_window(&mut state, &surface) else {
+                    return;
+                };
+                drop(state);
+                let position = point(px(x as f32), px(y as f32));
+                let claimed =
+                    window.dispatch_input(PlatformInput::DirectTouch(crate::DirectTouchEvent {
+                        id: id as u32,
+                        position,
+                        phase: crate::ContactPhase::Down,
+                    }));
+                client
+                    .borrow_mut()
                     .contacts
-                    .down(id as u32, surface.id(), point(px(x as f32), px(y as f32)));
+                    .down(id as u32, surface, position, claimed);
             }
             wl_touch::Event::Motion { id, x, y, .. } => {
                 if let Some((surface, input)) =
@@ -1228,7 +1255,7 @@ impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
                 }
             }
             wl_touch::Event::Up { id, .. } => {
-                if let Some((surface, inputs)) = state.contacts.up(id as u32, modifiers)
+                if let Some((surface, inputs)) = state.contacts.up(id as u32, None, modifiers)
                     && let Some(window) = get_window(&mut state, &surface)
                 {
                     drop(state);
@@ -1237,7 +1264,10 @@ impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
                     }
                 }
             }
-            wl_touch::Event::Cancel => state.contacts = Default::default(),
+            wl_touch::Event::Cancel => {
+                drop(state);
+                cancel_touches(&client);
+            }
             _ => {}
         }
     }

@@ -90,6 +90,9 @@ impl WindowsWindowInner {
             WM_XBUTTONUP => {
                 self.handle_xbutton_msg(handle, wparam, lparam, Self::handle_mouse_up_msg)
             }
+            WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP | WM_POINTERCAPTURECHANGED => {
+                self.direct_touch(handle, msg, wparam)
+            }
             WM_GESTURE => self.handle_gesture(handle, lparam),
             WM_MOUSEWHEEL => self.handle_mouse_wheel_msg(handle, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
@@ -572,6 +575,62 @@ impl WindowsWindowInner {
         self.state.borrow_mut().callbacks.input = Some(func);
 
         if handled { Some(0) } else { Some(1) }
+    }
+
+    fn direct_touch(&self, hwnd: HWND, msg: u32, wparam: WPARAM) -> Option<isize> {
+        use windows::Win32::UI::Input::Pointer::{
+            GetPointerInfo, POINTER_FLAG_CANCELED, POINTER_INFO,
+        };
+
+        let id = (wparam.0 & 0xffff) as u32;
+        let mut state = self.state.borrow_mut();
+        let previous = state.touch_contacts.get(&id).copied();
+        if msg != WM_POINTERDOWN && previous.is_none() {
+            return None;
+        }
+        let mut info = POINTER_INFO::default();
+        let (phase, position) = if msg == WM_POINTERCAPTURECHANGED
+            || unsafe { GetPointerInfo(id, &mut info) }.is_err()
+            || info.pointerFlags.0 & POINTER_FLAG_CANCELED.0 != 0
+        {
+            (ContactPhase::Cancel, previous?)
+        } else {
+            if info.pointerType != PT_TOUCH {
+                return None;
+            }
+            let mut point = info.ptPixelLocation;
+            if !unsafe { ScreenToClient(hwnd, &mut point) }.as_bool() {
+                return None;
+            }
+            let phase = match msg {
+                WM_POINTERDOWN => ContactPhase::Down,
+                WM_POINTERUP => ContactPhase::Up,
+                _ => ContactPhase::Move,
+            };
+            (
+                phase,
+                logical_point(point.x as f32, point.y as f32, state.scale_factor),
+            )
+        };
+        let mut input = state.callbacks.input.take()?;
+        drop(state);
+        let result = input(PlatformInput::DirectTouch(DirectTouchEvent {
+            id,
+            position,
+            phase,
+        }));
+        let mut state = self.state.borrow_mut();
+        state.callbacks.input = Some(input);
+        if phase == ContactPhase::Down && result.propagate {
+            return None;
+        }
+        if matches!(phase, ContactPhase::Up | ContactPhase::Cancel) {
+            state.touch_contacts.remove(&id);
+        } else {
+            state.touch_contacts.insert(id, position);
+        }
+        // DefWindowProc promotes unclaimed contacts to mouse/gesture messages.
+        Some(0)
     }
 
     fn handle_gesture(&self, hwnd: HWND, lparam: LPARAM) -> Option<isize> {

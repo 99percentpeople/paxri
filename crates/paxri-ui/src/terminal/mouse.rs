@@ -42,6 +42,48 @@ pub fn report(mode: TermMode, cell: Cell, button: u8, release: bool, mods: Modif
     bytes
 }
 
+/// Reports a drag following a long press to a TUI as one left-button gesture.
+/// An ordinary swipe uses the wheel, and a stationary hold selects locally.
+#[derive(Default)]
+pub struct TouchMouseDrag {
+    last: Option<Cell>,
+}
+
+impl TouchMouseDrag {
+    pub fn requested(mode: TermMode) -> bool {
+        mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+    }
+
+    pub fn begin(&mut self, mode: TermMode, cell: Cell) -> Vec<u8> {
+        if !Self::requested(mode) || self.last.is_some() {
+            return Vec::new();
+        }
+        let bytes = report(mode, cell, 0, false, Modifiers::default());
+        self.last = (!bytes.is_empty()).then_some(cell);
+        bytes
+    }
+
+    pub fn motion(&mut self, mode: TermMode, cell: Cell) -> Vec<u8> {
+        if self.last.is_none() || self.last == Some(cell) || !Self::requested(mode) {
+            return Vec::new();
+        }
+        let bytes = report(mode, cell, 32, false, Modifiers::default());
+        if !bytes.is_empty() {
+            self.last = Some(cell);
+        }
+        bytes
+    }
+
+    pub fn end(&mut self, mode: TermMode) -> Vec<u8> {
+        match self.last.take() {
+            Some(cell) if mode.intersects(TermMode::MOUSE_MODE) => {
+                report(mode, cell, 0, true, Modifiers::default())
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum WheelTarget {
     #[default]
@@ -109,6 +151,30 @@ pub fn wheel_input(
 mod tests {
     use super::*;
     use gpui::point;
+
+    #[test]
+    fn touch_drag_obeys_tracking_mode_and_releases_only_once() {
+        let mut drag = TouchMouseDrag::default();
+        let start = Cell { col: 2, row: 1 };
+        let next = Cell { col: 4, row: 2 };
+        let click = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert!(drag.begin(click, start).is_empty());
+        assert!(drag.end(click).is_empty());
+        for tracking in [TermMode::MOUSE_DRAG, TermMode::MOUSE_MOTION] {
+            let mode = tracking | TermMode::SGR_MOUSE;
+            assert!(drag.motion(mode, start).is_empty());
+            assert_eq!(drag.begin(mode, start), b"\x1b[<0;2;1M");
+            assert!(drag.begin(mode, start).is_empty());
+            assert!(drag.motion(mode, start).is_empty());
+            assert_eq!(drag.motion(mode, next), b"\x1b[<32;4;2M");
+            assert!(drag.motion(mode, next).is_empty());
+            assert_eq!(drag.end(mode), b"\x1b[<0;4;2m");
+            assert!(drag.end(mode).is_empty());
+            assert!(!drag.begin(mode, start).is_empty());
+            assert!(drag.end(TermMode::empty()).is_empty());
+            assert!(drag.motion(mode, next).is_empty());
+        }
+    }
 
     #[test]
     fn sgr_click_drag_hover_release_and_wheel_use_one_based_cells_and_modifiers() {
