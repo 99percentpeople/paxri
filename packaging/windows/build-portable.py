@@ -15,7 +15,7 @@ TARGET = "x86_64-pc-windows-msvc"
 
 
 def main():
-    build_dir = ROOT / "target" / "windows-user-release"
+    build_dir = ROOT / (os.environ.get("CARGO_TARGET_DIR") or "target/windows-user-release")
     # With an explicit target, these flags apply to the Windows binaries only.
     env = dict(os.environ, CARGO_ENCODED_RUSTFLAGS="-C\x1ftarget-feature=+crt-static")
     subprocess.run(
@@ -28,7 +28,7 @@ def main():
     binaries = build_dir / TARGET / "distribution"
     for name in ("paxri.exe", "paxri-gateway.exe", "paxri-gui.exe"):
         subprocess.run([str(binaries / name), "--version"], check=True)
-    dist = ROOT / "target" / "dist"
+    dist = ROOT / "dist/native"
     dist.mkdir(parents=True, exist_ok=True)
     archive = dist / "paxri-windows-x64.zip"
     # The ZIP must inherit dist's Windows ACL, including when the builder is elevated.

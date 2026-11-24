@@ -6,10 +6,13 @@ if [ "$#" -gt 1 ]; then
     exit 2
 fi
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-bin_dir=${1:-"$here/../../target/release"}
+bin_dir=${1:-"$here/bin"}
+if [ "$#" -eq 0 ] && [ ! -d "$bin_dir" ] && [ -f "$here/../../Cargo.toml" ]; then
+    bin_dir="$here/../../target/release"
+fi
 for binary in paxri paxri-gateway; do
     if [ ! -x "$bin_dir/$binary" ]; then
-        echo "Missing $bin_dir/$binary. Build with cargo build --locked --release -p paxri-gateway -p paxri-cli first." >&2
+        echo "Missing executable $bin_dir/$binary. Pass the directory containing paxri and paxri-gateway." >&2
         exit 1
     fi
 done

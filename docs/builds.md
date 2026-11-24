@@ -1,6 +1,17 @@
 # Build and distribute paxri
 
-Each build is identified by its Git commit. Cargo uses `0.0.0-dev` as the workspace package version. Native archives and Docker images use the `distribution` Cargo profile. It optimizes for size, uses full link-time optimization with one codegen unit per crate, and strips symbols. For a local native archive on Linux or macOS, run `bash packaging/build-unix-release.sh`. [Profile settings](../packaging/distribution.toml)
+Each build is identified by its Git commit. Cargo uses `0.0.0-dev` as the workspace package version. Native archives and Docker images use the `distribution` Cargo profile. It optimizes for size, uses full link-time optimization with one codegen unit per crate, and strips symbols. [Profile settings](../packaging/distribution.toml)
+
+## Build outputs
+
+| Directory | Contents | Build entry point |
+| --- | --- | --- |
+| `dist/native/` | Linux and macOS tarballs, Windows ZIP | `bash packaging/build-unix-release.sh` on Linux or macOS, `python packaging/windows/build-portable.py` on Windows |
+| `dist/android/` | Signed ARM64 `paxri-android-arm64.apk` | `python3 mobile/android/build.py` for a development build, **Build** on main for release signing |
+| `dist/docker/` | Offline image tarballs for Linux AMD64 and ARM64 | **Build** workflow |
+| `dist/release/` | All nine packages alongside `SHA256SUMS`, `compose.yaml`, and `build.env` | **Build** workflow after all platform jobs succeed |
+
+Native CI jobs use `target/ci-native/` on every platform, with separate caches per matrix target. Local native packaging accepts `CARGO_TARGET_DIR`. Cargo output and Android build intermediates live under `target/` by default. The Android builder keeps its development keystore and the output of `--unsigned-release` in `target/android/`.
 
 ## Run the workflow
 
@@ -8,7 +19,11 @@ Every push to `main` runs the native tests and builds the desktop archives, Andr
 
 Different commits can build concurrently. Rebuilds of the same commit on the same ref queue together because they share image tags. Each successful main build publishes a multi-platform image tagged with its commit. Updates to `rolling` and the `dev` image run one at a time. A build that finishes after a newer commit has been published keeps its commit image and skips those updates.
 
+The workflow manages all attachments on the `rolling` prerelease. It verifies every current file against its SHA-256 digest, updates the release, then deletes attachments absent from the new build. Retrying a run resumes an interrupted cleanup.
+
 You can also start **Build** manually. A manual run on another branch uploads the packages as Actions artifacts. [Build runs](../../../actions/workflows/builds.yml)
+
+Both paths collect the platform artifacts once. Collection checks the filenames before generating checksums. When adding a target, update the build matrix and the expected package list together. [Package collection](../.github/actions/collect-build/action.yml)
 
 ```sh
 gh workflow run builds.yml --ref main

@@ -87,7 +87,7 @@ On the **Devices** home screen, search the device list or filter by operating sy
 
 While a paired device is connected, Android uses a connected-device foreground service so switching apps leaves the transport and open terminals running. The service allows five minutes for a lost connection to return. Removing the last pairing or dismissing the app from Recents stops the service.
 
-Download `paxri.apk` from the rolling prerelease. Rolling builds use a fixed signing key so you can install updates over an existing fixed-signature build and keep your pairings and settings. Moving from an earlier development-signed APK requires a one-time uninstall, which clears its app data. Pull requests still produce a development-signed APK. [Rolling prerelease](../../releases/tag/rolling) · [Build runs](../../actions/workflows/builds.yml)
+Download `paxri-android-arm64.apk` from the rolling prerelease. Rolling builds use a fixed signing key so you can install updates over an existing fixed-signature build and keep your pairings and settings. Moving from an earlier development-signed APK requires a one-time uninstall, which clears its app data. Pull requests still produce a development-signed APK. [Rolling prerelease](../../releases/tag/rolling) · [Build runs](../../actions/workflows/builds.yml)
 
 To build the development APK, install JDK 17, Python 3, Android SDK Platform 35, Build Tools 35.0.0 and the NDK (tested with r26b). Set `ANDROID_HOME` to the SDK directory and `ANDROID_NDK_HOME` to the NDK directory. From the repository root run:
 
@@ -95,7 +95,7 @@ To build the development APK, install JDK 17, Python 3, Android SDK Platform 35,
 rustup target add aarch64-linux-android
 cargo install cargo-ndk --locked
 python3 mobile/android/build.py
-adb install -r target/android/paxri.apk
+adb install -r dist/android/paxri-android-arm64.apk
 ```
 
 On ARM64 Linux, the SDK tools must also run on the build host. If you already have an NDK cross toolchain, set `CC_aarch64_linux_android`, `CXX_aarch64_linux_android`, and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` to its compiler drivers. With an explicit linker the packaging script invokes Cargo directly.

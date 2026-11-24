@@ -1,0 +1,35 @@
+name: Collect build
+description: Collect the release files, checksum them, and upload the Compose settings and checksums.
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        pattern: paxri*.*
+        path: dist/release
+        merge-multiple: true
+        skip-decompress: true
+    - name: Check the package inventory and generate checksums
+      working-directory: dist/release
+      shell: bash
+      run: |
+        expected=(
+          paxri-linux-{amd64-glibc,arm64-glibc,arm64-musl}.tar.gz
+          paxri-macos-{amd64,arm64}.tar.gz
+          paxri-windows-x64.zip
+          paxri-android-arm64.apk
+          paxri-docker-linux-{amd64,arm64}.tar.gz
+        )
+        diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' paxri* | sort)
+        cp "$GITHUB_WORKSPACE/compose.yaml" .
+        printf 'PAXRI_VERSION=%s\n' "$IMAGE_TAG" > build.env
+        sha256sum paxri-* compose.yaml build.env > SHA256SUMS
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: paxri-build-info
+        path: |
+          dist/release/SHA256SUMS
+          dist/release/compose.yaml
+          dist/release/build.env
+        overwrite: true
+        if-no-files-found: error

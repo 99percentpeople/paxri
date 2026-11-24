@@ -23,6 +23,12 @@ def api(path, method="GET", **fields):
     return json.loads(result) if result else None
 
 
+def release_assets(release_path):
+    path = f"repos/{{owner}}/{{repo}}/releases{release_path}/assets?per_page=100"
+    pages = json.loads(output("gh", "api", "--paginate", "--slurp", path))
+    return {asset["name"]: asset for page in pages for asset in page}
+
+
 def rename(asset, name):
     api(f"/assets/{asset['id']}", "PATCH", name=name)
 
@@ -33,11 +39,16 @@ def main():
     root = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
     run = f"{root}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
     notes = f"paxri built from [`{sha[:12]}`]({root}/commit/{sha}). [Build logs]({run})"
-    files = sorted(Path("dist").iterdir())
+    dist = Path("dist/release")
+    manifest = dist / "SHA256SUMS"
     hashes = {}
-    for path in files:
-        with path.open("rb") as stream:
-            hashes[path.name] = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+    for line in manifest.read_text().splitlines():
+        digest, name = line.split("  ", 1)
+        hashes[name] = "sha256:" + digest
+    hashes[manifest.name] = "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest()
+    files = sorted(dist.iterdir())
+    if {path.name for path in files} != hashes.keys():
+        raise ValueError("Release files do not match SHA256SUMS")
 
     # Include unpublished drafts so retrying the first upload reuses the same release.
     releases = json.loads(output("gh", "api", "--paginate", "--slurp",
@@ -47,11 +58,11 @@ def main():
         release = api("", "POST", tag_name=tag, target_commitish=sha,
                       name="paxri rolling build", prerelease=True, draft=True)
     release_path = f"/{release['id']}"
-    assets = {a["name"]: a for a in release["assets"]}
+    assets = release_assets(release_path)
     changed = [p for p in files if assets.get(p.name, {}).get("digest") != hashes[p.name]]
 
     # Stage large uploads before touching the downloads already linked from the release.
-    with tempfile.TemporaryDirectory(dir="dist") as temp:
+    with tempfile.TemporaryDirectory(dir=dist) as temp:
         uploads = []
         for path in changed:
             staged = Path(temp) / ("incoming-" + path.name)
@@ -60,7 +71,7 @@ def main():
                 uploads.append(staged)
         if uploads:
             subprocess.run(["gh", "release", "upload", tag, "--clobber", *uploads], check=True)
-    assets = {a["name"]: a for a in api(release_path)["assets"]}
+    assets = release_assets(release_path)
     for path in changed:
         if assets["incoming-" + path.name]["digest"] != hashes[path.name]:
             raise ValueError(f"Uploaded digest mismatch for {path.name}")
@@ -80,6 +91,10 @@ def main():
             staged = assets["incoming-" + name]
             rename(staged, name)
             undo.append((staged, staged["name"]))
+        assets = release_assets(release_path)
+        for name, digest in hashes.items():
+            if assets.get(name, {}).get("digest") != digest:
+                raise ValueError(f"Published asset missing or digest mismatch for {name}")
         if previous != sha:
             output("git", "push", f"--force-with-lease={ref}:{previous}", "origin", f"{sha}:{ref}")
             moved = True
@@ -92,9 +107,9 @@ def main():
             rename(asset, original)
         raise
 
-    for asset in api(release_path)["assets"]:
-        name = asset["name"]
-        if name not in hashes and name.startswith(("previous-", "incoming-", "paxri-")):
+    # The rolling release contains exactly this build's files after cleanup.
+    for name, asset in assets.items():
+        if name not in hashes:
             api(f"/assets/{asset['id']}", "DELETE")
 
 

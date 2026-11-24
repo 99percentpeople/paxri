@@ -13,6 +13,8 @@ import zipfile
 
 APP = Path(__file__).resolve().parent
 OUT = APP.parents[1] / "target/android"
+DIST = APP.parents[1] / "dist/android"
+APK_BASENAME = "paxri-android-arm64"
 TARGET = "aarch64-linux-android"
 VERIFIER_HASH = "aa021794230fbc2f0be355999e2cf67398dd563de066a2e17001ffbd0b69101b"
 KOTLIN_HASH = "f31cc53f105a7e48c093683bbd5437561d1233920513774b470805641bedbc09"
@@ -148,18 +150,20 @@ def main():
         aligned = tmp / "aligned.apk"
         run(tools / "zipalign", "-f", "4", package, aligned)
         if args.unsigned_release:
-            output = OUT / "paxri-unsigned.apk"
+            output = OUT / f"{APK_BASENAME}-unsigned.apk"
             aligned.replace(output)
         else:
             key = OUT / "debug.p12"
             if not key.exists():
                 run("keytool", "-genkeypair", "-keystore", key, "-storepass", "android", "-keypass", "android",
                     "-alias", "paxri-debug", "-keyalg", "RSA", "-validity", "10000", "-dname", "CN=paxri Debug")
-            signed = tmp / "paxri.apk"
-            run(tools / "apksigner", "sign", "--ks", key, "--ks-pass", "pass:android", "--out", signed, aligned)
-            run(tools / "apksigner", "verify", signed)
-            output = OUT / "paxri.apk"
-            signed.replace(output)
+            DIST.mkdir(parents=True, exist_ok=True)
+            output = DIST / f"{APK_BASENAME}.apk"
+            with tempfile.TemporaryDirectory(prefix=".sign-", dir=DIST) as staging:
+                signed = Path(staging) / output.name
+                run(tools / "apksigner", "sign", "--ks", key, "--ks-pass", "pass:android", "--out", signed, aligned)
+                run(tools / "apksigner", "verify", signed)
+                signed.replace(output)
     print(output)
 
 

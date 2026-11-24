@@ -10,7 +10,7 @@ Download your system's package and `SHA256SUMS` from the **paxri rolling build**
 | ARM64 Linux with musl (e.g. Alpine or OpenWrt) | `paxri-linux-arm64-musl.tar.gz` |
 | Apple Silicon | `paxri-macos-arm64.tar.gz` |
 | Intel Mac | `paxri-macos-amd64.tar.gz` |
-| ARM64 Android | `paxri.apk` |
+| ARM64 Android | `paxri-android-arm64.apk` |
 
 On Windows, extract the whole ZIP into one directory. Keep `conpty.dll` and `OpenConsole.exe` beside the gateway to support mouse input and screen switching in remote terminal applications. Restart the gateway after updating those files.
 
@@ -126,7 +126,7 @@ Add a bind mount for `${HOME}/.local/share/paxri/docker-ipc:/run/paxri` to the g
 From an extracted Linux archive run:
 
 ```sh
-sudo ./install-systemd.sh ./bin
+sudo ./install-systemd.sh
 sudo -u paxri /usr/local/bin/paxri pair code
 journalctl -u paxri-gateway -f
 ```

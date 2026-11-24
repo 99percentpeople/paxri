@@ -28,8 +28,9 @@ if [[ $target == "$host" ]]; then
     "$bins/paxri-gateway" --help >/dev/null
     "$bins/paxri-gui" --help >/dev/null
 fi
-mkdir -p target/dist
-work=$(mktemp -d target/dist/.native.XXXXXX)
+dist=dist/native
+mkdir -p "$dist"
+work=$(mktemp -d "$dist/.native.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 name=paxri-$platform
 root=$work/$name
@@ -71,4 +72,5 @@ else
 fi
 cp README.md docs/installation.md "$root/"
 tar -cf - -C "$work" "$name" | gzip -9n > "$work/$name.tar.gz"
-mv "$work/$name.tar.gz" "target/dist/$name.tar.gz"
+mv "$work/$name.tar.gz" "$dist/$name.tar.gz"
+echo "$dist/$name.tar.gz"
