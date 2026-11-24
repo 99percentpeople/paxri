@@ -48,18 +48,9 @@ pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
 }
 
 impl Mobile {
-    pub(super) fn settings_body(&self, id: impl Into<ElementId>) -> Stateful<Div> {
-        div()
-            .id(id)
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll)
-            .restrict_scroll_to_axis()
-            .flex()
-            .flex_col()
-            .p_4()
-            .gap_2()
+    pub(super) fn settings_body(&self, id: impl Into<ElementId>) -> paxri_ui::components::ScrollArea {
+        paxri_ui::components::ScrollArea::new(id, div().flex().flex_col().p_4().gap_2())
+            .with_handle(self.settings_scroll.clone())
     }
 
     pub(super) fn commit_device_name(&mut self, cx: &mut App) {
@@ -104,9 +95,9 @@ impl Mobile {
         ui: Ui,
         available_width: Pixels,
         cx: &Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> AnyElement {
         if selected == Some(keybar::SECTION) {
-            return self.keybar_editor(ui, cx);
+            return self.keybar_editor(ui, cx).into_any_element();
         }
         let device = SettingsGroup::device(paxri_ui::settings::controls::setting_field(
             self.name_input.clone(),
@@ -173,6 +164,6 @@ impl Mobile {
             ).role(Role::Button).aria_label("Terminal keys")
                 .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))));
         }
-        body
+        body.into_any_element()
     }
 }

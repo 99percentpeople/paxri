@@ -73,9 +73,12 @@ impl Focusable for Terminal {
     }
 }
 
-impl ScrollSource for Entity<Terminal> {
+#[derive(Clone)]
+struct TerminalHistory(Entity<Terminal>);
+
+impl ScrollSource for TerminalHistory {
     fn metrics(&self, cx: &App) -> ScrollMetrics {
-        let grid = self.read(cx).emulator.term.grid();
+        let grid = self.0.read(cx).emulator.term.grid();
         ScrollMetrics::new(
             grid.screen_lines() as f32,
             grid.history_size() as f32,
@@ -84,7 +87,7 @@ impl ScrollSource for Entity<Terminal> {
     }
 
     fn scroll_to(&self, offset: f32, cx: &mut App) {
-        self.update(cx, |view, cx| {
+        self.0.update(cx, |view, cx| {
             let grid = view.emulator.term.grid();
             let from_bottom = grid.history_size().saturating_sub(offset.round() as usize);
             let delta = from_bottom as i32 - grid.display_offset() as i32;
@@ -485,7 +488,7 @@ impl Render for Terminal {
                     .on_pinch(|event, window, cx| TerminalZoom::apply(Zoom::Pinch(event.scale), window, cx))
                     .on_scroll_wheel(cx.listener(Self::wheel))
                     .child(screen)
-                    .child(Scrollbar::vertical("terminal-history", cx.entity()))
+                    .child(Scrollbar::vertical("terminal-history", TerminalHistory(cx.entity())))
                     .when(self.touch.handles && self.emulator.selected_range().is_some(), |screen| screen.child(
                         div().absolute().right_3().top_2().occlude().child(
                             ui.button(crate::components::ButtonVariant::Outline, "copy-touch-selection", "Copy")

@@ -366,11 +366,6 @@ impl Mobile {
         let paths = self.presence.paths_for(id);
         let can_connect = self.presence.online(id) && peer.supports_shell();
         let body = div()
-            .id("device-page")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .restrict_scroll_to_axis()
             .px(px(18.))
             .flex()
             .flex_col()
@@ -428,7 +423,7 @@ impl Mobile {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(body)
+            .child(paxri_ui::components::ScrollArea::new("device-page", body))
             .when(can_connect, |page| {
                 let target = id.to_owned();
                 let button = ui.new_session_button()
@@ -601,12 +596,9 @@ impl Render for Mobile {
                         Page::Devices | Page::PairingMenu => {
                             self.devices(ui, cx).into_any_element()
                         }
-                        Page::Settings => self
-                            .settings(None, ui, content_width, cx)
-                            .into_any_element(),
+                        Page::Settings => self.settings(None, ui, content_width, cx),
                         Page::SettingsCategory(section) => self
-                            .settings(Some(section), ui, content_width, cx)
-                            .into_any_element(),
+                            .settings(Some(section), ui, content_width, cx),
                         Page::ForwardEdit { owner, .. } => {
                             self.rule_editor(owner.as_deref(), ui, cx).into_any_element()
                         }

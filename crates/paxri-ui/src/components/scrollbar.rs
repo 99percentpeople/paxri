@@ -1,9 +1,13 @@
 //! A vertical overlay for pixel-based scroll views and line-based terminal history.
 use super::Ui;
 use gpui::{prelude::*, *};
+#[cfg(not(target_os = "android"))]
 use std::cell::Cell;
 
-const TRACK_WIDTH: Pixels = px(12.);
+#[cfg(any(target_os = "android", test))]
+mod mobile;
+
+const TRACK_WIDTH: Pixels = px(if cfg!(target_os = "android") { 3. } else { 12. });
 const MIN_THUMB: Pixels = px(24.);
 
 /// Visible extent, scrollable distance (content minus viewport), and distance from the top.
@@ -39,6 +43,7 @@ impl ScrollMetrics {
         })
     }
 
+    #[cfg(any(not(target_os = "android"), test))]
     fn page(self, forward: bool) -> f32 {
         let delta = if forward {
             self.viewport
@@ -57,9 +62,13 @@ pub trait ScrollSource: Clone + 'static {
 
 impl ScrollSource for ScrollHandle {
     fn metrics(&self, _: &App) -> ScrollMetrics {
+        #[cfg(target_os = "android")]
+        let overflow = self.max_offset().y;
+        #[cfg(not(target_os = "android"))]
+        let overflow = self.max_offset().height;
         ScrollMetrics::new(
             self.bounds().size.height.into(),
-            self.max_offset().height.into(),
+            overflow.into(),
             (-self.offset().y).into(),
         )
     }
@@ -69,13 +78,72 @@ impl ScrollSource for ScrollHandle {
     }
 }
 
+/// A vertical viewport with a scrollbar outside the flow of its scrolling children.
+#[derive(IntoElement)]
+pub struct ScrollArea {
+    id: ElementId,
+    content: Div,
+    handle: Option<ScrollHandle>,
+}
+
+impl ScrollArea {
+    pub fn new(id: impl Into<ElementId>, content: Div) -> Self {
+        Self {
+            id: id.into(),
+            content,
+            handle: None,
+        }
+    }
+
+    pub fn with_handle(mut self, handle: ScrollHandle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+}
+
+impl ParentElement for ScrollArea {
+    fn extend(&mut self, children: impl IntoIterator<Item = AnyElement>) {
+        self.content.extend(children);
+    }
+}
+
+impl RenderOnce for ScrollArea {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let id = self.id;
+        let handle = self.handle.unwrap_or_else(|| {
+            window
+                .use_keyed_state((id.clone(), "handle"), cx, |_, _| ScrollHandle::new())
+                .read(cx)
+                .clone()
+        });
+        let viewport = self
+            .content
+            .id(id.clone())
+            .size_full()
+            .overflow_y_scroll()
+            .scrollbar_width(TRACK_WIDTH)
+            .track_scroll(&handle);
+        #[cfg(target_os = "android")]
+        let viewport = viewport.restrict_scroll_to_axis();
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(viewport)
+            .child(Scrollbar::vertical((id, "bar"), handle))
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Thumb {
     start: Pixels,
     length: Pixels,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     travel: Pixels,
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 impl Thumb {
     fn grab_at(self, y: Pixels) -> Option<f32> {
         (self.start..=self.start + self.length)
@@ -105,6 +173,7 @@ impl<S: ScrollSource> Scrollbar<S> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl<S: ScrollSource> RenderOnce for Scrollbar<S> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let grab = window.use_keyed_state(self.id, cx, |_, _| Cell::new(None::<f32>));
@@ -203,7 +272,7 @@ impl<S: ScrollSource> RenderOnce for Scrollbar<S> {
             },
         )
         .absolute()
-        .right(px(1.))
+        .right_0()
         .top(px(2.))
         .bottom(px(2.))
         .w(TRACK_WIDTH)

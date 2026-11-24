@@ -4,7 +4,8 @@ mod sidebar;
 mod state;
 mod tabs;
 
-use super::{Scrollbar, Ui, focus::workspace_keyboard};
+use super::{Ui, focus::workspace_keyboard};
+use paxri_ui::components::ScrollArea;
 use crate::{
     chrome,
     theme::{BUTTON_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4},
@@ -66,20 +67,14 @@ impl RenderOnce for DockPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let panel = div().flex_1().min_h_0().min_w_0();
         let content = match self.scroll {
-            Some((id, handle)) => panel
-                .relative()
-                .child(
-                    div()
-                        .id(id.clone())
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&handle)
-                        .p(SPACE_4)
-                        .when(self.action.is_some(), |d| d.pb(paxri_ui::components::FLOATING_ACTION_CLEARANCE))
-                        .child(self.content),
-                )
-                .child(Scrollbar::vertical((id, "bar"), handle))
-                .into_any_element(),
+            Some((id, handle)) => ScrollArea::new(
+                id,
+                div().p(SPACE_4)
+                    .when(self.action.is_some(), |d| d.pb(paxri_ui::components::FLOATING_ACTION_CLEARANCE))
+                    .child(self.content),
+            )
+            .with_handle(handle)
+            .into_any_element(),
             None => panel
                 .overflow_hidden()
                 .child(self.content)

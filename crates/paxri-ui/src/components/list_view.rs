@@ -58,10 +58,7 @@ impl RenderOnce for ListView {
             list = list.child(item);
         }
         if let Some(id) = self.scroll_id {
-            let list = list.id(id).flex_1().overflow_y_scroll();
-            #[cfg(target_os = "android")]
-            let list = list.restrict_scroll_to_axis();
-            list.into_any_element()
+            ScrollArea::new(id, list).into_any_element()
         } else {
             list.flex_none().into_any_element()
         }

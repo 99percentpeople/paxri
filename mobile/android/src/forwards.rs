@@ -485,7 +485,7 @@ impl Mobile {
         owner: Option<&str>,
         ui: Ui,
         cx: &Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> paxri_ui::components::ScrollArea {
         let form = &self.rule_form;
         let [name, listen, target] = &form.inputs;
         let mut fields = SettingsGroup::new(SettingsSection::new(

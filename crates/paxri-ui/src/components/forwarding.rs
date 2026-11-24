@@ -197,12 +197,10 @@ impl Ui {
         let title = super::list_item::list_title(name.to_owned())
             .id((ElementId::from("rule"), SharedString::from(key.clone())))
             .tooltip(tooltip(name.to_owned().into()));
+        let row = div().w_full().min_w_0().flex_none().rounded(CONTROL_RADIUS)
+            .hover(|s| s.bg(rgb(ui.colors.accent.background)));
         if narrow {
-            div()
-                .w_full()
-                .min_w_0()
-                .flex_none()
-                .flex()
+            row.flex()
                 .flex_col()
                 .gap_1()
                 .child(
@@ -220,9 +218,7 @@ impl Ui {
                 .child(endpoint("listen", source, listen))
                 .child(endpoint("target", destination, &f.target))
                 .child(cell().child(line("state", f.state())));
-            ListItem::custom(fields)
-                .trailing(actions)
-                .into_any_element()
+            row.child(ListItem::custom(fields).trailing(actions)).into_any_element()
         }
     }
 }

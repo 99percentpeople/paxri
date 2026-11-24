@@ -6,7 +6,7 @@ use crate::{
         Icon, SettingsSection, SettingsTable, Ui,
         dock::{DockNavigation, DockPanel},
     },
-    theme::{SPACE_1, SPACE_2, SPACE_3, SPACE_4},
+    theme::{SPACE_2, SPACE_3, SPACE_4},
 };
 use gpui::{prelude::*, *};
 
@@ -99,15 +99,7 @@ impl Dashboard {
             category
         };
         let compact = width < px(560.);
-        let mut navigation = div()
-            .id("settings-navigation")
-            .min_w_0()
-            .min_h_0()
-            .flex_1()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(SPACE_1);
+        let mut navigation = paxri_ui::components::ListView::scrollable("settings-navigation");
         if searching {
             navigation = navigation.child(self.settings_nav_button(
                 ui,

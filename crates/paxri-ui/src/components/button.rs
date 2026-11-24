@@ -202,6 +202,9 @@ impl RenderOnce for Button {
             ButtonVariant::Outline => Some(colors.card),
             _ => Some(pair.background),
         };
+        let list_row = matches!(self.variant, ButtonVariant::Ghost)
+            && matches!(self.layout, ButtonLayout::Row);
+        let hover_background = if list_row { colors.accent.background } else { hover };
         let root = self
             .root
             .flex_none()
@@ -236,9 +239,9 @@ impl RenderOnce for Button {
             .font_weight(FontWeight::MEDIUM)
             .when_some(background, |button, color| button.bg(rgb(color)))
             .text_color(rgb(pair.foreground))
-            .hover(|s| s.bg(rgb(hover)))
+            .when(!self.pressed, |button| button.hover(|s| s.bg(rgb(hover_background))))
             .when(
-                !matches!(self.variant, ButtonVariant::Ghost)
+                list_row || !matches!(self.variant, ButtonVariant::Ghost)
                     || matches!(self.layout, ButtonLayout::Circular),
                 |button| button.active(|s| s.bg(rgb(hover))),
             )

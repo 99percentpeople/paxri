@@ -4,13 +4,12 @@ pub mod dock;
 mod focus;
 pub(crate) use dialog::{Dialog, DialogContent, DialogMode, DialogSuccess};
 use paxri_ui::components::input;
-mod scrollbar;
 mod settings;
 use gpui::{prelude::*, *};
 pub use input::Input;
 #[expect(dead_code, reason = "Reusable multiline control for form pages")]
 pub type Textarea = input::TextInput<true>;
-pub use scrollbar::{ScrollMetrics, ScrollSource, Scrollbar};
+pub use paxri_ui::components::{ScrollMetrics, ScrollSource, Scrollbar};
 pub(crate) use paxri_ui::settings::{SettingsGroup, SettingsSection, SettingsTable};
 pub(crate) use settings::{TextSetting, setting_field};
 pub(crate) use paxri_ui::components::Toast;

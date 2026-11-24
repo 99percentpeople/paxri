@@ -62,7 +62,6 @@ impl<K: Clone + PartialEq + 'static> InteractiveElement for DockTabs<K> {
 impl<K: Clone + PartialEq + 'static> RenderOnce for DockTabs<K> {
     fn render(self, w: &mut Window, cx: &mut App) -> impl IntoElement {
         let ui = Ui::new(w, cx);
-        let hover = ui.colors.tab_hover;
         let mut items = self.items;
         let layout = self.state.read(cx);
         let placement = layout.placement();
@@ -82,7 +81,6 @@ impl<K: Clone + PartialEq + 'static> RenderOnce for DockTabs<K> {
             keys.push(key);
             strip = strip.child(
                 tab.cursor_pointer()
-                    .hover(move |s| s.bg(rgb(hover)))
                     .when(moving, |t| t.opacity(0.))
                     .when(self.indent > px(0.), |t| match placement {
                         DockPlacement::Top => t.ml(self.indent),
@@ -217,6 +215,7 @@ impl Ui {
             .border_1()
             .border_color(transparent_black())
             .text_color(rgb(self.colors.muted_foreground))
+            .when(!selected, |tab| tab.hover(|s| s.bg(rgb(self.colors.tab_hover))))
             .when(selected, |tab| {
                 tab.bg(rgb(self.colors.card))
                     .border_color(rgb(self.colors.border))
