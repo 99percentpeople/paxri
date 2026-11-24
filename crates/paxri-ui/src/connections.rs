@@ -1,6 +1,7 @@
 //! Live connection paths and recent traffic and latency samples for device details.
 use crate::components::{Ui, heading, single_line, tooltip};
 use gpui::{prelude::*, *};
+use lyon_path::LineJoin;
 use paxri_core::{
     StreamKind,
     connection::{ConnectionTraffic, PathKind, PeerConnection, format_bytes},
@@ -13,6 +14,10 @@ use std::{
 const WINDOW: Duration = Duration::from_secs(60);
 // Coalesce incidental status events while allowing normal IPC jitter between one-second ticks.
 const MIN_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_LINE_GAP: Duration = Duration::from_secs(5);
+const CHART_STROKE: StrokeOptions = StrokeOptions::DEFAULT
+    .with_line_width(1.4)
+    .with_line_join(LineJoin::Round);
 
 #[derive(Hash, PartialEq, Eq)]
 struct Route {
@@ -44,7 +49,8 @@ struct Sample {
 }
 
 fn sample(samples: &mut VecDeque<Sample>, now: Instant, path: &PeerConnection) {
-    while samples.front().is_some_and(|s| now - s.at > WINDOW) {
+    // Keep the outgoing point until its connected successor reaches the left edge.
+    while samples.front().is_some_and(|s| now - s.at > WINDOW + MAX_LINE_GAP) {
         samples.pop_front();
     }
     if samples.back().is_some_and(|s| now - s.at < MIN_INTERVAL) {
@@ -52,6 +58,7 @@ fn sample(samples: &mut VecDeque<Sample>, now: Instant, path: &PeerConnection) {
     }
     let rates = samples
         .back()
+        .filter(|last| now - last.at <= WINDOW)
         .and_then(|last| path.traffic?.rates_since(last.traffic?, now - last.at));
     samples.push_back(Sample {
         at: now,
@@ -196,56 +203,97 @@ impl Metric {
     }
 }
 
+fn chart_segments(
+    visible: &[(Instant, u64)],
+    single_reading: bool,
+) -> impl Iterator<Item = &[(Instant, u64)]> {
+    visible
+        .chunk_by(|previous, next| next.0 - previous.0 <= MAX_LINE_GAP)
+        .filter(move |segment| single_reading || segment.len() >= 2)
+}
+
+fn chart_x(at: Instant, now: Instant) -> f32 {
+    // Keep offscreen coordinates so the content mask clips the original slope.
+    (1.0 - now.duration_since(at).div_duration_f64(WINDOW)) as f32
+}
+
+fn chart_window(points: &[(Instant, u64)], now: Instant) -> &[(Instant, u64)] {
+    let first = points.partition_point(|&(at, _)| now.duration_since(at) > WINDOW);
+    let Some(&(at, _)) = points.get(first) else { return &[] };
+    if first > 0 && now.duration_since(at) < WINDOW && at - points[first - 1].0 <= MAX_LINE_GAP {
+        &points[first - 1..]
+    } else {
+        &points[first..]
+    }
+}
+
 fn sparkline(samples: &VecDeque<Sample>, metric: Metric, ui: Ui) -> Option<impl IntoElement> {
-    let start = samples.front()?.at;
-    let span = (samples.back()?.at - start).as_secs_f32();
-    let ceiling = samples.iter().filter_map(|s| metric.value(s)).max()?.max(
-        if matches!(metric, Metric::Latency) {
-            10
-        } else {
-            1
-        },
-    ) as f32;
     let points: Vec<_> = samples
         .iter()
-        .filter_map(|s| {
-            Some((
-                if span > 0. {
-                    (s.at - start).as_secs_f32() / span
-                } else {
-                    1.
-                },
-                1. - metric.value(s)? as f32 / ceiling,
-            ))
-        })
+        .filter_map(|s| Some((s.at, metric.value(s)?)))
         .collect();
+    let floor = if matches!(metric, Metric::Latency) {
+        10
+    } else {
+        1
+    };
+    if points.is_empty() {
+        return None;
+    }
     Some(
         canvas(
             |_, _, _| (),
-            move |bounds, _, window, _| {
+            move |bounds, _, window, _cx| {
+                if !bounds.intersects(&window.content_mask().bounds) {
+                    return;
+                }
+                let now = Instant::now();
+                let visible = chart_window(&points, now);
+                let Some(maximum) = visible.iter().map(|&(_, value)| value).max() else { return };
+                let mut segments = chart_segments(visible, points.len() == 1).peekable();
+                if segments.peek().is_none() {
+                    return;
+                }
+                #[cfg(target_os = "android")]
+                let animate = !_cx.reduce_motion();
+                #[cfg(not(target_os = "android"))]
+                let animate = true;
+                if animate {
+                    window.request_animation_frame();
+                }
+                let ceiling = maximum.max(floor) as f32;
                 let inset = px(2.);
-                let mut line = PathBuilder::stroke(px(1.4));
-                let mut tip = bounds.origin;
-                for (i, &(x, y)) in points.iter().enumerate() {
-                    tip = bounds.origin
-                        + point(
-                            inset + (bounds.size.width - inset * 2.) * x,
-                            inset + (bounds.size.height - inset * 2.) * y,
-                        );
-                    if i == 0 {
-                        line.move_to(tip);
-                    } else {
-                        line.line_to(tip);
-                    }
-                }
                 let color = rgb(ui.colors.muted_foreground);
-                if points.len() > 1
-                    && let Ok(path) = line.build()
-                {
-                    window.paint_path(path, color);
-                }
-                let marker = Bounds::new(tip - point(inset, inset), size(inset * 2., inset * 2.));
-                window.paint_quad(fill(marker, color).corner_radii(inset));
+                let position = |(at, value): (Instant, u64)| {
+                    let x = chart_x(at, now);
+                    let y = 1. - value as f32 / ceiling;
+                    bounds.origin
+                        + point(
+                            (bounds.size.width - inset) * x,
+                            inset + (bounds.size.height - inset * 2.) * y,
+                        )
+                };
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    for segment in segments {
+                        let first = position(segment[0]);
+                        if segment.len() == 1 {
+                            let center = point(first.x, bounds.center().y);
+                            let diameter = px(CHART_STROKE.line_width);
+                            let dot = Bounds::centered_at(center, size(diameter, diameter));
+                            window.paint_quad(fill(dot, color).corner_radii(diameter / 2.));
+                            continue;
+                        }
+                        let mut line =
+                            PathBuilder::default().with_style(PathStyle::Stroke(CHART_STROKE));
+                        line.move_to(first);
+                        for &sample in &segment[1..] {
+                            line.line_to(position(sample));
+                        }
+                        if let Ok(path) = line.build() {
+                            window.paint_path(path, color);
+                        }
+                    }
+                });
             },
         )
         .w(px(76.))
@@ -256,12 +304,57 @@ fn sparkline(samples: &VecDeque<Sample>, metric: Metric, ui: Ui) -> Option<impl 
 
 #[cfg(test)]
 mod tests {
-    use super::sample;
+    use super::{WINDOW, chart_segments, chart_window, chart_x, sample};
     use paxri_core::connection::{ConnectionTraffic, PathKind, PeerConnection};
     use std::{
         collections::VecDeque,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn chart_breaks_only_across_gaps_longer_than_five_seconds() {
+        let start = Instant::now();
+        let points = [0, 5_000, 10_001, 16_001, 17_001, 23_000]
+            .map(|ms| (start + Duration::from_millis(ms), 42));
+        assert_eq!(chart_segments(&points[..0], false).count(), 0);
+        assert_eq!(chart_segments(&points[..1], true).collect::<Vec<_>>(), [&points[..1]]);
+        assert_eq!(chart_segments(&points[..2], false).collect::<Vec<_>>(), [&points[..2]]);
+        let segments: Vec<_> = chart_segments(&points, false).collect();
+        assert_eq!(segments, [&points[..2], &points[3..5]]);
+    }
+
+    #[test]
+    fn chart_scrolls_the_whole_segment_across_the_left_clip_edge() {
+        let start = Instant::now();
+        let next = start + Duration::from_secs(1);
+        let last = next + Duration::from_secs(5);
+        let points = [(start, 12), (next, 9), (last, 15)];
+        let between = start + Duration::from_millis(500);
+        assert_eq!(chart_x(start, start), 1.);
+        assert!(chart_x(start, next) < chart_x(start, between) && chart_x(start, between) < 1.);
+        assert_eq!(chart_x(next, next), 1.);
+        let initial_width = chart_x(next, start + WINDOW);
+        for elapsed_ms in [250, 500, 999] {
+            let now = start + WINDOW + Duration::from_millis(elapsed_ms);
+            assert_eq!(chart_window(&points, now), &points);
+            let left = chart_x(start, now);
+            let right = chart_x(next, now);
+            assert!(left < 0. && right > 0.);
+            assert!((right - left - initial_width).abs() < 1e-6);
+            let fraction_at_edge = -left / (right - left);
+            assert!((fraction_at_edge - elapsed_ms as f32 / 1000.).abs() < 1e-6);
+        }
+        assert_eq!(chart_window(&points, next + WINDOW), &points[1..]);
+        assert_eq!(chart_x(next, next + WINDOW), 0.);
+        assert_eq!(chart_window(&points, last + WINDOW - Duration::from_millis(1)), &points[1..]);
+
+        let tail = chart_window(&points, last + WINDOW);
+        assert_eq!(chart_segments(tail, false).count(), 0);
+        assert!(chart_window(&points, last + WINDOW + Duration::from_millis(1)).is_empty());
+
+        let after_gap = [(start, 12), (last, 15)];
+        assert_eq!(chart_window(&after_gap, between + WINDOW), &after_gap[1..]);
+    }
 
     #[test]
     fn rates_use_elapsed_time_and_expire_with_the_history() {

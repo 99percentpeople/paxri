@@ -5568,6 +5568,7 @@ dependencies = [
  "alacritty_terminal",
  "gpui",
  "gpui-pre",
+ "lyon_path",
  "paxri-config",
  "paxri-control",
  "paxri-core",
