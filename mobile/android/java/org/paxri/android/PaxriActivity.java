@@ -41,6 +41,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static native void deviceNameChanged(String name, String model);
     private static native void submitCode(String code);
     private static native void removeForward(String owner, String name);
+    private static native void unpairDevice(String id, String generation);
     private static native void systemTextSizeChanged(float size);
     private static native void insetsChanged(float left, float top, float right, float bottom);
     private static native boolean goBack();
@@ -50,7 +51,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private long imeSession;
     private boolean networkReady;
     private Toast toast;
-    private AlertDialog removeForwardDialog;
+    private AlertDialog removalDialog;
     private PopupWindow terminalTouch;
     private long touchSession;
     private TerminalGestures gestures;
@@ -174,7 +175,7 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     @Override
     protected void onDestroy() {
-        if (removeForwardDialog != null) removeForwardDialog.dismiss();
+        if (removalDialog != null) removalDialog.dismiss();
         connectionHandler.removeCallbacks(stopConnections);
         stopConnectionService();
         super.onDestroy();
@@ -485,14 +486,25 @@ public final class PaxriActivity extends GpuiInputActivity {
     }
 
     public void confirmRemoveForward(String owner, String name, String route) {
+        confirmRemoval("Remove forwarding rule?", name + "\n" + route, "Remove rule",
+                () -> removeForward(owner, name));
+    }
+
+    public void confirmUnpair(String id, String generation, String name) {
+        confirmRemoval("Unpair device?", "Unpair this device and " + name
+                + "? Active connections will close. If the device is offline, it will be notified when reachable.",
+                "Unpair device", () -> unpairDevice(id, generation));
+    }
+
+    private void confirmRemoval(String title, String message, String action, Runnable confirm) {
         runOnUiThread(() -> {
-            if (isFinishing() || isDestroyed() || removeForwardDialog != null) return;
-            removeForwardDialog = new AlertDialog.Builder(this)
-                    .setTitle("Remove forwarding rule?")
-                    .setMessage(name + "\n" + route)
+            if (isFinishing() || isDestroyed() || removalDialog != null) return;
+            removalDialog = new AlertDialog.Builder(this)
+                    .setTitle(title)
+                    .setMessage(message)
                     .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Remove rule", (d, w) -> removeForward(owner, name))
-                    .setOnDismissListener(d -> removeForwardDialog = null)
+                    .setPositiveButton(action, (d, w) -> confirm.run())
+                    .setOnDismissListener(d -> removalDialog = null)
                     .show();
         });
     }

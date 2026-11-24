@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use async_channel::Sender;
-use paxri_config::Config;
+use paxri_config::{Config, PendingUnpair};
 use paxri_core::{
     PeerSession, StreamKind,
     connection::{PeerConnection, unix_time_ms},
@@ -38,10 +38,19 @@ pub struct Peer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status_change_ms: Option<i64>,
     ticket: EndpointTicket,
-    generation: Option<String>,
+    pub(super) generation: Option<String>,
 }
 
 pub type Peers = BTreeMap<String, Peer>;
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct SavedDevices {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pending_unpairs: BTreeMap<String, PendingUnpair>,
+    // Device IDs are the top-level keys in existing peers.json files.
+    #[serde(flatten)]
+    peers: Peers,
+}
 
 #[derive(Default)]
 pub struct Presence {
@@ -71,7 +80,7 @@ pub struct Client {
     transport: Arc<NativeTransport>,
     presence: tokio::task::JoinHandle<()>,
     _router: iroh::protocol::Router,
-    peers: Mutex<Peers>,
+    devices: Mutex<SavedDevices>,
     file: PathBuf,
 }
 
@@ -95,8 +104,8 @@ impl Peer {
     }
 }
 
-fn config(peers: &Peers) -> Result<Arc<Config>> {
-    let entries: BTreeMap<_, _> = peers
+fn config(devices: &SavedDevices) -> Result<Arc<Config>> {
+    let entries: BTreeMap<_, _> = devices.peers
         .iter()
         .map(|(id, peer)| {
             let entry = serde_json::json!({
@@ -106,7 +115,7 @@ fn config(peers: &Peers) -> Result<Arc<Config>> {
         })
         .collect();
     Ok(Arc::new(serde_json::from_value(serde_json::json!({
-        "version": 1, "native": {"upnp": false}, "peers": entries
+        "version": 1, "native": {"upnp": false}, "peers": entries, "pending_unpairs": devices.pending_unpairs
     }))?))
 }
 
@@ -129,9 +138,9 @@ impl Client {
         std::fs::create_dir_all(dir)?;
         let key = paxri_native::identity::init(&dir.join("device.key"))?;
         let file = dir.join("peers.json");
-        let peers = match std::fs::read(&file) {
+        let devices = match std::fs::read(&file) {
             Ok(bytes) => serde_json::from_slice(&bytes).context("Reading saved devices")?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Peers::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SavedDevices::default(),
             Err(e) => return Err(e.into()),
         };
         let (incoming, mut requests) = mpsc::channel(16);
@@ -139,7 +148,7 @@ impl Client {
         let (addresses, mut changes) = mpsc::channel(16);
         let (transport, router, _) = gateway::start(
             key,
-            config(&peers)?,
+            config(&devices)?,
             false,
             paxri_config::DeviceCapabilities {
                 forward_rules: Some(false),
@@ -161,7 +170,7 @@ impl Client {
             transport,
             presence,
             _router: router,
-            peers: Mutex::new(peers),
+            devices: Mutex::new(devices),
             file,
         });
         tokio::spawn(Self::watch_connections(
@@ -169,6 +178,10 @@ impl Client {
             viewed,
             updates.clone(),
             connection_state,
+        ));
+        tokio::spawn(Self::deliver_unpairs(
+            Arc::downgrade(&client),
+            client.transport.subscribe_config(),
         ));
         let weak = Arc::downgrade(&client);
         tokio::spawn(async move {
@@ -197,7 +210,7 @@ impl Client {
                             }
                             Incoming::Unpair { authenticated_id, pairing_id, reply } => {
                                 let Some(client) = weak.upgrade() else { break };
-                                let result = client.remove(&authenticated_id, pairing_id.as_deref()).await;
+                                let result = client.remove(&authenticated_id, pairing_id.as_deref(), false).await;
                                 if let Ok(UnpairAck::Cleared) = result {
                                     let _ = updates.send(Update::Devices(client.list().await)).await;
                                 }
@@ -231,11 +244,11 @@ impl Client {
                     changed = info.changed() => {
                         if changed.is_err() { break; }
                         let Some(client) = weak.upgrade() else { break };
-                        let mut peers = client.peers.lock().await;
-                        let mut next = peers.clone();
+                        let mut devices = client.devices.lock().await;
+                        let mut next = devices.clone();
                         let mut changed = false;
                         for (id, data) in info.borrow_and_update().iter() {
-                            if let Some(peer) = next.get_mut(id) {
+                            if let Some(peer) = next.peers.get_mut(id) {
                                 if data.platform != paxri_config::DevicePlatform::Unknown && peer.platform != data.platform {
                                     peer.platform = data.platform;
                                     changed = true;
@@ -250,21 +263,22 @@ impl Client {
                             if let Err(e) = client.save(&next) {
                                 log::warn!("Saving peer capabilities: {e}");
                             }
-                            *peers = next.clone();
-                            drop(peers);
-                            let _ = updates.send(Update::Devices(next)).await;
+                            *devices = next;
+                            let snapshot = devices.peers.clone();
+                            drop(devices);
+                            let _ = updates.send(Update::Devices(snapshot)).await;
                         }
                     }
                     ticket = changes.recv() => {
                         let (Some(ticket), Some(client)) = (ticket, weak.upgrade()) else { break };
                         let id = ticket.endpoint_addr().id.to_string();
-                        let mut peers = client.peers.lock().await;
-                        if peers.get(&id).is_some_and(|old| old.ticket != ticket) {
-                            let mut next = peers.clone();
-                            next.get_mut(&id).unwrap().ticket = ticket.clone();
+                        let mut devices = client.devices.lock().await;
+                        if devices.peers.get(&id).is_some_and(|old| old.ticket != ticket) {
+                            let mut next = devices.clone();
+                            next.peers.get_mut(&id).unwrap().ticket = ticket.clone();
                             match client.save(&next) {
                                 Ok(()) => {
-                                    *peers = next;
+                                    *devices = next;
                                 }
                                 Err(e) => log::warn!("Saving peer address: {e}"),
                             }
@@ -310,17 +324,17 @@ impl Client {
             if times != latest {
                 times = latest;
                 let Some(client) = weak.upgrade() else { break };
-                let mut peers = client.peers.lock().await;
+                let mut devices = client.devices.lock().await;
                 let mut dirty = false;
                 for (id, changed) in &times {
-                    if let Some(peer) = peers.get_mut(id)
+                    if let Some(peer) = devices.peers.get_mut(id)
                         && peer.last_status_change_ms.is_none_or(|old| old < *changed)
                     {
                         peer.last_status_change_ms = Some(*changed);
                         dirty = true;
                     }
                 }
-                if dirty && let Err(e) = client.write_peers(&peers) {
+                if dirty && let Err(e) = client.write_devices(&devices) {
                     log::warn!("Saving peer connection times: {e}");
                 }
             }
@@ -360,19 +374,19 @@ impl Client {
         }
     }
 
-    fn write_peers(&self, peers: &Peers) -> Result<()> {
+    fn write_devices(&self, devices: &SavedDevices) -> Result<()> {
         let mut temp = tempfile::NamedTempFile::new_in(self.file.parent().unwrap())?;
-        serde_json::to_writer(temp.as_file_mut(), peers)?;
+        serde_json::to_writer(temp.as_file_mut(), devices)?;
         temp.as_file().sync_all()?;
         temp.persist(&self.file)?;
         Ok(())
     }
 
-    fn save(&self, peers: &Peers) -> Result<()> {
-        let settings = config(peers)?;
-        self.write_peers(peers)?;
+    fn save(&self, devices: &SavedDevices) -> Result<()> {
+        let settings = config(devices)?;
+        self.write_devices(devices)?;
         // Presence reacts to the configuration event and must see the new address immediately.
-        for (id, peer) in peers {
+        for (id, peer) in &devices.peers {
             self.transport.set_peer(id.clone(), peer.ticket.clone());
         }
         self.transport.update_config(settings);
@@ -380,7 +394,7 @@ impl Client {
     }
 
     pub async fn list(&self) -> Peers {
-        self.peers.lock().await.clone()
+        self.devices.lock().await.peers.clone()
     }
 
     pub async fn pair(&self, code: &str) -> Result<Peers> {
@@ -404,9 +418,10 @@ impl Client {
             Decision::Rejected(reason) => bail!("{reason}"),
         };
         let id = peer.id().to_string();
-        let mut peers = self.peers.lock().await;
-        let mut next = peers.clone();
-        next.insert(
+        let mut devices = self.devices.lock().await;
+        let mut next = devices.clone();
+        next.pending_unpairs.remove(&id);
+        next.peers.insert(
             id,
             Peer {
                 name: peer.name.clone(),
@@ -419,25 +434,70 @@ impl Client {
         );
         self.save(&next)?;
         self.transport.remember_contact(&peer);
-        *peers = next;
-        Ok(peers.clone())
+        *devices = next;
+        Ok(devices.peers.clone())
     }
 
-    async fn remove(&self, id: &str, generation: Option<&str>) -> Result<UnpairAck> {
-        let mut peers = self.peers.lock().await;
-        let Some(peer) = peers.get(id) else {
+    pub async fn unpair(&self, id: &str, generation: Option<&str>) -> Result<Peers> {
+        let ack = self.remove(id, generation, true).await?;
+        ensure!(matches!(ack, UnpairAck::Cleared), "The pairing changed. Open the device to try again.");
+        Ok(self.list().await)
+    }
+
+    async fn remove(&self, id: &str, generation: Option<&str>, notify_peer: bool) -> Result<UnpairAck> {
+        let mut devices = self.devices.lock().await;
+        let Some(peer) = devices.peers.get(id) else {
             return Ok(UnpairAck::Cleared);
         };
         if generation != peer.generation.as_deref() {
             return Ok(UnpairAck::NewerPairing);
         }
         let endpoint = peer.ticket.endpoint_addr().id;
-        let mut next = peers.clone();
-        next.remove(id);
+        let mut next = devices.clone();
+        next.peers.remove(id);
+        if notify_peer {
+            next.pending_unpairs.insert(id.to_owned(), PendingUnpair {
+                name: peer.name.clone(),
+                ticket: peer.ticket.to_string(),
+                request_id: uuid::Uuid::new_v4().simple().to_string(),
+                pairing_id: peer.generation.clone(),
+            });
+        }
         self.save(&next)?;
         self.transport.forget_peer(endpoint);
-        *peers = next;
+        *devices = next;
         Ok(UnpairAck::Cleared)
+    }
+
+    async fn deliver_unpairs(weak: Weak<Self>, mut config: watch::Receiver<Arc<Config>>) {
+        loop {
+            let pending = match config.wait_for(|cfg| !cfg.pending_unpairs.is_empty()).await {
+                Ok(cfg) => cfg.pending_unpairs.clone(),
+                Err(_) => return,
+            };
+            for (id, notice) in &pending {
+                let Some(client) = weak.upgrade() else { return };
+                if config.borrow().pending_unpairs.get(id) != Some(notice) { continue; }
+                if client.transport.notify_unpair(id, notice).await.is_ok() {
+                    let mut devices = client.devices.lock().await;
+                    if devices.pending_unpairs.get(id) == Some(notice) {
+                        let mut next = devices.clone();
+                        next.pending_unpairs.remove(id);
+                        match client.save(&next) {
+                            Ok(()) => *devices = next,
+                            Err(error) => log::warn!("Saving unpair confirmation: {error}"),
+                        }
+                    }
+                }
+            }
+            // New notices wake immediately. An unreachable device is retried on a timer.
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(45)) => {}
+                changed = config.wait_for(|cfg| cfg.pending_unpairs.iter().any(|(id, notice)| pending.get(id) != Some(notice))) => {
+                    if changed.is_err() { return; }
+                }
+            }
+        }
     }
 
     pub async fn manage_terminal(&self, peer: &str, request: paxri_terminal::managed::Request) -> Result<Vec<paxri_terminal::managed::Key>> {
@@ -515,9 +575,10 @@ impl Client {
         generation: u64,
     ) -> Result<u32> {
         ensure!(
-            self.peers
+            self.devices
                 .lock()
                 .await
+                .peers
                 .get(id)
                 .is_some_and(Peer::supports_shell),
             "This device does not host an interactive shell"

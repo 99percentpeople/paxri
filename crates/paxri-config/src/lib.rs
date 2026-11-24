@@ -75,7 +75,7 @@ pub enum NativeChange {
     RelayUrl(Option<String>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingUnpair {
     pub name: String,

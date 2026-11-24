@@ -313,6 +313,7 @@ impl Mobile {
             .flex_col()
             .gap_4()
             .pt_4()
+            .when(can_connect, |page| page.pb(FLOATING_ACTION_CLEARANCE))
             .child(
                 div()
                     .flex()
@@ -340,13 +341,20 @@ impl Mobile {
                             ),
                     ),
             )
+            .child(ui.separator())
             .when_some(paths.filter(|p| !p.is_empty()), |page, paths| {
-                page.child(ui.separator())
-                    .child(self.connection_history.connection_paths(id, paths, ui))
+                page.child(self.connection_history.connection_paths(id, paths, ui))
+                    .child(ui.separator())
             })
+            .child(ui.navigation_row("device-sessions", Icon::Terminal.draw(18.), "Sessions".into(), "View sessions on this device")
+                .on_click(cx.listener({
+                    let id = id.to_owned();
+                    move |this, _, _, cx| this.show_sessions(Some(id.clone()), cx)
+                })))
+            .child(ui.separator())
             .when(peer.supports_forward_rules(), |page| {
                 let id = id.to_owned();
-                page.child(ui.separator()).child(
+                page.child(
                     ui.navigation_row(
                         "device-forwards",
                         Icon::Forward.draw(18.),
@@ -359,13 +367,23 @@ impl Mobile {
                     })),
                 )
             })
-            .when(can_connect, |page| page.pb(FLOATING_ACTION_CLEARANCE))
-            .child(ui.separator())
-            .child(ui.navigation_row("device-sessions", Icon::Terminal.draw(18.), "Sessions".into(), "View sessions on this device")
-                .on_click(cx.listener({
-                    let id = id.to_owned();
-                    move |this, _, _, cx| this.show_sessions(Some(id.clone()), cx)
-                })));
+            .child(div().flex().justify_end().child(
+                ui.button(Ghost, "unpair-device", "Unpair device")
+                    .role(Role::Button)
+                    .aria_label("Unpair device")
+                    .on_click(cx.listener({
+                        let id = id.to_owned();
+                        move |this, _, _, cx| {
+                            if let Some(peer) = this.peers.get(&id)
+                                && let Err(error) = activity_action(&this.android, ActivityAction::ConfirmUnpair {
+                                    id: &id, name: &peer.name, generation: peer.generation.as_deref().unwrap_or_default(),
+                                })
+                            {
+                                Toast::show(error, this.window, cx);
+                            }
+                        }
+                    })),
+            ));
         div()
             .relative()
             .flex()

@@ -52,6 +52,7 @@ enum Update {
     Devices(Peers),
     Paired(Result<Peers, String>),
     PairCode(String),
+    Unpair { id: String, generation: Option<String> },
     Composing {
         id: u64,
         text: String,
@@ -197,6 +198,20 @@ pub extern "system" fn Java_org_paxri_android_PairingScannerActivity_isInvitatio
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_unpairDevice(
+    mut env: EnvUnowned,
+    _class: JClass,
+    id: JString,
+    generation: JString,
+) {
+    env.with_env(|_| {
+        let generation = generation.to_string();
+        post(Update::Unpair { id: id.to_string(), generation: (!generation.is_empty()).then_some(generation) });
+        Ok::<_, jni::errors::Error>(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
+}
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_removeForward(
     mut env: EnvUnowned,
     _class: JClass,
@@ -318,6 +333,7 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
 enum ActivityAction<'a> {
     Toast(&'a str),
     ConfirmRemoveForward { owner: &'a str, name: &'a str, route: &'a str },
+    ConfirmUnpair { id: &'a str, generation: &'a str, name: &'a str },
     SaveDeviceName(&'a str),
     SaveZoom(f32),
     Pair,
@@ -364,6 +380,14 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
                 env.call_method(activity, jni_str!("confirmRemoveForward"),
                     jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
                     &[(&owner).into(), (&name).into(), (&route).into()])
+            }
+            ActivityAction::ConfirmUnpair { id, generation, name } => {
+                let id = JString::from_str(env, id).map_err(|e| e.to_string())?;
+                let generation = JString::from_str(env, generation).map_err(|e| e.to_string())?;
+                let name = JString::from_str(env, name).map_err(|e| e.to_string())?;
+                env.call_method(activity, jni_str!("confirmUnpair"),
+                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                    &[(&id).into(), (&generation).into(), (&name).into()])
             }
             ActivityAction::SaveZoom(scale) => env.call_method(
                 activity, jni_str!("saveTerminalZoom"), jni_sig!("(F)V"), &[scale.into()],
@@ -921,6 +945,17 @@ impl Mobile {
             Update::Error(error) => {
                 self.starting_network = false;
                 Toast::show(error, self.window, cx);
+            }
+            Update::Unpair { id, generation } => {
+                let Some(client) = self.client.clone() else { return };
+                let updates = self.updates.clone();
+                self.rt.spawn(async move {
+                    let event = match client.unpair(&id, generation.as_deref()).await {
+                        Ok(peers) => Update::Devices(peers),
+                        Err(err) => Update::Error(format!("Unpairing device: {err:#}")),
+                    };
+                    let _ = updates.send(event).await;
+                });
             }
             Update::PairCode(code) => {
                 let Some(client) = self.client.clone() else {
