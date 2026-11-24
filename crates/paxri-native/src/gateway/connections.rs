@@ -81,6 +81,14 @@ impl AsyncWrite for NativeStream {
 }
 
 impl NativeSession {
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.token == other.token && self.conn.remote_id() == other.conn.remote_id()
+    }
+
+    /// Retire this specific connection after a failed application-level round trip.
+    pub fn close_unresponsive(&self) {
+        self.conn.close(0u32.into(), b"peer is not responding");
+    }
     pub(super) fn add_paths(&self, address: &mut EndpointAddr) {
         address.addrs.extend(
             self.conn
@@ -630,7 +638,7 @@ mod tests {
             pb.local_info.send_replace(android.clone());
             remote_info.wait_for(|all| all.get(&id) == Some(&android)).await?;
             let upgraded = DeviceInfo {
-                capabilities: paxri_config::DeviceCapabilities { shell: true, exec: true, managed_terminals: true, forward_rules: Some(true), create_forward_rules: true },
+                capabilities: paxri_config::DeviceCapabilities { shell: true, exec: true, managed_terminals: true, terminal_heartbeat: true, forward_rules: Some(true), create_forward_rules: true },
                 ..android
             };
             pb.local_info.send_replace(upgraded.clone());

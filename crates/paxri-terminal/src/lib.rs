@@ -77,7 +77,11 @@ pub enum Frame {
 
 impl Frame {
     pub async fn read(input: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
-        match input.read_u8().await? {
+        Self::read_body(input.read_u8().await?, input).await
+    }
+
+    async fn read_body(tag: u8, input: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
+        match tag {
             1 => {
                 let n = usize::from(input.read_u16().await?);
                 ensure!((1..=MAX_DATA).contains(&n), "invalid terminal data length");

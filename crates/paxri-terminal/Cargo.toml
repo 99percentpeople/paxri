@@ -18,4 +18,4 @@ tokio = { version = "1", features = ["io-util", "macros", "sync", "time"] }
 rustix = { version = "1", features = ["event", "process"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "test-util"] }

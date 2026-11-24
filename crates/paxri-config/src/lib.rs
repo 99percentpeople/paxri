@@ -125,6 +125,8 @@ pub enum DevicePlatform {
 pub struct DeviceCapabilities {
     pub shell: bool,
     pub managed_terminals: bool,
+    /// The managed terminal stream can acknowledge a probe without writing to the PTY.
+    pub terminal_heartbeat: bool,
     pub exec: bool,
     /// None for older peers that did not advertise rule management.
     #[serde(skip_serializing_if = "Option::is_none")]

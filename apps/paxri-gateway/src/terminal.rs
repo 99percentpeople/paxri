@@ -45,7 +45,7 @@ pub(super) fn capabilities() -> paxri_config::DeviceCapabilities {
     let shell = exec && std::path::Path::new(&CommandBuilder::new_default_prog().get_shell()).is_file();
     #[cfg(windows)]
     let shell = exec && windows::has_shell();
-    paxri_config::DeviceCapabilities { shell, exec, managed_terminals: shell, forward_rules: Some(true), create_forward_rules: true }
+    paxri_config::DeviceCapabilities { shell, exec, managed_terminals: shell, terminal_heartbeat: shell, forward_rules: Some(true), create_forward_rules: true }
 }
 
 pub(super) async fn watch_capabilities(transport: Arc<paxri_native::gateway::NativeTransport>) {

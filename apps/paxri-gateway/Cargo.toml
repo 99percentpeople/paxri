@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1"
+vte = { version = "0.15", default-features = false }
 gethostname = "1"
 getrandom = "0.4"
 toml_edit = "0.25"

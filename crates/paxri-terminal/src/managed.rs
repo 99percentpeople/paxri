@@ -1,5 +1,5 @@
 //! Owner-scoped, gateway-hosted interactive terminals.
-use crate::Size;
+use crate::{Frame, Size};
 use anyhow::{Context, Result, bail, ensure};
 use paxri_core::{PeerSession, StreamKind};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -31,6 +31,18 @@ pub enum Request {
     End(Key),
 }
 
+/// A definitive response from the gateway, as opposed to a lost stream or timeout.
+#[derive(Debug)]
+pub struct Rejected(String);
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
 pub async fn write<T: Serialize>(w: &mut (impl AsyncWrite + Unpin), value: &T) -> Result<()> {
     let data = serde_json::to_vec(value)?;
     ensure!(data.len() <= 4096, "terminal management message too large");
@@ -60,7 +72,7 @@ pub async fn request<S: PeerSession>(peer: S, action: Request) -> Result<(S::Str
             .context("the peer gateway must support managed terminals")?
         {
             Ok(keys) => Ok((stream, keys)),
-            Err(message) => bail!("{message}"),
+            Err(message) => Err(Rejected(message).into()),
         }
     })
     .await
@@ -73,6 +85,89 @@ pub async fn read_history(input: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8
     let mut bytes = vec![0; length];
     input.read_exact(&mut bytes).await?;
     Ok(bytes)
+}
+
+// Tag 4 is confined to managed streams. The gateway only sends it in response
+// to an opted-in client, and never forwards it to the child process.
+pub async fn read_frame(input: &mut (impl AsyncRead + Unpin)) -> Result<Option<Frame>> {
+    match input.read_u8().await? {
+        4 => Ok(None),
+        tag => Ok(Some(Frame::read_body(tag, input).await?)),
+    }
+}
+
+pub async fn write_heartbeat(output: &mut (impl AsyncWrite + Unpin)) -> Result<()> {
+    output.write_u8(4).await?;
+    output.flush().await?;
+    Ok(())
+}
+
+pub enum AttachmentEvent {
+    Ready,
+    Output(Vec<u8>),
+}
+
+/// Verify both directions before enabling input, then keep checking even when
+/// the shell is idle or is producing continuous output on a one-way connection.
+pub async fn attachment<F: Future<Output = Result<()>>>(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    mut input: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+    heartbeat: bool,
+    event: impl Fn(AttachmentEvent) -> F,
+) -> Result<u32> {
+    use std::time::Duration;
+    use tokio::{
+        sync::{Notify, mpsc},
+        time::{sleep, timeout},
+    };
+
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (probe, mut probes) = mpsc::channel(1);
+    let acknowledged = Notify::new();
+    let health = async {
+        let mut ready = false;
+        loop {
+            if heartbeat {
+                timeout(Duration::from_secs(8), async {
+                    probe.send(()).await?;
+                    acknowledged.notified().await;
+                    anyhow::Ok(())
+                })
+                .await
+                .context("Terminal stream did not acknowledge the probe")??;
+            }
+            if !ready {
+                event(AttachmentEvent::Ready).await?;
+                ready = true;
+            }
+            if !heartbeat {
+                return std::future::pending().await;
+            }
+            sleep(Duration::from_secs(10)).await;
+        }
+    };
+    let send = async {
+        loop {
+            tokio::select! {
+                Some(()) = probes.recv() => write_heartbeat(&mut writer).await?,
+                frame = input.recv() => match frame {
+                    Some(frame) => frame.write(&mut writer).await?,
+                    None => bail!("Terminal closed"),
+                },
+            }
+        }
+    };
+    let receive = async {
+        loop {
+            match read_frame(&mut reader).await? {
+                None => acknowledged.notify_one(),
+                Some(Frame::Data(bytes)) => event(AttachmentEvent::Output(bytes)).await?,
+                Some(Frame::Exit(code)) => return Ok(code),
+                Some(Frame::Resize(_)) => bail!("Unexpected terminal resize from peer"),
+            }
+        }
+    };
+    tokio::select! { result = receive => result, result = send => result, result = health => result }
 }
 
 /// Dropping the viewer detaches. Only an explicit end signal asks the host to kill the shell.
@@ -89,4 +184,73 @@ pub async fn client(
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{io::duplex, sync::mpsc};
+
+    #[tokio::test(start_paused = true)]
+    async fn output_without_a_probe_reply_does_not_mark_a_restored_terminal_ready() {
+        let (viewer, mut gateway) = duplex(256);
+        let (_input, keys) = mpsc::unbounded_channel();
+        let (events, mut observed) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            attachment(viewer, keys, true, |e| {
+                std::future::ready(events.send(e).map_err(Into::into))
+            })
+            .await
+        });
+        assert!(read_frame(&mut gateway).await.unwrap().is_none());
+        Frame::Data(b"live output".to_vec())
+            .write(&mut gateway)
+            .await
+            .unwrap();
+        assert!(matches!(
+            observed.recv().await,
+            Some(AttachmentEvent::Output(_))
+        ));
+        assert!(
+            task.await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("acknowledge")
+        );
+        assert!(observed.recv().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_attachment_times_out_and_a_fresh_one_accepts_input() {
+        for respond in [false, true] {
+            let (viewer, mut gateway) = duplex(256);
+            let (input, keys) = mpsc::unbounded_channel();
+            let (events, mut observed) = mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                attachment(viewer, keys, true, |e| {
+                    std::future::ready(events.send(e).map_err(Into::into))
+                })
+                .await
+            });
+            assert!(read_frame(&mut gateway).await.unwrap().is_none());
+            write_heartbeat(&mut gateway).await.unwrap();
+            assert!(matches!(
+                observed.recv().await,
+                Some(AttachmentEvent::Ready)
+            ));
+            assert!(read_frame(&mut gateway).await.unwrap().is_none());
+            if !respond {
+                assert!(task.await.unwrap().is_err());
+                continue;
+            }
+            write_heartbeat(&mut gateway).await.unwrap();
+            input.send(Frame::Data(b"after resume".to_vec())).unwrap();
+            assert!(
+                matches!(read_frame(&mut gateway).await.unwrap(), Some(Frame::Data(b)) if b == b"after resume")
+            );
+            Frame::Exit(0).write(&mut gateway).await.unwrap();
+            assert_eq!(task.await.unwrap().unwrap(), 0);
+        }
+    }
 }

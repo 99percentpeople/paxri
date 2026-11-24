@@ -142,6 +142,7 @@ impl Session {
         thread::spawn(move || {
             while let Ok(data) = keys.recv_blocking() {
                 if let Err(e) = writer.write_all(&data).and_then(|_| writer.flush()) {
+                    keys.close();
                     let _ = errors.send_blocking(Output::Error(e.to_string()));
                     break;
                 }

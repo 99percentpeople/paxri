@@ -1,8 +1,11 @@
 //! A window owns an attachment. The gateway owns the PTY and the pairing lease.
+mod replay;
+
 use super::*;
+use anyhow::Context;
 use paxri_terminal::managed::{self as protocol, Key, Request};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::{Mutex, Weak},
     time::Duration,
 };
@@ -21,7 +24,7 @@ enum Event {
 }
 
 struct History {
-    bytes: VecDeque<u8>,
+    bytes: replay::Replay,
     exit: Option<u32>,
     events: broadcast::Sender<Event>,
 }
@@ -30,11 +33,7 @@ impl History {
     fn publish(&mut self, event: Event) {
         match &event {
             Event::Data(bytes) => {
-                let keep = &bytes[bytes.len().saturating_sub(protocol::HISTORY_LIMIT)..];
-                let discard =
-                    (self.bytes.len() + keep.len()).saturating_sub(protocol::HISTORY_LIMIT);
-                self.bytes.drain(..discard);
-                self.bytes.extend(keep);
+                self.bytes.append(bytes);
             }
             Event::Exit(code) => self.exit = Some(*code),
         }
@@ -131,7 +130,7 @@ impl Registry {
         let (finished, done) = watch::channel(false);
         let entry = Arc::new(Entry {
             history: Mutex::new(History {
-                bytes: VecDeque::new(),
+                bytes: Default::default(),
                 exit: None,
                 events: broadcast::channel(128).0,
             }),
@@ -254,11 +253,12 @@ impl Entry {
         replay: bool,
     ) -> Result<()> {
         let (mut reader, mut writer) = tokio::io::split(stream);
+        let (acknowledge, mut probes) = tokio::sync::mpsc::channel(1);
         let (history, exit, mut events, mut replaced) = {
             let h = self.history.lock().unwrap();
             self.attachment.send_replace(());
             (
-                h.bytes.iter().copied().collect::<Vec<u8>>(),
+                h.bytes.snapshot(),
                 h.exit,
                 h.events.subscribe(),
                 self.attachment.subscribe(),
@@ -276,20 +276,34 @@ impl Entry {
                 return Frame::Exit(code).write(&mut writer).await;
             }
             loop {
-                match events.recv().await? {
-                    Event::Data(bytes) => Frame::Data((*bytes).clone()).write(&mut writer).await?,
-                    Event::Exit(code) => return Frame::Exit(code).write(&mut writer).await,
+                tokio::select! {
+                    Some(()) = probes.recv() => protocol::write_heartbeat(&mut writer).await?,
+                    event = events.recv() => match event? {
+                        Event::Data(bytes) => Frame::Data((*bytes).clone()).write(&mut writer).await?,
+                        Event::Exit(code) => return Frame::Exit(code).write(&mut writer).await,
+                    },
                 }
             }
         };
         let input = async {
             loop {
-                match Frame::read(&mut reader).await? {
+                let Some(frame) = protocol::read_frame(&mut reader).await? else {
+                    anyhow::ensure!(
+                        self.pty.upgrade().is_some_and(|s| !s.input.is_closed()),
+                        "Terminal input closed"
+                    );
+                    acknowledge.send(()).await?;
+                    continue;
+                };
+                match frame {
                     Frame::Data(bytes) => {
-                        let sender = self.pty.upgrade().map(|pty| pty.input.clone());
-                        if let Some(sender) = sender {
-                            let _ = sender.send(bytes).await;
-                        }
+                        let sender = self
+                            .pty
+                            .upgrade()
+                            .context("Terminal input closed")?
+                            .input
+                            .clone();
+                        sender.send(bytes).await.context("Terminal input closed")?;
                     }
                     Frame::Resize(size) => {
                         if let Some(pty) = self.pty.upgrade() {
@@ -359,22 +373,17 @@ mod tests {
     #[test]
     fn history_keeps_only_the_most_recent_bytes() {
         let mut history = History {
-            bytes: VecDeque::new(),
+            bytes: Default::default(),
             exit: None,
             events: broadcast::channel(1).0,
         };
         history.publish(Event::Data(Arc::new(vec![1; protocol::HISTORY_LIMIT + 10])));
         history.publish(Event::Data(Arc::new(vec![2; 3])));
-        assert_eq!(history.bytes.len(), protocol::HISTORY_LIMIT);
-        assert_eq!(history.bytes.front(), Some(&1));
+        let bytes = history.bytes.snapshot();
+        assert!(bytes.len() <= protocol::HISTORY_LIMIT);
+        assert_eq!(bytes.first(), Some(&1));
         assert_eq!(
-            history
-                .bytes
-                .iter()
-                .rev()
-                .take(4)
-                .copied()
-                .collect::<Vec<_>>(),
+            bytes.iter().rev().take(4).copied().collect::<Vec<_>>(),
             [2, 2, 2, 1]
         );
     }
