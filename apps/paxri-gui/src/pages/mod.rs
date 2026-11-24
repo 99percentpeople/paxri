@@ -22,18 +22,6 @@ use gpui::{prelude::*, *};
 use paxri_cli::gateway::Action;
 use paxri_control::Command;
 
-fn short_id(id: &str) -> String {
-    if id.len() > 20 && id.is_ascii() {
-        format!("{}…{}", &id[..10], &id[id.len() - 8..])
-    } else {
-        id.into()
-    }
-}
-
-fn peer_detail(platform: paxri_control::DevicePlatform, id: &str) -> String {
-    format!("{} · {}", platform.label(), short_id(id))
-}
-
 fn overview() -> Div {
     div()
         .w_full()

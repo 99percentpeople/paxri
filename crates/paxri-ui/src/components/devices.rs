@@ -2,6 +2,24 @@ use super::*;
 use paxri_config::DevicePlatform;
 
 impl Ui {
+    pub fn local_device_footer(self, name: SharedString, status: &'static str) -> Div {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Icon::device(DevicePlatform::current()).draw(18.))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(single_line(div()).child(name))
+                    .child(self.muted(status).text_xs()),
+            )
+    }
+
     pub fn device_heading(
         self,
         badge: Div,

@@ -1,15 +1,16 @@
-use super::{overview, peer_detail, short_id};
+use super::overview;
 use crate::{
     Dashboard,
     components::dock::{DockNavigation, DockPanel},
     components::{
         Button,
         ButtonVariant::{Ghost, Primary, Secondary},
-        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, ListItem, Select, Ui, single_line,
+        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, ListItem, Ui, actions, heading,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, DevicePlatform, PairingPeer, PairingStatus};
+use paxri_ui::components::ListView;
 
 #[derive(PartialEq, Eq)]
 pub(crate) enum DevicesPane {
@@ -112,22 +113,7 @@ impl Dashboard {
                     })),
             )
             .child(ui.separator())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(Icon::Monitor.draw(18.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .child(single_line(div()).child(self.local_name.clone()))
-                            .child(ui.muted(state).text_xs()),
-                    ),
-            );
+            .child(ui.local_device_footer(self.local_name.clone(), state));
         DockNavigation::new("Devices", body)
     }
 
@@ -170,20 +156,18 @@ impl Dashboard {
     }
 
     fn open_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pairing = self.status.as_ref().map(|s| &s.pairing);
-        self.review_request = pairing
-            .and_then(|p| p.incoming.first())
-            .map(|r| r.request_id.clone());
-        let focus = (self.review_request.is_none()
-            && pairing.is_some_and(|p| p.outgoing.is_none()))
-        .then(|| self.pairing_input.read(cx).focus_handle(cx));
+        let focus = self
+            .status
+            .as_ref()
+            .filter(|s| s.pairing.outgoing.is_none() && s.pairing.incoming.is_empty())
+            .map(|_| self.pairing_input.read(cx).focus_handle(cx));
         let model = cx.entity();
         Dialog::open(
             window,
             cx,
             DialogMode::Modeless,
             "Pair a device",
-            size(px(680.), px(420.)),
+            size(px(760.), px(568.)),
             model,
             focus,
             Self::pairing_dialog,
@@ -198,79 +182,120 @@ impl Dashboard {
                 "Close",
             );
         };
-        let review = self.review_request.as_ref().and_then(|id| {
-            pairing
-                .incoming
-                .iter()
-                .find(|r| &r.request_id == id)
-                .or_else(|| pairing.incoming.first())
-        });
-        let mut body = div().flex().flex_col().gap_3();
-        if !pairing.incoming.is_empty() {
-            let mut select = Select::new(
-                "pair-action",
-                Some(review.map(|r| r.request_id.clone())),
-                cx.listener(|v, request: &Option<String>, _, cx| {
-                    v.review_request = request.clone();
-                    cx.notify();
-                }),
-            )
-            .option(None, "Pair with a code");
-            for request in &pairing.incoming {
-                select = select.option_with_icon(
-                    Some(request.request_id.clone()),
-                    format!("Request from {}", request.name),
-                    Icon::device(request.platform),
-                );
-            }
-            body = body.child(ui.labeled("Pairing requests", select));
-        }
-        if let Some(peer) = review {
-            body = body
-                .child(
-                    ListItem::new(peer.name.clone())
-                        .leading(ui.device_icon(peer.platform))
-                        .detail(peer_detail(peer.platform, &peer.device_id)),
-                )
-                .child(ui.muted("Accept to let these devices open terminals and copy files."));
-            return DialogContent::new(body, "Close")
-                .action(self.answer_pairing(ui, peer, false, cx))
-                .action(self.answer_pairing(ui, peer, true, cx));
-        }
-        let fields = self.pairing_fields(ui, pairing, cx).flex_1().min_w_0();
         let invitation = div()
+            .flex_1()
+            .flex_basis(px(274.))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(ui.colors.border))
+            .bg(rgb(ui.colors.card))
+            .child(
+                ListItem::new(self.local_name.clone())
+                    .leading(ui.device_icon(DevicePlatform::current())),
+            )
+            .when_some(self.pairing_qr.clone(), |column, qr| {
+                column.child(div().w_full().flex().justify_center().child(pairing_qr(qr)))
+            })
+            .child(self.local_pairing_code(ui, pairing, cx))
+            .when(
+                pairing.code.is_some() && self.pairing_qr.is_none(),
+                |column| {
+                    column.child(
+                        ui.muted("Invitation too large for a QR code. Copy the code to pair."),
+                    )
+                },
+            );
+        let form = div()
+            .flex_1()
+            .flex_basis(px(360.))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(heading("Pair with a code"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(self.pairing_input.clone()))
+                    .when(pairing.outgoing.is_none(), |row| {
+                        row.child(ui.button(Primary, "pair-device", "Pair device").on_click(
+                            cx.listener(|v, _, w, cx| {
+                                let code = v.pairing_input.read(cx).text().trim().to_owned();
+                                v.send_from_dialog(
+                                    Command::JoinPairing { code },
+                                    w,
+                                    DialogSuccess::KeepOpen,
+                                    cx,
+                                );
+                            }),
+                        ))
+                    }),
+            )
+            .child(
+                ui.muted("Pairing allows both devices to open terminals and copy files.")
+                    .text_xs(),
+            )
+            .child(ui.separator())
+            .child(heading("Pending devices"))
+            .child(self.pending_devices(ui, pairing, cx));
+        let body = div()
             .flex()
             .flex_wrap()
+            .items_start()
             .gap_4()
-            .when_some(self.pairing_qr.clone(), |row, qr| row.child(pairing_qr(qr)))
-            .child(
-                fields.when(pairing.code.is_some() && self.pairing_qr.is_none(), |d| {
-                    d.child(ui.muted("Invitation too large for a QR code. Copy the code to pair."))
-                }),
-            );
-        body = body.child(invitation);
-        let dialog = DialogContent::new(body, "Done");
-        if pairing.outgoing.is_some() {
-            dialog.action(
-                ui.button(Secondary, "cancel-pairing", "Cancel request")
-                    .on_click(cx.listener(|v, _, w, cx| {
-                        v.send_from_dialog(Command::CancelPairing, w, DialogSuccess::KeepOpen, cx);
-                    })),
-            )
-        } else {
-            dialog.action(
-                ui.button(Primary, "pair-device", "Pair device")
-                    .on_click(cx.listener(|v, _, w, cx| {
-                        let code = v.pairing_input.read(cx).text().trim().to_owned();
-                        v.send_from_dialog(
-                            Command::JoinPairing { code },
-                            w,
-                            DialogSuccess::KeepOpen,
-                            cx,
-                        );
-                    })),
-            )
+            .child(invitation)
+            .child(form);
+        DialogContent::new(body, "Done")
+    }
+
+    fn pending_devices(&self, ui: Ui, pairing: &PairingStatus, cx: &Context<Self>) -> Div {
+        if pairing.incoming.is_empty() && pairing.outgoing.is_none() {
+            return ui.muted("No pending pairing requests.");
         }
+        let list = ListView::new()
+            .divided()
+            .when_some(pairing.outgoing.as_ref(), |list, id| {
+                list.child(
+                    ListItem::new(paxri_config::peer_id::default_prefix(id).to_owned())
+                        .leading(ui.device_icon(DevicePlatform::Unknown))
+                        .detail("Waiting for confirmation")
+                        .trailing(
+                            ui.button(Secondary, "cancel-pairing", "Cancel request")
+                                .on_click(cx.listener(|v, _, w, cx| {
+                                    v.send_from_dialog(
+                                        Command::CancelPairing,
+                                        w,
+                                        DialogSuccess::KeepOpen,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                )
+            })
+            .children(pairing.incoming.iter().map(|peer| {
+                let prefix = paxri_config::peer_id::default_prefix(&peer.device_id);
+                let detail = if peer.name.ends_with(prefix) {
+                    peer.platform.label().to_owned()
+                } else {
+                    format!("{} · {prefix}", peer.platform.label())
+                };
+                ListItem::new(peer.name.clone())
+                    .leading(ui.device_icon(peer.platform))
+                    .detail(detail)
+                    .trailing(
+                        actions()
+                            .child(self.answer_pairing(ui, peer, false, cx))
+                            .child(self.answer_pairing(ui, peer, true, cx)),
+                    )
+            }));
+        div().child(list)
     }
 
     fn answer_pairing(
@@ -287,22 +312,26 @@ impl Dashboard {
         } else {
             (Secondary, "Decline")
         };
-        ui.button(variant, label, label)
-            .on_click(cx.listener(move |v, _, w, cx| {
-                v.send_from_dialog(
-                    Command::AnswerPairing {
-                        device_id: id.clone(),
-                        request_id: Some(request.clone()),
-                        accept,
-                    },
-                    w,
-                    DialogSuccess::KeepOpen,
-                    cx,
-                );
-            }))
+        ui.button(
+            variant,
+            SharedString::from(format!("pair-{label}-{request}")),
+            label,
+        )
+        .on_click(cx.listener(move |v, _, w, cx| {
+            v.send_from_dialog(
+                Command::AnswerPairing {
+                    device_id: id.clone(),
+                    request_id: Some(request.clone()),
+                    accept,
+                },
+                w,
+                DialogSuccess::KeepOpen,
+                cx,
+            );
+        }))
     }
 
-    fn pairing_fields(&self, ui: Ui, pairing: &PairingStatus, cx: &Context<Self>) -> Div {
+    fn local_pairing_code(&self, ui: Ui, pairing: &PairingStatus, cx: &Context<Self>) -> Div {
         let mut code = div().w_full().flex().items_center().gap_1();
         if pairing.code.is_some() {
             code = code
@@ -320,37 +349,24 @@ impl Dashboard {
                     v.send_from_dialog(Command::RefreshPairingCode, w, DialogSuccess::KeepOpen, cx);
                 })),
         );
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(ui.labeled("Your pairing code", code))
-            .when_some(pairing.outgoing.as_ref(), |d, id| {
-                d.child(ui.muted(format!("Waiting for {} to confirm…", short_id(id))))
-            })
-            .when(pairing.outgoing.is_none(), |d| {
-                d.child(ui.labeled("Other device’s pairing code", self.pairing_input.clone()))
-            })
-            .child(
-                ui.muted("Pairing allows both devices to open terminals and copy files.")
-                    .text_xs(),
-            )
+        ui.labeled("Your pairing code", code).min_w_0()
     }
 }
 
 fn pairing_qr(qr: std::rc::Rc<qrcode::QrCode>) -> impl IntoElement {
-    canvas(
+    let mut code = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            // Use whole physical pixels for modules, including on fractional-scale displays.
+            const QUIET_ZONE: usize = 4;
             let scale = window.scale_factor();
             let modules = qr.width();
-            let side = f32::from(bounds.size.width.min(bounds.size.height)) * scale;
-            let step = (side / (modules + 8) as f32).floor();
+            let side = (f32::from(bounds.size.width.min(bounds.size.height)) * scale).round();
+            let pitch = side / (modules + 2 * QUIET_ZONE) as f32;
+            // Snap shared edges, so leftover pixels are distributed across the grid.
+            let edge = |index| ((index + QUIET_ZONE) as f32 * pitch).round();
+            let left = (f32::from(bounds.origin.x) * scale).round();
+            let top = (f32::from(bounds.origin.y) * scale).round();
             window.paint_quad(fill(bounds, rgb(0xffffff)));
-            let inset = (side - modules as f32 * step) / 2.;
-            let left = (f32::from(bounds.origin.x) * scale + inset).round();
-            let top = (f32::from(bounds.origin.y) * scale + inset).round();
             for y in 0..modules {
                 let mut x = 0;
                 while x < modules {
@@ -359,11 +375,8 @@ fn pairing_qr(qr: std::rc::Rc<qrcode::QrCode>) -> impl IntoElement {
                         x += 1;
                     }
                     if x > start {
-                        let origin = point(
-                            px((left + start as f32 * step) / scale),
-                            px((top + y as f32 * step) / scale),
-                        );
-                        let size = size(px((x - start) as f32 * step / scale), px(step / scale));
+                        let origin = point(px((left + edge(start)) / scale), px((top + edge(y)) / scale));
+                        let size = size(px((edge(x) - edge(start)) / scale), px((edge(y + 1) - edge(y)) / scale));
                         window.paint_quad(fill(Bounds::new(origin, size), rgb(0)));
                     }
                     x += 1;
@@ -371,6 +384,9 @@ fn pairing_qr(qr: std::rc::Rc<qrcode::QrCode>) -> impl IntoElement {
             }
         },
     )
-    .size(px(250.))
-    .flex_none()
+    .w_full()
+    .max_w(px(288.))
+    .flex_none();
+    code.style().aspect_ratio = Some(1.);
+    code
 }

@@ -74,7 +74,6 @@ struct Dashboard {
     profile_native: Option<Native>,
     gateway_details: bool,
     pairing_input: Entity<Input>,
-    review_request: Option<String>,
     device_filters: DeviceFilters,
     session_filters: SessionFilters,
     local_code: Entity<Input>,
@@ -394,11 +393,6 @@ impl Dashboard {
                                 Input::new("", "Paste the other device’s code", cx);
                         }
                         let code = status.pairing.code.as_deref().unwrap_or_default();
-                        if view.status.as_ref().is_none_or(|s| s.pairing.incoming.is_empty())
-                            && let Some(peer) = status.pairing.incoming.first()
-                        {
-                            view.review_request = Some(peer.request_id.clone());
-                        }
                         if view
                             .local_code
                             .update(cx, |field, cx| field.set_text(code, cx))
@@ -474,7 +468,6 @@ impl Dashboard {
             gateway_details: false,
             local_code: Input::read_only("", cx),
             pairing_qr: None,
-            review_request: None,
             pairing_input: Input::new("", "Paste the other device’s code", cx),
             device_filters: DeviceFilters::new("Search", cx),
             session_filters: SessionFilters::new("Search sessions…", cx),
