@@ -90,7 +90,7 @@ impl Mobile {
                 let session = &self.sessions[&id];
                 let (title, subtitle) = session.labels(cx);
                 let action = match session.state {
-                    SessionState::Connecting | SessionState::Connected => Some(ui.end_session_button()),
+                    SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => Some(ui.end_session_button()),
                     SessionState::Stopping => None,
                     SessionState::Ended(_) => Some(
                         ui.button(Ghost, "close-session", Icon::Close.draw(20.))

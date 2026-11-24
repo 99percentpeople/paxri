@@ -24,7 +24,7 @@ use std::sync::{
 };
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 
-use alacritty_terminal::{grid::Scroll, term::TermMode};
+use alacritty_terminal::{grid::{Dimensions, Scroll}, term::TermMode};
 use client::{Client, Peers, Presence};
 use navigation::Drawer;
 use paxri_ui::connections::ConnectionHistory;
@@ -71,6 +71,7 @@ enum Update {
     Gesture(u64, touch::Gesture),
     Close,
     Connected(u64),
+    RetrySessions,
     Output(u64, Vec<u8>, bool),
     Hosted(String, Option<Vec<SessionKey>>),
     Presence(Presence),
@@ -81,7 +82,8 @@ enum Update {
         u64,
         Result<paxri_control::forwarding::Rules, String>,
     ),
-    End(u64, Result<u32, String>),
+    End(u64, Result<u32>),
+    SessionGone(u64),
 }
 
 static ACTIVITY_VISIBLE: LazyLock<tokio::sync::watch::Sender<bool>> =
@@ -447,17 +449,26 @@ struct Session {
     composing: Preedit,
     title: Entity<TabTitle>,
     input: mpsc::UnboundedSender<Frame>,
-    job: JoinHandle<()>,
+    job: Option<JoinHandle<()>>,
+    retry_at: std::time::Instant,
 }
 
 enum SessionState {
     Connecting,
     Connected,
+    Reconnecting,
     Stopping,
     Ended(String),
 }
 
 impl Session {
+    fn grid_size(&self) -> GridSize {
+        GridSize {
+            rows: self.screen.term.screen_lines() as u16,
+            cols: self.screen.term.columns() as u16,
+        }
+    }
+
     fn connected(&self) -> bool {
         matches!(self.state, SessionState::Connected)
     }
@@ -467,6 +478,7 @@ impl Session {
         let subtitle = match &self.state {
             SessionState::Connected => format!("Session {number}"),
             SessionState::Connecting => format!("Session {number} · Connecting…"),
+            SessionState::Reconnecting => format!("Session {number} · Reconnecting…"),
             SessionState::Stopping => format!("Session {number} · Stopping…"),
             SessionState::Ended(reason) => format!("Session {number} · {reason}"),
         };
@@ -475,7 +487,9 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        self.job.abort();
+        if let Some(job) = self.job.take() {
+            job.abort();
+        }
     }
 }
 
@@ -653,10 +667,15 @@ impl Mobile {
             }
         }
         if let Page::Terminal(id) = &page
-            && let Some(session) = self.sessions.get(id)
+            && let Some(session) = self.sessions.get_mut(id)
             && session.connected()
         {
-            Self::start_input(session);
+            if self.page == page {
+                Self::start_input(session);
+            } else {
+                // The network task will acknowledge the reopened attachment.
+                session.state = SessionState::Reconnecting;
+            }
         }
         if matches!(page, Page::Terminal(_)) && !matches!(self.page, Page::Terminal(_)) {
             self.terminal_return = self.page.clone();
@@ -675,11 +694,19 @@ impl Mobile {
 
     fn watch_current_page(&self) {
         if let Some(client) = &self.client {
-            client.watch_peer(match &self.page {
-                Page::Peer(id) => Some(id),
-                Page::Terminal(id) => self.sessions.get(id).map(|s| s.peer.as_str()),
-                _ => None,
-            }, matches!(self.page, Page::Sessions(_)));
+            client.watch_peer(
+                match &self.page {
+                    Page::Peer(id) => Some(id),
+                    Page::Terminal(id) => self.sessions.get(id).map(|s| s.peer.as_str()),
+                    _ => None,
+                },
+                matches!(self.page, Page::Sessions(_)),
+                if let Page::Terminal(id) = self.page {
+                    Some(id)
+                } else {
+                    None
+                },
+            );
         }
     }
 
@@ -742,14 +769,39 @@ impl Mobile {
     fn end_session(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(session) = self.sessions.get_mut(&id) else { return; };
         match session.state {
-            SessionState::Connecting | SessionState::Connected => {
+            SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => {
                 session.state = SessionState::Stopping;
                 let _ = session.input.send(Frame::Exit(0));
+                self.retry_sessions();
             }
             SessionState::Stopping => return,
             SessionState::Ended(_) => self.dismiss_session(id, cx),
         }
         cx.notify();
+    }
+
+    fn retry_sessions(&mut self) {
+        let Some(client) = &self.client else { return };
+        if !*ACTIVITY_VISIBLE.borrow() { return; }
+        let now = std::time::Instant::now();
+        for session in self.sessions.values_mut() {
+            if session.job.is_some() || session.retry_at > now || !self.presence.online(&session.peer) {
+                continue;
+            }
+            let action = match session.state {
+                SessionState::Reconnecting => {
+                    let grid = session.grid_size();
+                    TerminalRequest::Attach(session.key, PtySize { rows: grid.rows, cols: grid.cols })
+                }
+                SessionState::Stopping => TerminalRequest::End(session.key),
+                _ => continue,
+            };
+            let (input, job) = client.clone().spawn_terminal(
+                &self.rt, session.peer.clone(), action, self.updates.clone(), session.id,
+            );
+            session.input = input;
+            session.job = Some(job);
+        }
     }
 
     fn dismiss_session(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -760,6 +812,15 @@ impl Mobile {
     }
 
     fn open(&mut self, peer: String, saved_key: Option<SessionKey>, window: &Window, cx: &mut Context<Self>) {
+        if let Some(key) = saved_key
+            && let Some(existing) = self.sessions.values().find(|s| {
+                s.peer == peer && s.key == key && !matches!(s.state, SessionState::Ended(_))
+            })
+        {
+            self.navigate(Page::Terminal(existing.id), cx);
+            cx.notify();
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -791,16 +852,8 @@ impl Mobile {
             cols: grid.cols,
             rows: grid.rows,
         };
-        let (input, keys) = mpsc::unbounded_channel();
-        let out = self.updates.clone();
-        let dest = peer.clone();
-        let job = self.rt.spawn(async move {
-            let action = if saved_key.is_some() { TerminalRequest::Attach(key, size) } else { TerminalRequest::Create(key, size) };
-            let result = client.terminal(&dest, action, keys, out.clone(), id).await;
-            let _ = out
-                .send(Update::End(id, result.map_err(|e| format!("{e:#}"))))
-                .await;
-        });
+        let action = if saved_key.is_some() { TerminalRequest::Attach(key, size) } else { TerminalRequest::Create(key, size) };
+        let (input, job) = client.spawn_terminal(&self.rt, peer.clone(), action, self.updates.clone(), id);
         self.sessions.insert(
             id,
             Session {
@@ -818,7 +871,8 @@ impl Mobile {
                 composing: Preedit::default(),
                 title: cx.new(|_| TabTitle::default()),
                 input,
-                job,
+                job: Some(job),
+                retry_at: std::time::Instant::now(),
             },
         );
         self.assign_terminal_defaults(cx);
@@ -1000,13 +1054,17 @@ impl Mobile {
             }
             Update::Connected(id) => {
                 if let Some(s) = self.sessions.get_mut(&id)
-                    && matches!(s.state, SessionState::Connecting)
+                    && matches!(s.state, SessionState::Connecting | SessionState::Reconnecting)
                 {
                     s.state = SessionState::Connected;
                     if self.page == Page::Terminal(id) {
                         Self::start_input(s);
                     }
                 }
+            }
+            Update::RetrySessions => {
+                self.retry_sessions();
+                return;
             }
             Update::Hosted(peer, keys) => {
                 self.listing_peers.remove(&peer);
@@ -1019,6 +1077,9 @@ impl Mobile {
             }
             Update::Output(id, bytes, replay) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
+                    if replay {
+                        s.screen = Emulator::with_palette(s.grid_size(), s.screen.palette, s.screen.font.clone());
+                    }
                     s.screen.process(&bytes);
                     let reply = s.screen.finish_batch();
                     if !replay && !reply.is_empty() {
@@ -1067,18 +1128,42 @@ impl Mobile {
                         .map(|(id, paths)| (id.as_str(), paths.as_slice())),
                 );
                 self.presence = snapshot;
+                self.retry_sessions();
                 self.refresh_sessions();
                 if matches!(self.page, Page::Settings | Page::SettingsCategory(_)) {
                     return;
                 }
             }
+            Update::SessionGone(id) => {
+                let Some(s) = self.sessions.get(&id) else { return; };
+                if let Some(hosted) = self.hosted.get_mut(&s.peer) {
+                    hosted.retain(|key| *key != s.key);
+                }
+                if self.page == Page::Terminal(id) && !matches!(s.state, SessionState::Stopping) {
+                    Toast::show("Session has ended on the gateway", self.window, cx);
+                }
+                self.dismiss_session(id, cx);
+            }
             Update::End(id, result) => {
                 let Some(s) = self.sessions.get_mut(&id) else { return; };
+                s.job = None;
                 if result.is_ok() && matches!(s.state, SessionState::Stopping) {
                     if let Some(hosted) = self.hosted.get_mut(&s.peer) {
                         hosted.retain(|key| *key != s.key);
                     }
                     self.dismiss_session(id, cx);
+                } else if result.as_ref().is_err_and(|e| !e.is::<paxri_terminal::managed::Rejected>()) {
+                    if !matches!(s.state, SessionState::Stopping) {
+                        s.state = SessionState::Reconnecting;
+                    }
+                    s.composing.clear();
+                    let retry = std::time::Duration::from_secs(1);
+                    s.retry_at = std::time::Instant::now() + retry;
+                    let updates = self.updates.clone();
+                    self.rt.spawn(async move {
+                        tokio::time::sleep(retry).await;
+                        let _ = updates.send(Update::RetrySessions).await;
+                    });
                 } else {
                     s.composing.clear();
                     if self.page == Page::Terminal(id) {
@@ -1087,7 +1172,7 @@ impl Mobile {
                     }
                     s.state = SessionState::Ended(match result {
                         Ok(code) => format!("Exited · {code}"),
-                        Err(e) => e,
+                        Err(e) => e.to_string(),
                     });
                 }
             }

@@ -59,8 +59,15 @@ impl Presence {
     }
 }
 
+#[derive(Clone, Default, PartialEq)]
+struct ViewedPage {
+    peer: Option<String>,
+    sessions: bool,
+    terminal: Option<u64>,
+}
+
 pub struct Client {
-    viewed_peer: watch::Sender<(Option<String>, bool)>,
+    viewed_peer: watch::Sender<ViewedPage>,
     transport: Arc<NativeTransport>,
     presence: tokio::task::JoinHandle<()>,
     _router: iroh::protocol::Router,
@@ -148,7 +155,7 @@ impl Client {
         transport.set_device_name(name.borrow_and_update().effective());
         let presence = tokio::spawn(transport.clone().announce_presence());
         let mut info = transport.subscribe_device_info();
-        let (viewed_peer, viewed) = watch::channel((None, false));
+        let (viewed_peer, viewed) = watch::channel(ViewedPage::default());
         let client = Arc::new(Self {
             viewed_peer,
             transport,
@@ -269,19 +276,24 @@ impl Client {
         Ok(client)
     }
 
-    pub fn watch_peer(&self, id: Option<&str>, sessions: bool) {
+    pub fn watch_peer(&self, id: Option<&str>, sessions: bool, terminal: Option<u64>) {
+        let page = ViewedPage {
+            peer: id.map(str::to_owned),
+            sessions,
+            terminal,
+        };
         self.viewed_peer.send_if_modified(|current| {
-            if current.0.as_deref() == id && current.1 == sessions {
+            if *current == page {
                 return false;
             }
-            *current = (id.map(str::to_owned), sessions);
+            *current = page;
             true
         });
     }
 
     async fn watch_connections(
         weak: Weak<Self>,
-        mut viewed: watch::Receiver<(Option<String>, bool)>,
+        mut viewed: watch::Receiver<ViewedPage>,
         updates: Sender<Update>,
         connection_state: impl Fn(bool, bool),
     ) {
@@ -313,7 +325,7 @@ impl Client {
                 }
             }
             let visible = *foreground.borrow_and_update();
-            let (peer, sessions) = viewed.borrow_and_update().clone();
+            let page = viewed.borrow_and_update().clone();
             let mut interval = Duration::from_secs(60);
             let paths = transport.connections();
             let state = (!paths.is_empty(), paths.values().any(|links| !links.is_empty()));
@@ -327,10 +339,10 @@ impl Client {
                     changed_at: times.clone(),
                 };
                 // Sample the visible connection's graphs each second. The list only needs to age its labels.
-                if peer.as_deref().is_some_and(|id| snapshot.online(id)) {
+                if page.peer.as_deref().is_some_and(|id| snapshot.online(id)) {
                     interval = Duration::from_secs(1);
                 }
-                if sessions { interval = Duration::from_secs(3); }
+                if page.sessions { interval = Duration::from_secs(3); }
                 if updates.send(Update::Presence(snapshot)).await.is_err() {
                     break;
                 }
@@ -433,44 +445,167 @@ impl Client {
         paxri_terminal::managed::request(session, request).await.map(|(_, keys)| keys)
     }
 
-    pub async fn terminal(
+    pub fn spawn_terminal(
+        self: Arc<Self>,
+        rt: &tokio::runtime::Handle,
+        peer: String,
+        action: paxri_terminal::managed::Request,
+        out: Sender<Update>,
+        id: u64,
+    ) -> (mpsc::UnboundedSender<Frame>, tokio::task::JoinHandle<()>) {
+        use paxri_terminal::managed::{Rejected, Request};
+        let (input, keys) = mpsc::unbounded_channel();
+        let job = rt.spawn(async move {
+            let connection = self.transport.online_session(&peer).ok();
+            let mut result = if matches!(action, Request::End(_)) {
+                self.manage_terminal(&peer, action).await.map(|_| 0)
+            } else {
+                self.terminal(&peer, action, keys, out.clone(), id).await
+            };
+            if result
+                .as_ref()
+                .is_err_and(|e| e.is::<tokio::time::error::Elapsed>())
+                && let Some(connection) = connection
+            {
+                let client = self.clone();
+                let peer = peer.clone();
+                tokio::spawn(async move {
+                    // A single stalled viewer should not tear down working port forwards.
+                    // Only retire its connection if a separate gateway request also times out.
+                    if timeout(
+                        Duration::from_secs(8),
+                        paxri_terminal::managed::request(connection.clone(), Request::List),
+                    )
+                    .await
+                    .is_err()
+                        && client
+                            .transport
+                            .online_session(&peer)
+                            .is_ok_and(|s| s.same_connection(&connection))
+                    {
+                        connection.close_unresponsive();
+                        client.transport.refresh_presence();
+                    }
+                });
+            }
+            if let Request::Attach(key, _) | Request::End(key) = action
+                && result.as_ref().is_err_and(|e| e.is::<Rejected>())
+            {
+                // The shell may have exited or an earlier stop may have reached the host.
+                match self.manage_terminal(&peer, Request::List).await {
+                    Ok(keys) if !keys.contains(&key) => {
+                        let _ = out.send(Update::SessionGone(id)).await;
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => result = Err(error),
+                }
+            }
+            let _ = out.send(Update::End(id, result)).await;
+        });
+        (input, job)
+    }
+
+    async fn terminal(
         &self,
         id: &str,
         action: paxri_terminal::managed::Request,
-        mut input: mpsc::UnboundedReceiver<Frame>,
+        input: mpsc::UnboundedReceiver<Frame>,
         out: Sender<Update>,
         generation: u64,
     ) -> Result<u32> {
         ensure!(
-            self.peers.lock().await.get(id).is_some_and(Peer::supports_shell),
+            self.peers
+                .lock()
+                .await
+                .get(id)
+                .is_some_and(Peer::supports_shell),
             "This device does not host an interactive shell"
         );
+        use paxri_terminal::managed::{self, AttachmentEvent, Request};
+        let mut visibility = crate::ACTIVITY_VISIBLE.subscribe();
+        let mut connections = self.transport.subscribe_peer_changes();
         let session = self.transport.online_session(id)?;
-        let (mut stream, _) = paxri_terminal::managed::request(session, action).await?;
-        let history = paxri_terminal::managed::read_history(&mut stream).await?;
-        if !history.is_empty() {
+        let heartbeat = self
+            .transport
+            .subscribe_device_info()
+            .borrow()
+            .get(id)
+            .is_some_and(|info| info.capabilities.terminal_heartbeat);
+        let (mut stream, _) = managed::request(session.clone(), action).await?;
+        let history = timeout(Duration::from_secs(15), managed::read_history(&mut stream))
+            .await
+            .context("Terminal history timed out")??;
+        let (Request::Attach(key, _) | Request::Create(key, _)) = action else {
+            bail!("Invalid interactive terminal request");
+        };
+        let check_hosted = || async {
+            let (_, hosted) = timeout(
+                Duration::from_secs(8),
+                managed::request(session.clone(), Request::List),
+            )
+            .await
+            .context("Gateway did not acknowledge terminal check")??;
+            ensure!(hosted.contains(&key), "Session has ended on the gateway");
+            Ok::<(), anyhow::Error>(())
+        };
+        if !heartbeat {
+            check_hosted().await?;
+        }
+        if matches!(action, Request::Attach(..)) || !history.is_empty() {
             out.send(Update::Output(generation, history, true)).await?;
         }
-        let (mut reader, mut writer) = tokio::io::split(stream);
-        out.send(Update::Connected(generation)).await?;
-        let send = async {
-            while let Some(frame) = input.recv().await {
-                frame.write(&mut writer).await?;
-            }
-            bail!("Terminal closed")
-        };
-        let receive = async {
+
+        let out = &out;
+        let attachment = managed::attachment(stream, input, heartbeat, |event| async move {
+            out.send(match event {
+                AttachmentEvent::Ready => Update::Connected(generation),
+                AttachmentEvent::Output(bytes) => Update::Output(generation, bytes, false),
+            })
+            .await?;
+            Ok(())
+        });
+        let mut viewed = self.viewed_peer.subscribe();
+        let lifecycle = async {
             loop {
-                match Frame::read(&mut reader).await? {
-                    Frame::Data(data) => out.send(Update::Output(generation, data, false)).await?,
-                    Frame::Exit(status) => return Ok(status),
-                    Frame::Resize(_) => bail!("Unexpected terminal resize from peer"),
+                tokio::select! {
+                    changed = visibility.changed() => {
+                        changed?;
+                        if *visibility.borrow_and_update() {
+                            bail!("Reattaching terminal after returning to the foreground");
+                        }
+                    }
+                    changed = connections.changed() => {
+                        changed?;
+                        if !self.transport.online_session(id).is_ok_and(|live| live.same_connection(&session)) {
+                            bail!("Terminal connection was replaced");
+                        }
+                    }
+                    changed = viewed.changed() => {
+                        changed?;
+                        if viewed.borrow_and_update().terminal == Some(generation) {
+                            bail!("Reattaching the reopened terminal");
+                        }
+                    }
                 }
             }
         };
+        // Existing gateways can still confirm a round trip on the same QUIC connection.
+        // Returning to the foreground always verifies a fresh attachment to the original PTY.
+        let legacy_probe = async {
+            if heartbeat {
+                return std::future::pending().await;
+            }
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                check_hosted().await?;
+            }
+        };
         tokio::select! {
-            result = receive => result,
-            result = send => result,
+            biased;
+            result = lifecycle => result,
+            result = attachment => result,
+            result = legacy_probe => result,
         }
     }
 }
