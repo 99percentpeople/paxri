@@ -74,25 +74,9 @@ impl Mobile {
             ),
             Page::Forwards(peer) => (
                 "Port forwarding".into(),
-                peer.as_ref()
-                    .and_then(|id| self.peers.get(id))
-                    .map(|p| p.name.clone()),
+                None,
                 peer.as_ref().map(|_| "Back to device details"),
-                Some(
-                    ui.icon_button(
-                        Ghost,
-                        "refresh-forwards",
-                        Icon::Refresh,
-                        "Refresh forwarding rules",
-                    )
-                    .role(Role::Button)
-                    .aria_label("Refresh forwarding rules")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sync_forwards(true);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                ),
+                None,
             ),
             Page::Settings => (SharedString::from("Settings"), None, None, None),
             Page::SettingsCategory(section) => (
@@ -508,7 +492,7 @@ impl Render for Mobile {
         let devices = matches!(self.page, Page::Devices | Page::PairingMenu);
         let expanded = self.page == Page::PairingMenu;
         let show_add_rule =
-            matches!(&self.page, Page::Forwards(scope) if self.can_add_rule(scope.as_deref()));
+            matches!(&self.page, Page::Forwards(_)) && self.can_add_rule(self.forward_filters.device.as_deref());
         let drawer = self.drawer.position(window, cx);
         let content_width = window.viewport_size().width - px(left + right);
         let drawer_width =
@@ -556,8 +540,8 @@ impl Render for Mobile {
                         Page::ForwardEdit { owner, .. } => {
                             self.rule_editor(owner.as_deref(), ui, cx).into_any_element()
                         }
-                        Page::Forwards(peer) => self
-                            .forward_list(peer.as_deref(), ui, cx)
+                        Page::Forwards(_) => self
+                            .forward_list(ui, window, cx)
                             .into_any_element(),
                         Page::Sessions(_) => self.sessions_page(ui, cx).into_any_element(),
                         Page::Peer(id) => self.peer(&id, ui, cx).into_any_element(),

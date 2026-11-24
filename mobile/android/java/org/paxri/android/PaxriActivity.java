@@ -40,6 +40,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static native void activityVisibilityChanged(boolean visible);
     private static native void deviceNameChanged(String name, String model);
     private static native void submitCode(String code);
+    private static native void removeForward(String owner, String name);
     private static native void systemTextSizeChanged(float size);
     private static native void insetsChanged(float left, float top, float right, float bottom);
     private static native boolean goBack();
@@ -49,6 +50,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private long imeSession;
     private boolean networkReady;
     private Toast toast;
+    private AlertDialog removeForwardDialog;
     private PopupWindow terminalTouch;
     private long touchSession;
     private TerminalGestures gestures;
@@ -166,6 +168,7 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     @Override
     protected void onDestroy() {
+        if (removeForwardDialog != null) removeForwardDialog.dismiss();
         connectionHandler.removeCallbacks(stopConnections);
         stopConnectionService();
         super.onDestroy();
@@ -462,6 +465,19 @@ public final class PaxriActivity extends GpuiInputActivity {
             if (toast != null) toast.cancel();
             toast = Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT);
             toast.show();
+        });
+    }
+
+    public void confirmRemoveForward(String owner, String name, String route) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed() || removeForwardDialog != null) return;
+            removeForwardDialog = new AlertDialog.Builder(this)
+                    .setTitle("Remove forwarding rule?")
+                    .setMessage(name + "\n" + route)
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Remove rule", (d, w) -> removeForward(owner, name))
+                    .setOnDismissListener(d -> removeForwardDialog = null)
+                    .show();
         });
     }
 

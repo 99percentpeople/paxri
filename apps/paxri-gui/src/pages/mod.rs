@@ -1,8 +1,7 @@
 mod device;
 mod device_list;
 mod sessions;
-mod forward_filters;
-pub(crate) use forward_filters::ForwardFilters;
+pub(crate) use paxri_ui::components::forwarding::ForwardFilters;
 mod home;
 pub(crate) use home::DevicesPane;
 mod network_settings;

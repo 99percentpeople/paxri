@@ -33,7 +33,7 @@ pub(crate) fn copy_with_feedback(text: String, message: &'static str, window: &m
 }
 
 pub use paxri_ui::components::{
-    Button, ButtonVariant, Dropdown, DropdownContent, DropdownState, DropdownTrigger, Icon, ListItem, Select, actions, form_row, heading, row, single_line,
+    Button, ButtonVariant, Icon, ListItem, Select, actions, form_row, heading, row, single_line,
     tooltip,
 };
 

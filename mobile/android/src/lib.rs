@@ -74,6 +74,7 @@ enum Update {
     Output(u64, Vec<u8>, bool),
     Hosted(String, Option<Vec<SessionKey>>),
     Presence(Presence),
+    RemoveForward { owner: String, name: String },
     ForwardChanged(String, Result<(), String>),
     ForwardRules(
         String,
@@ -190,6 +191,19 @@ pub extern "system" fn Java_org_paxri_android_PairingScannerActivity_isInvitatio
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_removeForward(
+    mut env: EnvUnowned,
+    _class: JClass,
+    owner: JString,
+    name: JString,
+) {
+    env.with_env(|_| {
+        post(Update::RemoveForward { owner: owner.to_string(), name: name.to_string() });
+        Ok::<_, jni::errors::Error>(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
+}
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_submitCode(
     mut env: EnvUnowned,
     _class: JClass,
@@ -297,6 +311,7 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
 #[derive(Clone, Copy)]
 enum ActivityAction<'a> {
     Toast(&'a str),
+    ConfirmRemoveForward { owner: &'a str, name: &'a str, route: &'a str },
     SaveDeviceName(&'a str),
     SaveZoom(f32),
     Pair,
@@ -334,6 +349,14 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
             ActivityAction::Toast(message) => {
                 let text = JString::from_str(env, message).map_err(|e| e.to_string())?;
                 env.call_method(activity, jni_str!("showToast"), jni_sig!("(Ljava/lang/String;)V"), &[(&text).into()])
+            }
+            ActivityAction::ConfirmRemoveForward { owner, name, route } => {
+                let owner = JString::from_str(env, owner).map_err(|e| e.to_string())?;
+                let name = JString::from_str(env, name).map_err(|e| e.to_string())?;
+                let route = JString::from_str(env, route).map_err(|e| e.to_string())?;
+                env.call_method(activity, jni_str!("confirmRemoveForward"),
+                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                    &[(&owner).into(), (&name).into(), (&route).into()])
             }
             ActivityAction::SaveZoom(scale) => env.call_method(
                 activity, jni_str!("saveTerminalZoom"), jni_sig!("(F)V"), &[scale.into()],
@@ -493,6 +516,7 @@ struct Mobile {
     listing_peers: BTreeSet<String>,
     session_list_errors: BTreeSet<String>,
     filter_menu: Entity<paxri_ui::components::DropdownState>,
+    forward_filters: paxri_ui::components::forwarding::ForwardFilters,
     device_filters: DeviceFilters,
     session_filters: SessionFilters,
     terminal_return: Page,
@@ -594,6 +618,11 @@ impl Mobile {
     }
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        if let Page::Forwards(scope) = &page
+            && !matches!(self.page, Page::ForwardEdit { .. })
+        {
+            self.forward_filters.reset(scope.clone(), cx);
+        }
         if self.page != page
             && let Some(input) = self.editing_input.take()
         {
@@ -886,6 +915,9 @@ impl Mobile {
                 self.sessions.retain(|_, s| peers.contains_key(&s.peer));
                 self.hosted.retain(|peer, _| peers.contains_key(peer));
                 self.session_list_errors.retain(|peer| peers.contains_key(peer));
+                if self.forward_filters.device.as_ref().is_some_and(|id| !peers.contains_key(id)) {
+                    self.forward_filters.device = None;
+                }
                 if self.session_filters.scope.device.as_ref().is_some_and(|id| !peers.contains_key(id)) {
                     self.session_filters.scope.device = None;
                 }
@@ -914,6 +946,7 @@ impl Mobile {
                 if let Some(menu) = self
                     .terminal_menus
                     .iter()
+                    .chain(self.forwards.menus.iter())
                     .chain([
                         &self.filter_menu,
                         &self.keybar_menu,
@@ -1000,19 +1033,21 @@ impl Mobile {
                     }
                 }
             }
+            Update::RemoveForward { owner, name } => self.remove_forward(&owner, name, cx),
             Update::ForwardChanged(owner, result) => {
                 self.rule_form.saving = false;
                 if let Page::ForwardEdit { owner: Some(peer), scope } = &self.page
                     && peer == &owner
                 {
                     match result {
-                        Ok(()) => self.navigate(Page::Forwards(scope.as_ref().map(|_| owner)), cx),
+                        Ok(()) => self.navigate(Page::Forwards(scope.clone()), cx),
                         Err(error) => Toast::show(error, self.window, cx),
                     }
                 } else {
+                    if let Err(error) = result { Toast::show(error, self.window, cx); }
                     // A list opened while the save was pending may still contain its previous rules.
                     self.forwards.invalidate(&owner);
-                    self.sync_forwards(false);
+                    self.sync_forwards(true);
                 }
             }
             Update::ForwardRules(peer, request, result) => {
@@ -1154,9 +1189,11 @@ fn android_main(android: AndroidApp) {
                 cx.observe(&filter_menu, |this: &mut Mobile, _, cx| this.sync_back(cx))
                     .detach();
                 let device_filters = DeviceFilters::new("Search devices…", cx);
+                let forward_filters = paxri_ui::components::forwarding::ForwardFilters::new(cx);
                 let session_filters = SessionFilters::new("Search sessions…", cx);
                 let mut inputs = vec![
                     (name_input.clone(), KeyboardType::Default),
+                    (forward_filters.search.clone(), KeyboardType::Default),
                     (device_filters.search.clone(), KeyboardType::Default),
                     (session_filters.search.clone(), KeyboardType::Default),
                 ];
@@ -1198,6 +1235,7 @@ fn android_main(android: AndroidApp) {
                     session_list_errors: BTreeSet::new(),
                     filter_menu,
                     device_filters,
+                    forward_filters,
                     session_filters,
                     terminal_return: Page::Devices,
                     forwards: Default::default(),

@@ -5,6 +5,7 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+paxri-control = { path = "../paxri-control" }
 alacritty_terminal = { version = "0.26", default-features = false }
 paxri-core = { path = "../paxri-core" }
 url = "2"

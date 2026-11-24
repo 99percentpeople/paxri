@@ -1,20 +1,23 @@
 use super::*;
 use paxri_control::{Direction, PeerForward, forwarding::Rules};
 use paxri_ui::components::{
-    ButtonVariant::{Destructive, Ghost, Outline},
-    DropdownState, Icon, ListItem, Select, actions, heading,
+    ButtonVariant::Ghost,
+    DropdownState, Icon, ListState, ListView, Select,
+    forwarding::{RuleAction, RuleMenu},
     input::Input,
 };
 use paxri_ui::settings::{SettingsGroup, SettingsSection, SettingsTable};
 
-enum Entry {
-    Loading(u64, tokio::task::JoinHandle<()>),
-    Ready(Result<Rules, String>),
+#[derive(Default)]
+struct Entry {
+    request: Option<(u64, tokio::task::JoinHandle<()>)>,
+    rules: Option<Rules>,
+    error: Option<String>,
 }
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        if let Self::Loading(_, task) = self {
+        if let Some((_, task)) = &self.request {
             task.abort();
         }
     }
@@ -24,11 +27,16 @@ impl Drop for Entry {
 pub(super) struct ForwardList {
     entries: BTreeMap<String, Entry>,
     next_request: u64,
+    pub(super) menus: Vec<Entity<DropdownState>>,
 }
 
 impl ForwardList {
     pub(super) fn invalidate(&mut self, owner: &str) {
-        self.entries.remove(owner);
+        if let Some(entry) = self.entries.get_mut(owner) {
+            if let Some((_, task)) = entry.request.take() {
+                task.abort();
+            }
+        }
     }
 
     pub(super) fn complete(
@@ -40,10 +48,17 @@ impl ForwardList {
         let Some(entry) = self.entries.get_mut(peer) else {
             return false;
         };
-        if !matches!(entry, Entry::Loading(pending, _) if *pending == request) {
+        if !matches!(&entry.request, Some((pending, _)) if *pending == request) {
             return false;
         }
-        *entry = Entry::Ready(result);
+        entry.request.take();
+        match result {
+            Ok(rules) => {
+                entry.rules = Some(rules);
+                entry.error = None;
+            }
+            Err(error) => entry.error = Some(error),
+        }
         true
     }
 }
@@ -63,14 +78,13 @@ impl Mobile {
     }
 
     pub(super) fn sync_forwards(&mut self, refresh: bool) {
-        let Page::Forwards(selected) = &self.page else {
+        let Page::Forwards(_) = &self.page else {
             self.forwards.entries.clear();
+            self.forwards.menus.clear();
             return;
         };
         let eligible = |id: &String, peer: &client::Peer| {
-            selected.as_ref().is_none_or(|owner| owner == id)
-                && peer.supports_forward_rules()
-                && self.presence.online(id)
+            peer.supports_forward_rules() && self.presence.online(id)
         };
         self.forwards
             .entries
@@ -80,10 +94,11 @@ impl Mobile {
             if !eligible(id, peer) {
                 continue;
             }
-            match self.forwards.entries.get(id) {
-                Some(Entry::Loading(..)) => continue,
-                Some(Entry::Ready(_)) if !refresh => continue,
-                _ => {}
+            let entry = self.forwards.entries.entry(id.clone()).or_default();
+            if entry.request.is_some()
+                || (!refresh && (entry.rules.is_some() || entry.error.is_some()))
+            {
+                continue;
             }
             self.forwards.next_request += 1;
             let request = self.forwards.next_request;
@@ -100,80 +115,173 @@ impl Mobile {
                     .send(Update::ForwardRules(owner, request, result))
                     .await;
             });
-            self.forwards
-                .entries
-                .insert(id.clone(), Entry::Loading(request, task));
+            entry.request = Some((request, task));
         }
     }
 
     pub(super) fn forward_list(
-        &self,
-        selected: Option<&str>,
+        &mut self,
         ui: Ui,
-        cx: &Context<Self>,
-    ) -> Stateful<Div> {
-        let mut page = div()
-            .id("forward-list")
-            .flex_1()
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let filters = &self.forward_filters;
+        let query = filters.query(cx);
+        let terms: Vec<_> = query.split_whitespace().collect();
+        let mut options: Vec<_> = self
+            .peers
+            .iter()
+            .map(|(id, peer)| (id.clone(), peer.name.clone(), peer.platform))
+            .collect();
+        options.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let mut body = ListView::scrollable("forward-list")
+            .with_floating_action(self.can_add_rule(filters.device.as_deref()));
+        let narrow = window.viewport_size().width < px(650.);
+        self.forwards.menus.clear();
+        let mut count = 0;
+        let mut pending = false;
+        let mut failures = Vec::new();
+        let mut rows = Vec::new();
+        for (id, name, _) in &options {
+            if filters
+                .device
+                .as_ref()
+                .is_some_and(|selected| selected != id)
+            {
+                continue;
+            }
+            if let Some(entry) = self.forwards.entries.get(id) {
+                pending |= entry.request.is_some() && entry.rules.is_none();
+                if let Some(error) = &entry.error {
+                    failures.push((id, name, error));
+                }
+                if let Some(rules) = &entry.rules {
+                    count += rules.len();
+                    for (key, rule) in rules {
+                        if !filters.matches(id, key, rule, name, &terms) {
+                            continue;
+                        }
+                        let owner = id.clone();
+                        let rule_key = key.clone();
+                        let route = rule.route_for(name);
+                        let view = cx.weak_entity();
+                        let menu_id = format!("rule-actions-{id}/{key}");
+                        let state = DropdownState::local(
+                            SharedString::from(menu_id.clone()).into(),
+                            window,
+                            cx,
+                        );
+                        self.forwards.menus.push(state.clone());
+                        let menu =
+                            RuleMenu::new(menu_id, key, rule.enabled(), move |action, _, cx| {
+                                let _ = view.update(cx, |v, cx| match action {
+                                    RuleAction::Edit => v.open_rule(Some((&owner, &rule_key)), cx),
+                                    RuleAction::SetEnabled(enabled) => v.send_forward(
+                                        &owner,
+                                        PeerForward::SetEnabled {
+                                            name: rule_key.clone(),
+                                            enabled,
+                                        },
+                                        cx,
+                                    ),
+                                    RuleAction::Remove => {
+                                        if !v.rule_form.saving
+                                            && let Err(error) = activity_action(
+                                                &v.android,
+                                                ActivityAction::ConfirmRemoveForward {
+                                                    owner: &owner,
+                                                    name: &rule_key,
+                                                    route: &route,
+                                                },
+                                            )
+                                        {
+                                            Toast::show(error, v.window, cx);
+                                        }
+                                    }
+                                });
+                            })
+                            .with_state(state);
+                        rows.push(ui.forwarding_row(
+                            format!("{id}/{key}"),
+                            key,
+                            rule,
+                            name,
+                            narrow,
+                            menu,
+                        ));
+                    }
+                }
+            }
+        }
+        if rows.is_empty() {
+            let selected = filters
+                .device
+                .as_ref()
+                .and_then(|id| self.peers.get(id).map(|p| (id, p)));
+            let state = if self.starting_network || pending {
+                ListState::loading("Loading forwarding rules…")
+            } else if self.client.is_none() {
+                ListState::empty(Icon::Server, "Network unavailable")
+            } else if !failures.is_empty() {
+                ListState::empty(Icon::Forward, "Forwarding rules unavailable").detail(
+                    failures
+                        .iter()
+                        .map(|(_, n, _)| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            } else if self.peers.is_empty() {
+                ListState::empty(Icon::Forward, "No forwarding rules")
+                    .detail("Pair a device to create a forwarding rule.")
+            } else if let Some((_, p)) = selected
+                && !p.supports_forward_rules()
+            {
+                ListState::empty(Icon::Forward, "Forwarding unavailable")
+                    .detail("This device does not share forwarding rules.")
+            } else if let Some((id, _)) = selected
+                && !self.presence.online(id)
+            {
+                ListState::empty(Icon::Monitor, "Device offline")
+            } else if self.forwards.entries.is_empty() {
+                ListState::empty(Icon::Forward, "No devices available")
+                    .detail("Connect a device that shares forwarding rules.")
+            } else if count > 0 {
+                ListState::filtered("No matching rules")
+            } else if !self.can_add_rule(filters.device.as_deref()) {
+                ListState::empty(Icon::Forward, "No forwarding rules")
+                    .detail("Update the gateway to create forwarding rules.")
+            } else {
+                ListState::empty(Icon::Forward, "No forwarding rules")
+            };
+            body = body.child(state.render(ui));
+        } else {
+            for (id, name, error) in failures {
+                body = body.child(
+                    ui.muted(format!("{name} · Forwarding rules unavailable"))
+                        .id(SharedString::from(format!("forward-error-{id}")))
+                        .tooltip(paxri_ui::components::tooltip(error.clone().into())),
+                );
+            }
+            body = body.divided();
+            if !narrow {
+                body = body.child(ui.forwarding_header());
+            }
+            body = body.children(rows);
+        }
+        div()
             .min_h_0()
-            .overflow_y_scroll()
-            .restrict_scroll_to_axis()
-            .p_4()
-            .when(self.can_add_rule(selected), |page| page.pb(px(88.)))
+            .flex_1()
             .flex()
             .flex_col()
-            .gap_4();
-        if self.forwards.entries.is_empty() {
-            let message = match selected.and_then(|id| self.peers.get(id)) {
-                Some(peer) if !peer.supports_forward_rules() => {
-                    "This device does not share forwarding rules."
-                }
-                Some(_) => "Device offline.",
-                None if self.client.is_none() => "Connecting…",
-                None => "No connected devices share forwarding rules.",
-            };
-            return page.child(ui.muted(message));
-        }
-        for (id, entry) in &self.forwards.entries {
-            let peer = &self.peers[id];
-            let mut group = ui.section();
-            if selected.is_none() {
-                group = group.child(heading(peer.name.clone()));
-            }
-            if !peer.supports_creating_forward_rules() {
-                group = group.child(ui.muted("Update this gateway to add rules.").text_xs());
-            }
-            group = match entry {
-                Entry::Loading(..) => group.child(ui.muted("Loading forwarding rules…")),
-                Entry::Ready(Err(_)) => group.child(ui.muted("Forwarding rules unavailable.")),
-                Entry::Ready(Ok(rules)) if rules.is_empty() => {
-                    group.child(ui.muted("No forwarding rules for this device."))
-                }
-                Entry::Ready(Ok(rules)) => {
-                    for (name, rule) in rules {
-                        let owner = id.clone();
-                        let key = name.clone();
-                        let label = ListItem::new(name.clone())
-                            .detail(format!("{} · {}", rule.route_for(&peer.name), rule.state()));
-                        group = group.child(
-                            ui.button(
-                                Ghost,
-                                SharedString::from(format!("rule-{id}-{name}")),
-                                label,
-                            )
-                            .row()
-                            .icon(Icon::Pencil)
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| this.open_rule(Some((&owner, &key)), cx),
-                            )),
-                        );
-                    }
-                    group
-                }
-            };
-            page = page.child(group);
-        }
-        page
+            .px_3()
+            .pt_2()
+            .gap_2()
+            .child(
+                filters
+                    .toolbar(&options, |v| &mut v.forward_filters, cx)
+                    .with_state(&self.filter_menu),
+            )
+            .child(body)
     }
 }
 
@@ -183,8 +291,6 @@ pub(super) struct RuleForm {
     pub direction_menu: Entity<DropdownState>,
     pub existing: Option<String>,
     direction: Direction,
-    enabled: bool,
-    confirm_remove: bool,
     pub saving: bool,
 }
 
@@ -197,8 +303,6 @@ impl RuleForm {
             direction_menu: DropdownState::new(window, cx),
             existing: None,
             direction: Direction::Local,
-            enabled: false,
-            confirm_remove: false,
             saving: false,
         }
     }
@@ -242,17 +346,22 @@ impl Mobile {
         }
         let (owner, name, rule) = match existing {
             Some((owner, name)) => {
-                let Some(Entry::Ready(Ok(rules))) = self.forwards.entries.get(owner) else {
+                let Some(rules) = self
+                    .forwards
+                    .entries
+                    .get(owner)
+                    .and_then(|entry| entry.rules.as_ref())
+                else {
                     return;
                 };
                 let Some(rule) = rules.get(name) else { return };
                 (Some(owner.to_owned()), Some(name), Some(rule))
             }
             None => {
-                if !self.can_add_rule(scope.as_deref()) {
+                if !self.can_add_rule(self.forward_filters.device.as_deref()) {
                     return;
                 }
-                let owner = scope.clone().or_else(|| {
+                let owner = self.forward_filters.device.clone().or_else(|| {
                     let mut devices = self.rule_devices();
                     let (id, _) = devices.next()?;
                     devices.next().is_none().then(|| id.clone())
@@ -261,9 +370,10 @@ impl Mobile {
             }
         };
         self.rule_form.existing = name.map(str::to_owned);
-        self.rule_form.enabled = rule.is_some_and(|r| r.enabled());
-        self.rule_form.direction = rule.map_or(Direction::Local, |r| r.direction);
-        self.rule_form.confirm_remove = false;
+        self.rule_form.direction = rule
+            .map_or(self.forward_filters.direction.unwrap_or_default(), |r| {
+                r.direction
+            });
         let values = [
             name.unwrap_or_default(),
             rule.map_or("", |r| &r.listen),
@@ -289,17 +399,39 @@ impl Mobile {
         else {
             return;
         };
-        if self.rule_form.saving || !self.can_save_rule(Some(owner)) {
+        let owner = owner.clone();
+        self.send_forward(&owner, action, cx);
+    }
+
+    pub(super) fn remove_forward(&mut self, owner: &str, name: String, cx: &mut Context<Self>) {
+        if !matches!(self.page, Page::Forwards(_)) {
             return;
         }
-        let Some((client, peer)) = self.client.as_ref().zip(self.peers.get(owner)) else {
+        if self.presence.online(owner)
+            && !self.forwards.entries.get(owner)
+                .and_then(|entry| entry.rules.as_ref())
+                .is_some_and(|rules| rules.contains_key(&name))
+        {
+            Toast::show("Forwarding rule unavailable", self.window, cx);
+            return;
+        }
+        self.send_forward(owner, PeerForward::Remove { name }, cx);
+    }
+
+    fn send_forward(&mut self, owner: &str, action: PeerForward, cx: &mut Context<Self>) {
+        if self.rule_form.saving {
+            return;
+        }
+        let Some((client, peer)) = self.client.as_ref().zip(self.peers.get(owner))
+            .filter(|_| self.presence.online(owner))
+        else {
+            Toast::show("Device offline", self.window, cx);
             return;
         };
         let name = peer.name.clone();
-        let owner = owner.clone();
+        let owner = owner.to_owned();
         let client = client.clone();
         self.rule_form.saving = true;
-        self.rule_form.confirm_remove = false;
         let updates = self.updates.clone();
         self.rt.spawn(async move {
             let result = client
@@ -328,7 +460,7 @@ impl Mobile {
         ui: Ui,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.can_save_rule(owner) || self.rule_form.saving || self.rule_form.confirm_remove {
+        if !self.can_save_rule(owner) || self.rule_form.saving {
             return None;
         }
         Some(
@@ -399,7 +531,7 @@ impl Mobile {
             fields.field("Rule name", name.clone());
         }
         let direction = Select::new(
-            "forward-listener",
+            "forward-direction",
             form.direction,
             cx.listener(|this, direction: &Direction, _, cx| {
                 this.rule_form.direction = *direction;
@@ -407,15 +539,22 @@ impl Mobile {
             }),
         )
         .with_optional_state(Some(&form.direction_menu))
-        .option(Direction::Local, "This phone")
-        .option(Direction::Remote, "Paired device");
-        fields.field("Listen on", direction);
-        fields.field("Listen address", listen.clone());
+        .option(Direction::Local, "Forward")
+        .option(Direction::Remote, "Reverse");
+        fields.field("Direction", direction);
         fields.field(
             if form.direction == Direction::Local {
-                "Target on paired device"
+                "Listen on this device"
             } else {
-                "Target on this phone"
+                "Listen on peer"
+            },
+            listen.clone(),
+        );
+        fields.field(
+            if form.direction == Direction::Local {
+                "Target on peer"
+            } else {
+                "Target on this device"
             },
             target.clone(),
         );
@@ -431,54 +570,6 @@ impl Mobile {
         if form.existing.is_none() && !self.can_add_rule(None) {
             return page.child(ui.muted("No connected devices can create forwarding rules."));
         }
-        if let Some(name) = &form.existing
-            && form.confirm_remove
-        {
-            let key = name.clone();
-            return page.child(ui.muted(format!("Remove {name}?"))).child(
-                actions()
-                    .child(
-                        ui.button(Outline, "cancel-remove", "Cancel")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.rule_form.confirm_remove = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(ui.button(Destructive, "confirm-remove", "Remove").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.change_forward(PeerForward::Remove { name: key.clone() }, cx);
-                        }),
-                    )),
-            );
-        }
-        page.when_some(form.existing.clone(), |page, name| {
-            let enabled = !form.enabled;
-            page.child(
-                actions()
-                    .child(
-                        ui.button(
-                            Outline,
-                            "enable-forward",
-                            if enabled { "Resume" } else { "Pause" },
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change_forward(
-                                PeerForward::SetEnabled {
-                                    name: name.clone(),
-                                    enabled,
-                                },
-                                cx,
-                            );
-                        })),
-                    )
-                    .child(
-                        ui.button(Ghost, "remove-forward", "Remove")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.rule_form.confirm_remove = true;
-                                cx.notify();
-                            })),
-                    ),
-            )
-        })
+        page
     }
 }

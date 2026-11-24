@@ -1,12 +1,13 @@
 use crate::{
     Dashboard, Input,
     components::{
-        ButtonVariant::Primary,
-        Dialog, DialogContent, DialogMode, DialogSuccess, Select, Ui, form_row, heading, row,
+        ButtonVariant::Primary, Dialog, DialogContent, DialogMode, DialogSuccess, Select, Ui,
+        form_row, heading, row,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, Direction, Forward, PeerForward, Status};
+use paxri_ui::components::{Icon, ListState, ListView};
 
 struct RuleForm {
     dashboard: Entity<Dashboard>,
@@ -124,7 +125,9 @@ impl RuleForm {
     fn render_form(&self, ui: Ui, cx: &Context<Self>) -> DialogContent {
         let dashboard = self.dashboard.read(cx);
         let device = if let Some(owner) = &self.owner {
-            let name = dashboard.status.as_ref()
+            let name = dashboard
+                .status
+                .as_ref()
                 .map_or(owner.as_str(), |s| s.peer_display_name(owner));
             ui.labeled("Device", name.to_owned())
         } else {
@@ -219,115 +222,90 @@ impl Dashboard {
                 .sum::<usize>();
         let rows: Vec<_> = own
             .chain(shared)
-            .filter(|(_, name, f)| filters.matches(name, f, s.peer_display_name(&f.peer), &terms))
+            .filter(|(_, name, f)| {
+                filters.matches(&f.peer, name, f, s.peer_display_name(&f.peer), &terms)
+            })
             .collect();
         let narrow = width < px(650.);
+        let devices: Vec<_> = s
+            .peers
+            .keys()
+            .map(|k| {
+                (
+                    k.clone(),
+                    s.peer_display_name(k).to_owned(),
+                    s.peer_platform(k),
+                )
+            })
+            .collect();
         let mut table = ui
             .section()
             .child(
-                row()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(heading("Port forwarding"))
-                            .when(active && total > 0, |r| {
-                                r.child(ui.muted(format!("{} of {total}", rows.len())).text_xs())
-                            }),
-                    )
+                row().child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(heading("Port forwarding"))
+                        .when(active && total > 0, |r| {
+                            r.child(ui.muted(format!("{} of {total}", rows.len())).text_xs())
+                        }),
+                ),
             )
-            .child(filters.toolbar(s, cx));
-        let columns = || div().w_full().min_w_0().flex().gap_2().items_center();
-        let cell = || div().min_w_0().flex_1().flex().flex_col();
+            .child(filters.toolbar(&devices, |v| &mut v.forward_filters, cx));
+        let mut failures = Vec::new();
         if let Some(directory) = &s.peer_forwards {
             for (peer, error) in &directory.errors {
                 if s.peers.contains_key(peer) && !s.peer_supports_forward_rules(peer) {
                     continue;
                 }
                 if filters.device.as_ref().is_none_or(|p| p == peer) || peer == "Gateway" {
-                    table = table.child(
-                        ui.muted(format!("{}: forwarding rules unavailable", s.peer_display_name(peer)))
+                    failures.push(s.peer_display_name(peer));
+                    if !rows.is_empty() {
+                        table = table.child(
+                            ui.muted(format!(
+                                "{}: forwarding rules unavailable",
+                                s.peer_display_name(peer)
+                            ))
                             .id(SharedString::from(format!("forward-error-{peer}")))
                             .tooltip(crate::components::tooltip(error.clone().into())),
-                    );
+                        );
+                    }
                 }
             }
         }
         if rows.is_empty() {
-            return page.child(table.child(ui.muted(if s.peers.is_empty() {
-                "Pair a device to create a forwarding rule."
+            let state = if s.peers.is_empty() {
+                ListState::empty(Icon::Forward, "No forwarding rules")
+                    .detail("Pair a device to create a forwarding rule.")
             } else if s.peer_forwards.is_none() {
-                "Loading forwarding rules…"
+                ListState::loading("Loading forwarding rules…")
+            } else if !failures.is_empty() {
+                ListState::empty(Icon::Forward, "Forwarding rules unavailable")
+                    .detail(failures.join(", "))
             } else if active && total > 0 {
-                "No rules match your filters."
+                ListState::filtered("No matching rules")
             } else {
-                "No forwarding rules to display."
-            })));
+                ListState::empty(Icon::Forward, "No forwarding rules")
+            };
+            return page.child(table.child(state.render(*ui)));
         }
-        if !narrow {
-            let mut header = columns();
-            for label in ["Direction", "Device", "Listen", "Target", "State"] {
-                header = header.child(cell().child(ui.muted(label)));
-            }
-            table = table.child(header.child(div().w(px(36.))));
-        }
-        for (owner, name, f) in rows {
+        let mut list = ListView::new().divided().when(!narrow, |list| list.child(ui.forwarding_header()));
+        for (owner, name, rule) in rows {
             let owner = owner.map(String::as_str);
-            let display_name = s.peer_display_name(&f.peer);
-            let key = format!("{owner:?}/{name}");
-            let actions = div()
-                .w(px(36.))
-                .flex_none()
-                .child(self.port_actions(name, owner, f, display_name, cx));
-            let local = f.direction == Direction::Local;
-            let direction = if local { "Forward" } else { "Reverse" };
-            let (source, destination) = if local {
-                ("This device", display_name)
-            } else {
-                (display_name, "This device")
-            };
-            let line = |column: &'static str, value: &str| {
-                crate::components::single_line(div())
-                    .w_full()
-                    .id((ElementId::from(column), SharedString::from(key.clone())))
-                    .tooltip(crate::components::tooltip(value.to_owned().into()))
-                    .child(value.to_owned())
-            };
-            let endpoint = |column, host: &str, address: &str| {
-                cell()
-                    .child(ui.muted(host.to_owned()).text_xs())
-                    .child(line(column, address))
-            };
-            let entry = if narrow {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        columns()
-                            .child(cell().child(format!("{direction} · {display_name}")))
-                            .child(f.state().to_owned())
-                            .child(actions),
-                    )
-                    .child(ui.muted(f.route_for(display_name)))
-            } else {
-                columns()
-                    .child(cell().child(direction))
-                    .child(cell().child(line("peer", display_name)))
-                    .child(endpoint(
-                        "listen",
-                        source,
-                        f.bound.as_ref().unwrap_or(&f.listen),
-                    ))
-                    .child(endpoint("target", destination, &f.target))
-                    .child(cell().child(line("state", f.state())))
-                    .child(actions)
-            };
-            table = table.child(ui.separator()).child(entry);
+            let display_name = s.peer_display_name(&rule.peer);
+            let actions = self.port_actions(name, owner, rule, display_name, cx);
+            list = list.child(ui.forwarding_row(
+                format!("{owner:?}/{name}"),
+                name,
+                rule,
+                display_name,
+                narrow,
+                actions,
+            ));
         }
-        page.child(table)
+        page.child(table.child(list))
     }
 }

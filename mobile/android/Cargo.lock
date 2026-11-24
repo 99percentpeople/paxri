@@ -5569,6 +5569,7 @@ dependencies = [
  "gpui",
  "gpui-pre",
  "paxri-config",
+ "paxri-control",
  "paxri-core",
  "portable-pty",
  "raw-window-handle",
