@@ -149,16 +149,18 @@ impl Dashboard {
                 );
             }
         }
-        let page = overview()
-            .py_2()
+        let section = ui
+            .section()
             .child(heading("Sessions"))
             .child(filters.controls(&devices, |v| &mut v.session_filters, cx))
-            .when(!rows.is_empty() && !failed.is_empty(), |d| d.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", ")))))
+            .when(!rows.is_empty() && !failed.is_empty(), |section| {
+                section.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", "))))
+            })
             .when_some(
                 session_list_notice(total, rows.len(), initial_request, &failed),
                 |d, state| d.child(state.render(*ui)),
             )
             .when(!rows.is_empty(), |page| page.child(ListView::new().children(rows)));
-        (page, launcher)
+        (overview().child(section), launcher)
     }
 }
