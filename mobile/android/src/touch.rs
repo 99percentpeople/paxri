@@ -209,7 +209,13 @@ impl Session {
 }
 
 impl Mobile {
-    pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5], keys: Arc<KeybarSettings>) {
+    pub(super) fn show_terminal_keyboard(&self, id: u64) {
+        if let Err(error) = activity_action(&self.android, ActivityAction::ShowTerminalKeyboard(id)) {
+            log::warn!("Showing terminal keyboard: {error}");
+        }
+    }
+
+    pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5], keys: Arc<KeybarSettings>, touchable: bool) {
         let drag = self
             .sessions
             .get(&id)
@@ -218,14 +224,14 @@ impl Mobile {
         if self
             .touch_area
             .as_ref()
-            .is_some_and(|(session, bounds, layout)| {
-                *session == id && *bounds == rect && *layout == keys
+            .is_some_and(|(session, bounds, layout, enabled)| {
+                *session == id && *bounds == rect && *layout == keys && *enabled == touchable
             })
         {
             return;
         }
-        match activity_action(&self.android, ActivityAction::TouchArea(id, rect, &keys)) {
-            Ok(()) => self.touch_area = Some((id, rect, keys)),
+        match activity_action(&self.android, ActivityAction::TouchArea(id, rect, &keys, touchable)) {
+            Ok(()) => self.touch_area = Some((id, rect, keys, touchable)),
             Err(error) => log::warn!("Setting terminal touch area: {error}"),
         }
     }
@@ -250,11 +256,7 @@ impl Mobile {
                         let _ = s.input.send(Frame::Data(click));
                     }
                 }
-                if let Err(error) =
-                    activity_action(&self.android, ActivityAction::ShowTerminalKeyboard(id))
-                {
-                    log::warn!("Showing terminal keyboard: {error}");
-                }
+                self.show_terminal_keyboard(id);
             }
             Gesture::Keyboard | Gesture::Tap { .. } => {}
             Gesture::Select { x, y, start } => {

@@ -404,8 +404,11 @@ fn connection_host(address: &str) -> String {
 }
 
 impl ConnectionHistory {
-    pub fn connection_paths(&self, peer_id: &str, paths: &[PeerConnection], ui: Ui) -> Div {
+    pub fn connection_section(&self, peer_id: &str, paths: Option<&[PeerConnection]>, presence: bool, ui: Ui) -> Div {
         let mut list = ui.section().child(heading("Connection"));
+        let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
+            return list.child(ui.muted(paxri_core::connection::peer_state(paths, presence)));
+        };
         for (i, path) in paths.iter().enumerate() {
             let streams = path
                 .stream_labels_matching(|kind| kind != StreamKind::Terminal)
@@ -460,15 +463,4 @@ pub fn presence_detail(state: &str, now: i64, changed: Option<i64>) -> String {
         _ => format!("{}d ago", minutes / 1440),
     };
     format!("{state} · {age}")
-}
-
-impl Ui {
-    pub fn connection_badge(self, paths: Option<&[PeerConnection]>, presence: bool) -> Div {
-        let dot = if paths.is_some_and(|paths| !paths.is_empty()) {
-            self.colors.success
-        } else {
-            self.colors.muted_foreground
-        };
-        self.status_badge(paxri_core::connection::peer_state(paths, presence), dot)
-    }
 }

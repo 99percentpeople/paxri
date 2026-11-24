@@ -49,7 +49,7 @@ paxri gateway startup gui
 | `login` | Start when the current user signs in |
 | `system` | Start at boot with the configured user identity and OS registration privileges |
 
-In desktop settings, switches and selections save as soon as you change them. The device name and relay URL save when you press Enter or leave the field. Clear the device name to use the computer name, or clear the relay URL to restore automatic relay selection.
+In desktop settings, switches and selections save as soon as you change them. The device name and relay URL save when you press Enter or leave the field. You can rename the device while its gateway is stopped. The gateway uses the saved name the next time it starts. Clear the device name to use the computer name, or clear the relay URL to restore automatic relay selection.
 
 In **Settings → Network**, choose whether to allow UPnP, try a physical LAN router, or use a custom relay. Network changes take effect at the next gateway start. Restarting disconnects active sessions. **Open config file** opens the selected node’s TOML with the system default application for that file type, including when its gateway is stopped.
 

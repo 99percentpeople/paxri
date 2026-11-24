@@ -5,19 +5,19 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Status, terminal::managed::Request};
-use paxri_ui::components::directory::{DeviceOption, session_list_notice};
-use paxri_ui::components::ListView;
+use paxri_ui::components::directory::{DeviceOption, SessionLocation, session_list_notice};
+use paxri_ui::components::{DropdownContent, DropdownState, ListView};
 use std::time::Duration;
 
 impl Dashboard {
     pub(crate) fn show_sessions(&mut self, peer: Option<String>, cx: &mut Context<Self>) {
         self.session_filters.for_device(peer, cx);
         self.show_devices_pane(DevicesPane::Sessions, cx);
-        self.refresh_hosted_sessions(cx);
+        self.refresh_hosted_sessions(true, cx);
     }
 
-    pub(crate) fn refresh_hosted_sessions(&mut self, cx: &mut Context<Self>) {
-        let all = self.devices_pane == Some(DevicesPane::Sessions);
+    pub(crate) fn refresh_hosted_sessions(&mut self, include_sidebar: bool, cx: &mut Context<Self>) {
+        let all = include_sidebar || self.devices_pane == Some(DevicesPane::Sessions);
         let Some(status) = &self.status else { return };
         let path = self
             .active_address()
@@ -39,11 +39,12 @@ impl Dashboard {
             let sessions = self
                 .terminal_sessions
                 .entry(peer.clone().into())
-                .or_default();
+                .or_insert_with(|| crate::workspace::PeerSessions::new(&status.device_id, id));
             if sessions.listing {
                 continue;
             }
             sessions.listing = true;
+            let revision = sessions.list_revision;
             let gateway = status.device_id.clone();
             let ipc = status.ipc_path.clone();
             let id = id.clone();
@@ -74,9 +75,16 @@ impl Dashboard {
                     }
                     if let Some(sessions) = view.terminal_sessions.get_mut(peer.as_str()) {
                         sessions.listing = false;
+                        if sessions.list_revision != revision {
+                            view.refresh_hosted_sessions(false, cx);
+                            return;
+                        }
                         sessions.list_failed = result.is_none();
                         sessions.listed = true;
                         if let Some(keys) = result {
+                            if let Err(e) = view.session_titles.retain(&sessions.title_scope, |key| keys.contains(&key) || sessions.has_live_view(key, cx)) {
+                                eprintln!("Cleaning up session titles: {e}");
+                            }
                             sessions.hosted = keys;
                         }
                         cx.notify();
@@ -91,7 +99,8 @@ impl Dashboard {
         &self,
         status: &Status,
         ui: Ui,
-        cx: &Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> (Div, Option<AnyElement>) {
         let filters = &self.session_filters;
         let query = filters.query(cx);
@@ -139,14 +148,38 @@ impl Dashboard {
                     continue;
                 }
                 let peer = peer.clone();
-                rows.push(
-                    ui.session_row(alias, name, key.number, key.nonce, title, state)
-                        .on_click(move |_, w, cx| {
-                            if let Some(ws) = w.root::<Workspace>().flatten() {
-                                ws.update(cx, |v, cx| v.show_terminal(peer.clone(), key, w, cx));
-                            }
-                        }),
-                );
+                let actions = (state != SessionLocation::Ended).then(|| {
+                    let id = SharedString::from(format!(
+                        "session-actions-{alias}-{}-{}",
+                        key.number, key.nonce
+                    ));
+                    let menu = DropdownState::local(id.clone().into(), window, cx);
+                    let view = cx.weak_entity();
+                    let peer = peer.clone();
+                    let content = DropdownContent::new().end_session(move |w, cx| {
+                        let _ = view.update(cx, |v, cx| v.end_listed_session(&peer, key, w, cx));
+                    });
+                    ui.actions_menu(
+                        id,
+                        format!("Actions for {title}").into(),
+                        &menu,
+                        content,
+                        cx,
+                    )
+                });
+                rows.push(ui.session_row(
+                    alias,
+                    name,
+                    key,
+                    title,
+                    state,
+                    actions,
+                    move |_, w, cx| {
+                        if let Some(ws) = w.root::<Workspace>().flatten() {
+                            ws.update(cx, |v, cx| v.show_terminal(peer.clone(), key, w, cx));
+                        }
+                    },
+                ));
             }
         }
         let section = ui

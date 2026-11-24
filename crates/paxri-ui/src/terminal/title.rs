@@ -1,7 +1,9 @@
+mod store;
 use gpui::{App, Entity, SharedString};
 use std::collections::HashSet;
+pub use store::SessionTitles;
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TabTitle {
     pty: Option<SharedString>,
     custom: Option<SharedString>,
@@ -21,7 +23,18 @@ impl TabTitle {
     }
 
     pub fn assign_defaults(titles: &[(SharedString, Entity<Self>)], cx: &mut App) {
-        let changes = missing_defaults(titles.iter().map(|(peer, title)| (peer, title.read(cx))));
+        Self::assign_with_reserved(titles, Vec::new(), cx);
+    }
+
+    pub fn assign_with_reserved(
+        titles: &[(SharedString, Entity<Self>)],
+        reserved: Vec<SharedString>,
+        cx: &mut App,
+    ) {
+        let changes = missing_defaults(
+            titles.iter().map(|(peer, title)| (peer, title.read(cx))),
+            reserved,
+        );
         for (index, name) in changes {
             titles[index].1.update(cx, |title, cx| {
                 title.fallback = Some(name);
@@ -40,7 +53,7 @@ impl TabTitle {
         if self.custom.is_none() {
             self.fallback = None;
         }
-        self.custom.is_none()
+        true
     }
 
     pub fn rename(&mut self, text: &str) -> bool {
@@ -57,10 +70,12 @@ impl TabTitle {
 
 fn missing_defaults<'a>(
     titles: impl Iterator<Item = (&'a SharedString, &'a TabTitle)> + Clone,
+    reserved: Vec<SharedString>,
 ) -> Vec<(usize, SharedString)> {
     let mut used: HashSet<_> = titles
         .clone()
         .filter_map(|(_, t)| t.explicit().cloned())
+        .chain(reserved)
         .collect();
     // Reserve surviving defaults first so a vacant name never renumbers other tabs.
     let mut pending = Vec::new();
@@ -93,7 +108,7 @@ mod tests {
     use super::*;
 
     fn labels(peer: &SharedString, tabs: &mut [TabTitle]) -> Vec<String> {
-        for (index, name) in missing_defaults(tabs.iter().map(|t| (peer, t))) {
+        for (index, name) in missing_defaults(tabs.iter().map(|t| (peer, t)), vec![]) {
             tabs[index].fallback = Some(name);
         }
         tabs.iter()
@@ -109,6 +124,7 @@ mod tests {
         let title = &mut tabs[1];
         assert!(title.set_pty("build".into()));
         assert!(title.rename("build"));
+        assert!(title.set_pty("editor".into()));
         assert!(!title.set_pty("editor".into()));
         assert_eq!(title.label(&peer).as_ref(), "build");
         assert!(title.rename(""));

@@ -11,6 +11,7 @@ type SelectAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub struct DropdownState {
     focus: FocusHandle,
+    open: bool,
     highlighted: Option<usize>,
     parent_row: Option<usize>,
     scroll: ScrollHandle,
@@ -42,6 +43,7 @@ impl DropdownState {
         .detach();
         Self {
             focus,
+            open: false,
             highlighted: None,
             parent_row: None,
             scroll: ScrollHandle::new(),
@@ -52,35 +54,41 @@ impl DropdownState {
     }
 
     pub fn is_open(&self) -> bool {
-        self.highlighted.is_some()
+        self.open
     }
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
-        self.parent_row = None;
-        self.highlight(None, cx);
+        if self.open {
+            self.open = false;
+            self.highlighted = None;
+            self.parent_row = None;
+            cx.notify();
+        }
     }
 
     pub(super) fn parent_row(&self) -> Option<usize> {
         self.parent_row
     }
 
-    pub(super) fn enter(&mut self, parent: usize, selected: usize, cx: &mut Context<Self>) {
+    pub(super) fn enter(&mut self, parent: usize, selected: Option<usize>, cx: &mut Context<Self>) {
         self.parent_row = Some(parent);
         self.show_row(selected, cx);
     }
 
     pub fn back(&mut self, cx: &mut Context<Self>) {
         if let Some(parent) = self.parent_row.take() {
-            self.show_row(parent, cx);
+            self.show_row(Some(parent), cx);
         } else {
             self.dismiss(cx);
         }
     }
 
-    fn show_row(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn show_row(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
         self.scroll.set_offset(Point::default());
-        self.scroll.scroll_to_item(index);
-        self.highlighted = Some(index);
+        if let Some(index) = index {
+            self.scroll.scroll_to_item(index);
+        }
+        self.highlighted = index;
         cx.notify();
     }
 
@@ -91,28 +99,37 @@ impl DropdownState {
         }
     }
 
+    fn open(&mut self, selected: Option<usize>, count: usize, window: &Window, cx: &mut Context<Self>) {
+        if self.open { return; }
+        self.open = true;
+        self.opening_index = selected.unwrap_or(0);
+        self.expansion = px(0.);
+        if let Some(trigger) = self.trigger_bounds {
+            let placement = self.field_placement(trigger, count, window);
+            self.scroll.set_offset(point(px(0.), -placement.opening_scroll));
+            self.highlighted = selected;
+            cx.notify();
+        } else {
+            self.show_row(selected, cx);
+        }
+    }
+
     fn focus_item(&mut self, index: usize, count: usize, window: &Window, cx: &mut Context<Self>) {
-        let opening = !self.is_open();
-        if opening {
-            self.opening_index = index;
-            self.expansion = px(0.);
+        if !self.open {
+            self.open(Some(index), count, window, cx);
+            return;
         }
         if let Some(trigger) = self.trigger_bounds {
             let placement = self.field_placement(trigger, count, window);
-            if opening {
-                self.scroll
-                    .set_offset(point(px(0.), -placement.opening_scroll));
+            let offset = -self.scroll.offset().y;
+            let start = MENU_ROW_HEIGHT * index as f32;
+            let end = start + MENU_ROW_HEIGHT + select_inset() * 2.;
+            let distance = if start < offset {
+                start - offset
             } else {
-                let offset = -self.scroll.offset().y;
-                let start = MENU_ROW_HEIGHT * index as f32;
-                let end = start + MENU_ROW_HEIGHT + select_inset() * 2.;
-                let distance = if start < offset {
-                    start - offset
-                } else {
-                    (end - offset - placement.height).max(px(0.))
-                };
-                self.scroll_field(&placement, distance, cx);
-            }
+                (end - offset - placement.height).max(px(0.))
+            };
+            self.scroll_field(&placement, distance, cx);
         } else {
             self.scroll.scroll_to_item(index);
         }
@@ -176,6 +193,7 @@ impl DropdownState {
             key.key.as_str()
         };
         let action = navigation(
+            self.open,
             self.highlighted,
             checked,
             count,
@@ -184,6 +202,7 @@ impl DropdownState {
         )?;
         let mut activate = None;
         match action {
+            MenuAction::Open => self.open(checked, count, window, cx),
             MenuAction::Highlight(index) => {
                 self.focus_item(index, count, window, cx);
             }
@@ -218,6 +237,7 @@ impl DropdownState {
 
 #[derive(Debug, PartialEq, Eq)]
 enum MenuAction {
+    Open,
     Highlight(usize),
     Activate(usize),
     Dismiss,
@@ -225,6 +245,7 @@ enum MenuAction {
 }
 
 fn navigation(
+    open: bool,
     current: Option<usize>,
     checked: Option<usize>,
     count: usize,
@@ -238,11 +259,12 @@ fn navigation(
     let last = count.checked_sub(1)?;
     let current = current.map(|i| i.min(last));
     Some(match (current, key) {
-        (None, "down" | "enter" | "space") if !held => Highlight(checked.unwrap_or(0)),
+        (None, "enter" | "space") if !held => Open,
+        (None, "down") if !held => Highlight(checked.unwrap_or(0)),
         (None, "up") => Highlight(checked.unwrap_or(last)),
-        (Some(_), "home") => Highlight(0),
-        (Some(_), "end") => Highlight(last),
-        (Some(_), "escape") => Dismiss,
+        (_, "home") if open => Highlight(0),
+        (_, "end") if open => Highlight(last),
+        (_, "escape") if open => Dismiss,
         (Some(i), "down") => Highlight((i + 1) % count),
         (Some(i), "up") => Highlight(if i == 0 { last } else { i - 1 }),
         (Some(i), "enter" | "space") if !held => Activate(i),
@@ -293,7 +315,7 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
                     if open {
                         menu.dismiss(cx);
                     } else {
-                        menu.focus_item(checked.unwrap_or(0), count, window, cx);
+                        menu.open(checked, count, window, cx);
                     }
                     #[cfg(target_os = "android")]
                     menu.focus.focus(window, cx);
@@ -356,8 +378,8 @@ impl DropdownContent {
         self
     }
 
-    pub(super) fn checked_index(&self) -> usize {
-        self.checked.unwrap_or(0)
+    pub(super) fn checked_index(&self) -> Option<usize> {
+        self.checked
     }
 
     pub(super) fn with_parent(self, title: &'static str, state: &Entity<DropdownState>) -> Self {
@@ -393,7 +415,7 @@ impl DropdownContent {
     fn popup(
         self,
         state: &Entity<DropdownState>,
-        highlighted: usize,
+        highlighted: Option<usize>,
         layout: DropdownLayout,
         window: &Window,
         cx: &App,
@@ -452,7 +474,7 @@ impl DropdownContent {
             let hover = state.clone();
             let select = state.clone();
             let row = ui
-                .menu_item(item.id, item.label, index == highlighted)
+                .menu_item(item.id, item.label, Some(index) == highlighted)
                 .when(layout == DropdownLayout::Filters, |row| {
                     row.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 })
@@ -576,6 +598,32 @@ pub struct Dropdown<T: InteractiveElement + IntoElement + 'static> {
     layout: DropdownLayout,
 }
 
+impl Ui {
+    pub fn actions_menu(
+        self,
+        id: impl Into<ElementId>,
+        label: SharedString,
+        state: &Entity<DropdownState>,
+        content: DropdownContent,
+        cx: &App,
+    ) -> Dropdown<Button> {
+        let open = state.read(cx).is_open();
+        let trigger = self
+            .icon_button(ButtonVariant::Ghost, id, Icon::Ellipsis, label.clone())
+            .pressed(open);
+        #[cfg(target_os = "android")]
+        let trigger = trigger.role(Role::Button).aria_label(label).aria_expanded(open);
+        Dropdown::new(state, DropdownTrigger::new(trigger), content)
+    }
+}
+
+impl Dropdown<Button> {
+    pub fn circular_trigger(mut self) -> Self {
+        self.trigger.0 = self.trigger.0.circular();
+        self
+    }
+}
+
 impl<T: InteractiveElement + IntoElement> Dropdown<T> {
     pub fn new(
         state: &Entity<DropdownState>,
@@ -662,7 +710,7 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
                 layout == DropdownLayout::Filters,
                 cx,
             ))
-            .when_some(selected, |root, i| {
+            .when(state.read(cx).is_open(), |root| {
                 root.child(
                     div()
                         .absolute()
@@ -671,7 +719,7 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
                         .when(matches!(layout, DropdownLayout::Start | DropdownLayout::Field), |anchor| anchor.left_0())
                         .when(matches!(layout, DropdownLayout::End | DropdownLayout::Filters), |anchor| anchor.right_0())
                         .size(px(0.))
-                        .child(content.popup(&state, i, layout, window, cx)),
+                        .child(content.popup(&state, selected, layout, window, cx)),
                 )
             })
     }
@@ -733,44 +781,51 @@ mod form_controls {
     #[test]
     fn select_opens_at_the_committed_value_and_only_activates_on_confirmation() {
         assert_eq!(
-            navigation(None, Some(1), 3, "down", false),
+            navigation(false, None, Some(1), 3, "down", false),
             Some(Highlight(1))
         );
         assert_eq!(
-            navigation(Some(1), Some(1), 3, "down", false),
+            navigation(true, Some(1), Some(1), 3, "down", false),
             Some(Highlight(2))
         );
         assert_eq!(
-            navigation(Some(2), Some(1), 3, "escape", false),
+            navigation(true, Some(2), Some(1), 3, "escape", false),
             Some(Dismiss)
         );
         assert_eq!(
-            navigation(None, Some(1), 3, "up", false),
+            navigation(false, None, Some(1), 3, "up", false),
             Some(Highlight(1))
         );
         assert_eq!(
-            navigation(Some(2), Some(1), 3, "enter", false),
+            navigation(true, Some(2), Some(1), 3, "enter", false),
             Some(Activate(2))
         );
-        assert_eq!(navigation(Some(2), Some(1), 3, "enter", true), None);
+        assert_eq!(navigation(true, Some(2), Some(1), 3, "enter", true), None);
+    }
+
+    #[test]
+    fn an_open_action_menu_can_dismiss_without_a_highlight() {
+        assert_eq!(navigation(false, None, None, 2, "enter", false), Some(Open));
+        assert_eq!(navigation(true, None, None, 2, "escape", false), Some(Dismiss));
+        assert_eq!(navigation(true, None, None, 2, "down", false), Some(Highlight(0)));
     }
 
     #[test]
     fn action_menus_wrap_and_empty_or_shortened_lists_are_safe() {
-        assert_eq!(navigation(None, None, 3, "up", false), Some(Highlight(2)));
+        assert_eq!(navigation(false, None, None, 3, "up", false), Some(Highlight(2)));
         assert_eq!(
-            navigation(Some(2), None, 3, "down", false),
+            navigation(true, Some(2), None, 3, "down", false),
             Some(Highlight(0))
         );
         assert_eq!(
-            navigation(Some(0), None, 3, "up", false),
+            navigation(true, Some(0), None, 3, "up", false),
             Some(Highlight(2))
         );
         assert_eq!(
-            navigation(Some(5), None, 2, "enter", false),
+            navigation(true, Some(5), None, 2, "enter", false),
             Some(Activate(1))
         );
-        assert_eq!(navigation(None, None, 0, "enter", false), None);
-        assert_eq!(navigation(None, None, 0, "tab", false), Some(Traverse));
+        assert_eq!(navigation(false, None, None, 0, "enter", false), None);
+        assert_eq!(navigation(false, None, None, 0, "tab", false), Some(Traverse));
     }
 }

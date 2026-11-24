@@ -10,8 +10,9 @@ use std::{
 use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table, TableLike, ser::ValueSerializer};
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct LocalSettings {
+    pub device_name: Option<String>,
     #[serde(default)]
     pub native: crate::Native,
     #[serde(default)]
@@ -27,11 +28,7 @@ pub fn read_local(path: &Path) -> Result<LocalSettings> {
             settings.gui.validate().map_err(anyhow::Error::msg)?;
             Ok(settings)
         }
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings {
-            native: Default::default(),
-            gui: Default::default(),
-            gateway: Default::default(),
-        }),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings::default()),
         Err(e) => Err(e.into()),
     }
 }
@@ -129,6 +126,29 @@ pub fn record_gateway_address(config: &Path, ipc: &Path) -> Result<()> {
 
 pub fn init(path: &Path) -> Result<()> {
     edit(path, true, |current| Ok(current.to_owned()))?;
+    Ok(())
+}
+
+pub fn edit_device_name(doc: &mut DocumentMut, name: Option<&str>) {
+    if let Some(name) = name {
+        let mut value = toml_edit::Value::from(name);
+        if let Some(old) = doc.get("device_name").and_then(Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        doc.insert("device_name", Item::Value(value));
+    } else {
+        doc.remove("device_name");
+    }
+}
+
+pub fn set_device_name(path: &Path, name: Option<&str>) -> Result<()> {
+    edit(path, true, |current| {
+        let mut doc: DocumentMut = current.parse()?;
+        edit_device_name(&mut doc, name);
+        let text = doc.to_string();
+        crate::parse(&text).map_err(anyhow::Error::msg)?;
+        Ok(text)
+    })?;
     Ok(())
 }
 
@@ -278,6 +298,27 @@ pub fn save_gateway(path: &Path, expected: &str, proposed: String) -> Result<Str
 mod network_tests {
     use super::*;
     use crate::NativeChange;
+
+    #[test]
+    fn offline_device_name_round_trips_without_rewriting_other_settings() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("node.toml");
+        assert_eq!(read_local(&path)?.device_name, None);
+        set_device_name(&path, Some("First name"))?;
+        assert_eq!(read_local(&path)?.device_name.as_deref(), Some("First name"));
+
+        let other_settings = "version = 1\n[gateway]\nstartup = 'manual' # keep this\n";
+        fs::write(&path, format!("device_name = 'Old' # display name\n{other_settings}"))?;
+        set_device_name(&path, Some("工作站"))?;
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.contains("# display name"));
+        assert_eq!(crate::parse(&saved).unwrap().device_name.as_deref(), Some("工作站"));
+        assert!(set_device_name(&path, Some("two\nlines")).is_err());
+        assert_eq!(fs::read_to_string(&path)?, saved);
+        set_device_name(&path, None)?;
+        assert_eq!(fs::read_to_string(&path)?, other_settings);
+        Ok(())
+    }
 
     #[test]
     fn native_edits_survive_gateway_writes_and_invalid_relay_input() -> Result<()> {

@@ -284,7 +284,7 @@ impl Mobile {
                             visible_height,
                         ]
                         .map(|v| (f32::from(v) * scale).round() as i32);
-                        view.set_touch_area(0, area, draft.clone());
+                        view.set_touch_area(0, area, draft.clone(), true);
                     }
                 })
             },

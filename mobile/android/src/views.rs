@@ -1,5 +1,5 @@
 use super::*;
-use paxri_ui::components::{ButtonVariant::Secondary, ListState, ListView};
+use paxri_ui::components::{ButtonVariant::Secondary, DeviceCounts, ListState, ListView};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use paxri_core::connection::{peer_state, unix_time_ms};
 use paxri_ui::connections::presence_detail;
@@ -56,10 +56,7 @@ impl Mobile {
                 self.peers[id].name.clone().into(),
                 None,
                 Some("Back to devices"),
-                Some(
-                    ui.connection_badge(self.presence.paths_for(id), true)
-                        .into_any_element(),
-                ),
+                Some(self.device_actions(id, ui, cx)),
             ),
             Page::ForwardEdit { owner, .. } => (
                 (if self.rule_form.existing.is_some() {
@@ -88,21 +85,24 @@ impl Mobile {
             Page::Terminal(id) => {
                 let id = *id;
                 let session = &self.sessions[&id];
-                let (title, subtitle) = session.labels(cx);
+                let (title, subtitle) = session.labels(self.presence.online(&session.peer), cx);
                 let action = match session.state {
-                    SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => Some(ui.end_session_button()),
+                    SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => {
+                        let menu = self.session_menu(&session.peer, session.key, title.clone(), true, cx);
+                        Some(ui.actions_menu("terminal-actions", "Terminal actions".into(), &self.page_menu, menu, cx)
+                            .circular_trigger().into_any_element())
+                    }
                     SessionState::Stopping => None,
                     SessionState::Ended(_) => Some(
                         ui.button(Ghost, "close-session", Icon::Close.draw(20.))
                             .circular()
                             .tooltip(paxri_ui::components::tooltip("Close session".into()))
                             .role(Role::Button)
-                            .aria_label("Close session"),
+                            .aria_label("Close session")
+                            .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)))
+                            .into_any_element(),
                     ),
-                }
-                .map(|button| button
-                    .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)))
-                    .into_any_element());
+                };
                 (
                     title,
                     Some(subtitle),
@@ -239,6 +239,19 @@ impl Mobile {
             )
     }
 
+    fn device_counts(&self, id: &str) -> DeviceCounts {
+        let peer = &self.peers[id];
+        let sessions = if !peer.supports_shell() {
+            Some(0)
+        } else if self.presence.online(id) && !self.session_list_errors.contains(id) {
+            self.hosted.get(id).map(Vec::len)
+        } else { None };
+        let forwards = if !peer.supports_forward_rules() { Some(0) }
+            else if self.presence.online(id) { self.forwards.count(id) }
+            else { None };
+        DeviceCounts { sessions, forwards }
+    }
+
     fn devices(&self, ui: Ui, cx: &Context<Self>) -> Div {
         let now = unix_time_ms();
         let filters = &self.device_filters;
@@ -278,6 +291,7 @@ impl Mobile {
                 peer.name.clone().into(),
                 self.presence.online(&id),
                 presence_detail(peer_state(self.presence.paths_for(&id), true), now, changed),
+                self.device_counts(&id),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate(Page::Peer(id.clone()), cx);
@@ -292,7 +306,7 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .when(!self.peers.is_empty(), |page| page.child(filters.controls(|v| &mut v.device_filters, cx).with_state(&self.filter_menu)))
+            .when(!self.peers.is_empty(), |page| page.child(filters.controls(|v| &mut v.device_filters, cx).with_state(&self.page_menu)))
             .when_some(notice, |page, state| page.child(state.render(ui)))
             .when(show_list, |page| page.child(
                 ListView::scrollable("paired-devices")
@@ -327,8 +341,28 @@ impl Mobile {
             ))
     }
 
+    fn device_actions(&self, id: &str, ui: Ui, cx: &Context<Self>) -> AnyElement {
+        let name = &self.peers[id].name;
+        let id = id.to_owned();
+        let view = cx.weak_entity();
+        ui.device_actions(name, &self.page_menu, cx,
+            move |_, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some(peer) = this.peers.get(&id)
+                        && let Err(error) = activity_action(&this.android, ActivityAction::ConfirmUnpair {
+                            id: &id, name: &peer.name, generation: peer.generation.as_deref().unwrap_or_default(),
+                        })
+                    {
+                        Toast::show(error, this.window, cx);
+                    }
+                });
+            },
+        ).into_any_element()
+    }
+
     fn peer(&self, id: &str, ui: Ui, cx: &Context<Self>) -> Div {
         let peer = &self.peers[id];
+        let counts = self.device_counts(id);
         let paths = self.presence.paths_for(id);
         let can_connect = self.presence.online(id) && peer.supports_shell();
         let body = div()
@@ -371,48 +405,23 @@ impl Mobile {
                     ),
             )
             .child(ui.separator())
-            .when_some(paths.filter(|p| !p.is_empty()), |page, paths| {
-                page.child(self.connection_history.connection_paths(id, paths, ui))
-                    .child(ui.separator())
-            })
-            .child(ui.navigation_row("device-sessions", Icon::Terminal.draw(18.), "Sessions".into(), "View sessions on this device")
+            .child(self.connection_history.connection_section(id, paths, true, ui))
+            .child(ui.separator())
+            .child(ui.counted_navigation_row("device-sessions", Icon::Terminal, "Sessions", counts.sessions)
                 .on_click(cx.listener({
                     let id = id.to_owned();
                     move |this, _, _, cx| this.show_sessions(Some(id.clone()), cx)
                 })))
-            .child(ui.separator())
             .when(peer.supports_forward_rules(), |page| {
                 let id = id.to_owned();
-                page.child(
-                    ui.navigation_row(
-                        "device-forwards",
-                        Icon::Forward.draw(18.),
-                        "Port forwarding".into(),
-                        "View forwarding rules",
-                    )
+                page.child(ui.separator()).child(
+                    ui.counted_navigation_row("device-forwards", Icon::Forward, "Port forwarding", counts.forwards)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.navigate(Page::Forwards(Some(id.clone())), cx);
                         cx.notify();
                     })),
                 )
-            })
-            .child(div().flex().justify_end().child(
-                ui.button(Ghost, "unpair-device", "Unpair device")
-                    .role(Role::Button)
-                    .aria_label("Unpair device")
-                    .on_click(cx.listener({
-                        let id = id.to_owned();
-                        move |this, _, _, cx| {
-                            if let Some(peer) = this.peers.get(&id)
-                                && let Err(error) = activity_action(&this.android, ActivityAction::ConfirmUnpair {
-                                    id: &id, name: &peer.name, generation: peer.generation.as_deref().unwrap_or_default(),
-                                })
-                            {
-                                Toast::show(error, this.window, cx);
-                            }
-                        }
-                    })),
-            ));
+            });
         div()
             .relative()
             .flex()
@@ -457,8 +466,9 @@ impl Mobile {
                     px(toolbar),
                 ]
                 .map(|v| (f32::from(v) * scale).round() as i32);
-                sizing.update(cx, |this, _| {
-                    this.set_touch_area(id, area, this.keybar.clone());
+                sizing.update(cx, |this, cx| {
+                    let touchable = !this.page_menu.read(cx).is_open();
+                    this.set_touch_area(id, area, this.keybar.clone(), touchable);
                     if let Some(s) = this.sessions.get_mut(&id) {
                         let grid = GridSize::from_viewport(bounds.size, s.screen.font.cell);
                         if s.screen.resize(grid) {
@@ -472,6 +482,13 @@ impl Mobile {
                             if activity_action(&this.android, ActivityAction::SelectionHandles(id, handles)).is_ok() {
                                 this.selection_handles = Some((id, handles));
                             }
+                        }
+                        // The IME binds to the session registered by set_touch_area above.
+                        if this.keyboard_on_entry == Some(id) && s.connected() && touchable
+                            && !this.drawer.open && *ACTIVITY_VISIBLE.borrow()
+                        {
+                            this.keyboard_on_entry = None;
+                            this.show_terminal_keyboard(id);
                         }
                     }
                 })
@@ -596,7 +613,7 @@ impl Render for Mobile {
                         Page::Forwards(_) => self
                             .forward_list(ui, window, cx)
                             .into_any_element(),
-                        Page::Sessions(_) => self.sessions_page(ui, cx).into_any_element(),
+                        Page::Sessions(_) => self.sessions_page(ui, window, cx).into_any_element(),
                         Page::Peer(id) => self.peer(&id, ui, cx).into_any_element(),
                         Page::Terminal(id) => self.terminal(id, window, cx).into_any_element(),
                     })

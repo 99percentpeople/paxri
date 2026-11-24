@@ -21,6 +21,39 @@ struct RuleForm {
 }
 
 impl Dashboard {
+    pub(crate) fn refresh_forward_directory(&mut self, cx: &mut Context<Self>) {
+        let Some(status) = &self.status else { return };
+        if self.listing_forwards { return; }
+        self.listing_forwards = true;
+        let gateway = status.device_id.clone();
+        let ipc = status.ipc_path.clone();
+        let peers = status.peers.clone();
+        let path = self.active_address().unwrap_or_else(paxri_control::default_address);
+        let job = self.runtime.spawn(async move {
+            paxri_control::request(&path, Command::ListForwards).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.map_err(anyhow::Error::from).and_then(|s| s);
+            let _ = this.update(cx, |v, cx| {
+                v.listing_forwards = false;
+                let Some(current) = &mut v.status else { return };
+                if current.device_id != gateway || current.ipc_path != ipc || current.peers != peers { return; }
+                match result {
+                    Ok(snapshot) if snapshot.device_id == gateway && snapshot.peers == peers => {
+                        current.peer_forwards = snapshot.peer_forwards;
+                    }
+                    Err(e) => {
+                        let mut directory = paxri_control::ForwardDirectory::default();
+                        directory.errors.insert("Gateway".into(), format!("{e:#}"));
+                        current.peer_forwards = Some(directory);
+                    }
+                    _ => return,
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     pub(super) fn open_rule(
         &mut self,
         owner: Option<&str>,

@@ -57,7 +57,7 @@ enum RequestResult {
     Peer(paxri_control::PeerStatus),
     OfflineGui(theme::GuiSettings),
     OfflineNative(Native),
-    Stopped(Startup, Option<Native>),
+    Stopped(Option<paxri_config::file::LocalSettings>),
 }
 
 enum GatewayOffline {
@@ -68,8 +68,10 @@ enum GatewayOffline {
 struct Dashboard {
     presence_watch: Option<(PathBuf, Task<()>)>,
     refresh_presence: bool,
+    listing_forwards: bool,
     connection_history: ConnectionHistory,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
+    session_titles: paxri_ui::terminal::title::SessionTitles,
     home_scroll: ScrollHandle,
     devices_pane: Option<pages::DevicesPane>,
     forward_filters: pages::ForwardFilters,
@@ -102,6 +104,15 @@ struct Dashboard {
 }
 
 impl Dashboard {
+    fn sync_device_name(&mut self, name: Option<&str>, fallback: &str, cx: &mut Context<Self>) {
+        self.name_field.set_placeholder(fallback, cx);
+        self.name_field.sync(name.unwrap_or_default(), cx);
+        let display_name = name.unwrap_or(fallback);
+        if self.local_name.as_ref() != display_name {
+            self.local_name = display_name.to_owned().into();
+        }
+    }
+
     fn active_address(&self) -> Option<PathBuf> {
         self.status
             .as_ref()
@@ -239,11 +250,7 @@ impl Dashboard {
                     .as_deref()
                     .map(paxri_config::file::read_local)
                     .transpose()?;
-                let startup = local
-                    .as_ref()
-                    .map(|s| s.gateway.startup)
-                    .unwrap_or_default();
-                Ok(RequestResult::Stopped(startup, local.map(|s| s.native)))
+                Ok(RequestResult::Stopped(local))
             };
             let command = match command {
                 Operation::Api(Command::PeerStatus { peer, check }) => {
@@ -251,19 +258,12 @@ impl Dashboard {
                     return Ok(RequestResult::Peer(snapshot));
                 }
                 Operation::Api(Command::Status) => {
-                    let mut status = gateway::discover(selected.as_deref(), selected_config.as_deref()).await?;
-                    if show_forwards && let Some(current) = &mut status {
-                        let ipc = current.ipc_path.as_deref().unwrap_or(&path);
-                        match paxri_control::request(ipc, Command::ListForwards).await {
-                            Ok(list) => *current = list,
-                            Err(error) => {
-                                let mut directory = paxri_control::ForwardDirectory::default();
-                                directory.errors.insert("Gateway".into(), format!("{error:#}"));
-                                current.peer_forwards = Some(directory);
-                            }
-                        }
-                    }
-                    return state(status);
+                    return state(gateway::discover(selected.as_deref(), selected_config.as_deref()).await?);
+                }
+                Operation::Api(Command::SetDeviceName { name }) => {
+                    return state(gateway::set_device_name(
+                        selected.as_deref(), offline_path.as_deref(), name,
+                    ).await?);
                 }
                 Operation::Api(command) => command,
                 Operation::Open => {
@@ -329,11 +329,13 @@ impl Dashboard {
                         }
                     }
                     Err(_) if metrics => {}
-                    Ok(RequestResult::Stopped(startup, native)) => {
+                    Ok(RequestResult::Stopped(local)) => {
                         view.presence_watch = None;
-                        view.profile_native = native;
+                        let name = local.as_ref().and_then(|s| s.device_name.as_deref());
+                        view.sync_device_name(name, &gethostname::gethostname().to_string_lossy(), cx);
+                        view.startup = local.as_ref().map(|s| s.gateway.startup).unwrap_or_default();
+                        view.profile_native = local.map(|s| s.native);
                         view.status = None;
-                        view.startup = startup;
                         view.offline = Some(GatewayOffline::Stopped);
                     }
                     Ok(RequestResult::OfflineNative(settings)) => {
@@ -346,13 +348,10 @@ impl Dashboard {
                         theme::apply(settings, cx);
                     }
                     Ok(RequestResult::Gateway(mut status, legacy)) => {
-                        if show_forwards && changing {
-                            view.refresh_presence = true;
-                            if let Some(old) = &mut view.status
-                                && old.device_id == status.device_id && old.peers == status.peers
-                            {
-                                status.peer_forwards = old.peer_forwards.take();
-                            }
+                        if status.peer_forwards.is_none() && let Some(old) = &mut view.status
+                            && old.device_id == status.device_id && old.ipc_path == status.ipc_path && old.peers == status.peers
+                        {
+                            status.peer_forwards = old.peer_forwards.take();
                         }
                         if view.status.as_ref().is_none_or(|old| {
                             old.device_id != status.device_id || old.ipc_path != status.ipc_path
@@ -378,9 +377,6 @@ impl Dashboard {
                         }
                         view.reconcile_device_selection(&status);
                         view.profile_native = legacy;
-                        if view.local_name.as_ref() != status.display_name() {
-                            view.local_name = status.display_name().to_owned().into();
-                        }
                         if let Some(path) = &status.config_path
                             && view.config_path.as_ref() != Some(path)
                         {
@@ -392,9 +388,8 @@ impl Dashboard {
                             }
                         }
                         theme::apply(status.gui.clone(), cx);
-                        view.name_field.set_placeholder(&status.computer_name, cx);
-                        view.name_field
-                            .sync(status.device_name.as_deref().unwrap_or_default(), cx);
+                        let fallback = if status.computer_name.is_empty() { &status.device_id } else { &status.computer_name };
+                        view.sync_device_name(status.device_name.as_deref(), fallback, cx);
                         if joined {
                             view.pairing_input =
                                 Input::new("", "Paste the other device’s code", cx);
@@ -410,6 +405,9 @@ impl Dashboard {
                         }
                         view.startup = status.startup;
                         view.status = Some(*status);
+                        if show_forwards && changing {
+                            view.refresh_forward_directory(cx);
+                        }
                         view.offline = None;
                     }
                     Err(error) if changing && !opening => {
@@ -463,8 +461,13 @@ impl Dashboard {
         let mut view = Self {
             presence_watch: None,
             refresh_presence: false,
+            listing_forwards: false,
             connection_history: Default::default(),
             terminal_sessions: BTreeMap::new(),
+            session_titles: paxri_ui::terminal::title::SessionTitles::open(
+                paxri_config::file::user_config().or_else(|| config_path.clone())
+                    .map(|path| path.with_file_name("session-titles.json")),
+            ),
             home_scroll: ScrollHandle::new(),
             devices_pane: None,
             forward_filters: pages::ForwardFilters::new(cx),
@@ -507,13 +510,16 @@ impl Dashboard {
         );
         cx.spawn(async move |this, cx| {
             // Every third tick already supplies connection metrics for all peers.
-            for tick in (1..=3).cycle() {
+            for tick in (0..9).cycle() {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 if this
                     .update(cx, |view, cx| {
-                        if tick == 3 {
+                        if tick % 3 == 0 {
                             if Workspace::shows_devices(&cx.entity(), cx) {
-                                view.refresh_hosted_sessions(cx);
+                                view.refresh_hosted_sessions(tick == 0, cx);
+                                if tick == 0 || view.devices_pane == Some(pages::DevicesPane::Forwards) {
+                                    view.refresh_forward_directory(cx);
+                                }
                             }
                             if view.busy {
                                 view.refresh_presence = true;

@@ -89,7 +89,7 @@ impl FilterToolbar {
                         .child(field.value),
                 )
                 .child(Icon::ChevronRight.draw(14.));
-            let selected = field.choices.checked_index() + 1;
+            let selected = field.choices.checked_index().map(|i| i + 1);
             let parent = state.clone();
             menu = menu.item(field.title, row, move |_, cx| {
                 parent.update(cx, |menu, cx| menu.enter(index, selected, cx));

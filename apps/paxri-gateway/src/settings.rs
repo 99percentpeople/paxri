@@ -151,12 +151,7 @@ impl SettingsFile {
     pub fn prepare(&self, change: &Command) -> Result<(String, Config)> {
         let mut doc: DocumentMut = self.text.parse()?;
         match change {
-            Command::SetDeviceName { name } => match name {
-                Some(name) => doc["device_name"] = value(name.as_str()),
-                None => {
-                    doc.remove("device_name");
-                }
-            },
+            Command::SetDeviceName { name } => paxri_config::file::edit_device_name(&mut doc, name.as_deref()),
             Command::SaveForward {
                 name,
                 edit,

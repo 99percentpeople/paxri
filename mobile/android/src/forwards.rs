@@ -11,6 +11,7 @@ use paxri_ui::settings::{SettingsGroup, SettingsSection, SettingsTable};
 #[derive(Default)]
 struct Entry {
     request: Option<(u64, tokio::task::JoinHandle<()>)>,
+    checked: Option<std::time::Instant>,
     rules: Option<Rules>,
     error: Option<String>,
 }
@@ -31,6 +32,12 @@ pub(super) struct ForwardList {
 }
 
 impl ForwardList {
+    pub(super) fn count(&self, id: &str) -> Option<usize> {
+        let entry = self.entries.get(id)?;
+        if entry.error.is_some() { return None; }
+        entry.rules.as_ref().map(Rules::len)
+    }
+
     pub(super) fn invalidate(&mut self, owner: &str) {
         if let Some(entry) = self.entries.get_mut(owner) {
             if let Some((_, task)) = entry.request.take() {
@@ -52,6 +59,7 @@ impl ForwardList {
             return false;
         }
         entry.request.take();
+        entry.checked = Some(std::time::Instant::now());
         match result {
             Ok(rules) => {
                 entry.rules = Some(rules);
@@ -78,11 +86,13 @@ impl Mobile {
     }
 
     pub(super) fn sync_forwards(&mut self, refresh: bool) {
-        let Page::Forwards(_) = &self.page else {
-            self.forwards.entries.clear();
+        if !matches!(self.page, Page::Forwards(_)) {
             self.forwards.menus.clear();
+        }
+        if !matches!(self.page, Page::Devices | Page::Peer(_) | Page::Forwards(_)) {
+            self.forwards.entries.clear();
             return;
-        };
+        }
         let eligible = |id: &String, peer: &client::Peer| {
             peer.supports_forward_rules() && self.presence.online(id)
         };
@@ -91,12 +101,12 @@ impl Mobile {
             .retain(|id, _| self.peers.get(id).is_some_and(|p| eligible(id, p)));
         let Some(client) = &self.client else { return };
         for (id, peer) in &self.peers {
-            if !eligible(id, peer) {
+            if !eligible(id, peer) || matches!(&self.page, Page::Peer(selected) if selected != id) {
                 continue;
             }
             let entry = self.forwards.entries.entry(id.clone()).or_default();
             if entry.request.is_some()
-                || (!refresh && (entry.rules.is_some() || entry.error.is_some()))
+                || (!refresh && entry.checked.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(8)))
             {
                 continue;
             }
@@ -270,7 +280,7 @@ impl Mobile {
             .child(
                 filters
                     .toolbar(&options, |v| &mut v.forward_filters, cx)
-                    .with_state(&self.filter_menu),
+                    .with_state(&self.page_menu),
             )
             .child(body)
     }

@@ -547,10 +547,10 @@ impl Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::release_tab))
     }
 
-    fn active_panel(&self, ui: Ui, viewport: Pixels, cx: &mut Context<Self>) -> DockPanel {
-        let width = self.dock.read(cx).settings().page_width(viewport);
+    fn active_panel(&self, ui: Ui, window: &mut Window, cx: &mut Context<Self>) -> DockPanel {
+        let width = self.dock.read(cx).settings().page_width(window.viewport_size().width);
         match &self.active {
-            Page::Home => self.dashboard.update(cx, |d, cx| d.home(ui, width, cx)),
+            Page::Home => self.dashboard.update(cx, |d, cx| d.home(ui, width, window, cx)),
             Page::Settings => self.dashboard.update(cx, |d, cx| d.settings(ui, width, cx)),
             // A new Win32 window is still cloaked while its client size is
             // being set. Laying out the PTY here would resize the live session.
@@ -575,7 +575,7 @@ impl Render for Workspace {
         }
         let ui = Ui::new(window, cx);
         let tabs = self.tab_bar(ui, window, cx);
-        let panel = self.active_panel(ui, window.viewport_size().width, cx);
+        let panel = self.active_panel(ui, window, cx);
         let dock = DockLayout::new("paxri", tabs, panel, self.titlebar_actions(ui, cx));
         let sessions_visible = self.active == Page::Home && self.dashboard.read(cx).devices_pane == Some(pages::DevicesPane::Sessions);
         let dock = dock

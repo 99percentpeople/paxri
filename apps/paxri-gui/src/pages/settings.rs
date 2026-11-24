@@ -209,9 +209,7 @@ impl Dashboard {
     ) -> (Option<SettingsTable>, Vec<SettingsGroup>) {
         type Builder<'a> = Box<dyn FnOnce() -> SettingsGroup + 'a>;
         let mut sources: Vec<(SettingsSection, Builder<'_>)> = Vec::new();
-        if self.status.is_some() {
-            sources.push((catalog::DEVICE, Box::new(move || self.device_settings())));
-        }
+        sources.push((catalog::DEVICE, Box::new(move || self.device_settings(ui))));
         sources.push((
             catalog::GATEWAY,
             Box::new(move || self.gateway_settings(ui, cx)),
@@ -265,9 +263,7 @@ impl Dashboard {
     }
 
     pub(crate) fn commit_device_name(&mut self, cx: &mut Context<Self>) {
-        if self.status.is_some()
-            && let Some(name) = self.name_field.changed_value(cx)
-        {
+        if let Some(name) = self.name_field.changed_value(cx) {
             self.send(
                 Command::SetDeviceName {
                     name: (!name.is_empty()).then_some(name),
@@ -277,7 +273,12 @@ impl Dashboard {
         }
     }
 
-    fn device_settings(&self) -> SettingsGroup {
-        SettingsGroup::device(self.name_field.render())
+    fn device_settings(&self, ui: Ui) -> SettingsGroup {
+        let field = if self.status.is_some() || self.config_path.is_some() {
+            self.name_field.render()
+        } else {
+            ui.muted("Connect to the gateway or select its node TOML with --config.")
+        };
+        SettingsGroup::device(field)
     }
 }

@@ -284,14 +284,6 @@ impl RenderOnce for RuleMenu {
             .state
             .unwrap_or_else(|| DropdownState::local(self.id.clone().into(), window, cx));
         let label = SharedString::from(format!("Actions for {}", self.name));
-        let trigger = ui
-            .icon_button(ButtonVariant::Ghost, self.id, Icon::Ellipsis, label.clone())
-            .pressed(state.read(cx).is_open());
-        #[cfg(target_os = "android")]
-        let trigger = trigger
-            .role(Role::Button)
-            .aria_label(label)
-            .aria_expanded(state.read(cx).is_open());
-        Dropdown::new(&state, DropdownTrigger::new(trigger), self.content)
+        ui.actions_menu(self.id, label, &state, self.content, cx)
     }
 }

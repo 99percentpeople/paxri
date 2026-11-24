@@ -6,6 +6,7 @@ pub struct ListItem {
     body: Div,
     detail: Option<SharedString>,
     detail_icon: Option<AnyElement>,
+    below_detail: Option<AnyElement>,
     leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
 }
@@ -36,6 +37,7 @@ impl ListItem {
                 .child(content),
             detail: None,
             detail_icon: None,
+            below_detail: None,
             leading: None,
             trailing: None,
         }
@@ -53,6 +55,11 @@ impl ListItem {
 
     pub fn detail_icon(mut self, icon: impl IntoElement) -> Self {
         self.detail_icon = Some(icon.into_any_element());
+        self
+    }
+
+    pub fn below_detail(mut self, content: impl IntoElement) -> Self {
+        self.below_detail = Some(content.into_any_element());
         self
     }
 
@@ -128,7 +135,7 @@ impl RenderOnce for ListItem {
             .gap(SPACE_2)
             .py(SPACE_2)
             .children(self.leading.map(slot))
-            .child(body)
+            .child(body.children(self.below_detail))
             .children(self.trailing.map(slot))
     }
 }

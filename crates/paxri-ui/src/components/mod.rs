@@ -3,6 +3,7 @@ pub mod caret;
 mod controls;
 pub mod directory;
 mod dropdown;
+pub use devices::DeviceCounts;
 mod filter_toolbar;
 pub use filter_toolbar::FilterToolbar;
 mod select;

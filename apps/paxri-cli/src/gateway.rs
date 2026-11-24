@@ -155,6 +155,40 @@ fn launcher_lock(config: &Path) -> Result<File> {
     Ok(lock)
 }
 
+async fn lock_launcher(config: Option<&Path>) -> Result<File> {
+    let path = profile(file::user_config().or_else(|| config.map(Path::to_owned)))?;
+    tokio::task::spawn_blocking(move || launcher_lock(&path)).await?
+}
+
+pub async fn set_device_name(
+    ipc: Option<&Path>,
+    config: Option<&Path>,
+    name: Option<String>,
+) -> Result<Option<Status>> {
+    let rename = |status: Status| {
+        let command = paxri_control::Command::SetDeviceName { name: name.clone() };
+        async move {
+            let address = status.ipc_path.context("Missing gateway IPC address")?;
+            paxri_control::request(&address, command).await.map(Some)
+        }
+    };
+    if let Some(active) = discover(ipc, config).await? {
+        match rename(active).await {
+            Err(err) if paxri_control::is_offline(&err) => {}
+            result => return result,
+        }
+    }
+    let path = config.context("Use --config to select this offline gateway's node TOML")?;
+    // A concurrent desktop or CLI start must read the new name or receive the live rename.
+    let _lock = lock_launcher(Some(path)).await?;
+    if let Some(active) = discover(ipc, Some(path)).await? {
+        return rename(active).await;
+    }
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || file::set_device_name(&path, name.as_deref())).await??;
+    Ok(None)
+}
+
 fn launch(config: &Path, ipc: &Path) -> Result<(Child, PathBuf)> {
     let exe = gateway_exe()?;
     prepare_dir(config)?;
@@ -284,8 +318,7 @@ pub async fn apply(
         return discover(ipc, config.as_deref()).await;
     }
     // Serialize local mutations across independent GUI/CLI processes, including first launch.
-    let lock_path = profile(file::user_config().or_else(|| config.clone()))?;
-    let _lock = tokio::task::spawn_blocking(move || launcher_lock(&lock_path)).await??;
+    let _lock = lock_launcher(config.as_deref()).await?;
     let current = discover(ipc, config.as_deref()).await?;
     let preferred = ipc
         .map(Path::to_owned)

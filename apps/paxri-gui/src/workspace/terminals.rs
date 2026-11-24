@@ -1,27 +1,136 @@
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use terminal::Terminal;
 use paxri_ui::components::directory::{SessionLocation, session_entries};
 
 #[derive(Default)]
 pub(crate) struct PeerSessions {
+    pub(crate) title_scope: String,
     last_number: usize,
     pub(crate) hosted: Vec<SessionKey>,
     pub(crate) listing: bool,
     pub(crate) list_failed: bool,
     pub(crate) listed: bool,
+    pub(crate) list_revision: u64,
+    ending: BTreeSet<SessionKey>,
     open: BTreeMap<SessionKey, WeakEntity<Terminal>>,
 }
 
+impl PeerSessions {
+    pub(crate) fn new(gateway: &str, peer_id: &str) -> Self {
+        Self { title_scope: format!("{gateway}/{peer_id}"), ..Self::default() }
+    }
+
+    pub(crate) fn has_live_view(&self, key: SessionKey, cx: &App) -> bool {
+        self.open.get(&key).and_then(WeakEntity::upgrade).is_some_and(|v| v.read(cx).is_running())
+    }
+
+    fn remove_hosted(&mut self, key: SessionKey) {
+        self.hosted.retain(|k| *k != key);
+        self.list_revision += 1;
+    }
+}
+
 impl Dashboard {
-    fn assign_terminal_defaults(&self, cx: &mut App) {
+    pub(crate) fn end_listed_session(
+        &mut self,
+        peer: &SharedString,
+        key: SessionKey,
+        w: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self
+            .active_address()
+            .unwrap_or_else(paxri_control::default_address);
+        let Some(status) = &self.status else { return };
+        let Some(id) = status.peers.get(peer.as_ref()).cloned() else {
+            return;
+        };
+        let Some(sessions) = self.terminal_sessions.get_mut(peer) else {
+            return;
+        };
+        if let Some(view) = sessions.open.get(&key).and_then(WeakEntity::upgrade)
+            && view.read(cx).is_running()
+        {
+            view.update(cx, |terminal, _| terminal.end());
+            return;
+        }
+        if !sessions.hosted.contains(&key) || !sessions.ending.insert(key) {
+            return;
+        }
+        let gateway = status.device_id.clone();
+        let ipc = status.ipc_path.clone();
+        let peer = peer.clone();
+        let window = w.window_handle();
+        let job = self.runtime.spawn({
+            let id = id.clone();
+            async move {
+                paxri_control::managed_terminal(
+                    &path,
+                    id,
+                    paxri_control::terminal::managed::Request::End(key),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |view, cx| {
+                if !view.status.as_ref().is_some_and(|s| {
+                    s.device_id == gateway
+                        && s.ipc_path == ipc
+                        && s.peers.get(peer.as_ref()) == Some(&id)
+                }) {
+                    return;
+                }
+                if let Some(sessions) = view.terminal_sessions.get_mut(&peer) {
+                    sessions.ending.remove(&key);
+                    match result {
+                        Ok(()) => {
+                            sessions.remove_hosted(key);
+                            if let Err(e) = view.session_titles.retain(&sessions.title_scope, |k| k != key) {
+                                eprintln!("Removing session title: {e}");
+                            }
+                        }
+                        Err(error) => crate::components::Toast::show(
+                            format!("Couldn’t end session: {error}"),
+                            window,
+                            cx,
+                        ),
+                    }
+                }
+                view.refresh_hosted_sessions(false, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn assign_terminal_defaults(&mut self, cx: &mut App) {
         let mut titles = Vec::new();
+        let mut reserved = Vec::new();
         for (peer, sessions) in &self.terminal_sessions {
+            for (key, title) in self.session_titles.entries(&sessions.title_scope) {
+                if !sessions.open.get(key).is_some_and(|v| v.upgrade().is_some()) {
+                    reserved.push(title.label(peer));
+                }
+            }
             for view in sessions.open.values().filter_map(WeakEntity::upgrade) {
                 titles.push((peer.clone(), view.read(cx).title.clone()));
             }
         }
-        terminal::TabTitle::assign_defaults(&titles, cx);
+        terminal::TabTitle::assign_with_reserved(&titles, reserved, cx);
+        for sessions in self.terminal_sessions.values() {
+            for (key, weak) in &sessions.open {
+                if let Some(view) = weak.upgrade() {
+                    let view = view.read(cx);
+                    if view.is_running() && let Err(e) = self.session_titles.set(&sessions.title_scope, *key, view.title.read(cx)) {
+                        eprintln!("Saving session title: {e}");
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn open_sessions(
@@ -40,7 +149,12 @@ impl Dashboard {
             Some((key, view.title.read(cx).label(&name), view.is_running(), ()))
         });
         session_entries(name.clone(), hosted, local).into_iter()
-            .map(|(key, (title, state, _))| (key, title, state)).collect()
+            .map(|(key, (title, state, local))| {
+                let title = if local.is_none() {
+                    self.session_titles.get(&sessions.title_scope, key).map(|t| t.label(&name)).unwrap_or(title)
+                } else { title };
+                (key, title, state)
+            }).collect()
     }
 
     fn register_terminal(
@@ -50,11 +164,17 @@ impl Dashboard {
         view: &Entity<Terminal>,
         cx: &mut Context<Self>,
     ) {
-        let sessions = self.terminal_sessions.entry(peer.clone()).or_default();
+        let Some(status) = &self.status else { return };
+        let Some(peer_id) = status.peers.get(peer.as_ref()) else { return };
+        let sessions = self.terminal_sessions.entry(peer.clone()).or_insert_with(|| PeerSessions::new(&status.device_id, peer_id));
+        let title = view.read(cx).title.clone();
+        if let Some(saved) = self.session_titles.get(&sessions.title_scope, key) {
+            title.update(cx, |title, _| title.clone_from(saved));
+        }
         sessions.last_number = sessions.last_number.max(key.number);
+        sessions.list_revision += 1;
         sessions.open.insert(key, view.downgrade());
         self.assign_terminal_defaults(cx);
-        let title = view.read(cx).title.clone();
         cx.observe(&title, |d, _, cx| {
             d.assign_terminal_defaults(cx);
             cx.notify();
@@ -62,8 +182,9 @@ impl Dashboard {
         .detach();
         let id = view.entity_id();
         // Closing a native window also releases its tabs.
-        cx.observe_release(view, move |d, _, cx| {
-            d.unregister_terminal(&peer, key, id, cx)
+        cx.observe_release(view, move |d, terminal, cx| {
+            d.unregister_terminal(&peer, key, id, terminal, cx);
+            cx.notify();
         })
         .detach();
         cx.notify();
@@ -74,7 +195,8 @@ impl Dashboard {
         peer: &str,
         key: SessionKey,
         id: EntityId,
-        cx: &mut Context<Self>,
+        terminal: &Terminal,
+        cx: &App,
     ) {
         if let Some(sessions) = self.terminal_sessions.get_mut(peer)
             && sessions
@@ -82,8 +204,15 @@ impl Dashboard {
                 .get(&key)
                 .is_some_and(|view| view.entity_id() == id)
         {
+            if terminal.has_exited() {
+                sessions.remove_hosted(key);
+                if let Err(e) = self.session_titles.retain(&sessions.title_scope, |k| k != key) {
+                    eprintln!("Removing session title: {e}");
+                }
+            } else if terminal.is_running() && let Err(e) = self.session_titles.set(&sessions.title_scope, key, terminal.title.read(cx)) {
+                eprintln!("Saving session title: {e}");
+            }
             sessions.open.remove(&key);
-            cx.notify();
         }
     }
 }
@@ -162,7 +291,8 @@ impl Workspace {
         } = page
         {
             self.dashboard.update(cx, |d, cx| {
-                d.unregister_terminal(peer, *key, view.entity_id(), cx)
+                d.unregister_terminal(peer, *key, view.entity_id(), view.read(cx), cx);
+                cx.notify();
             });
         }
     }

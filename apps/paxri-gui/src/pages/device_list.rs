@@ -40,6 +40,7 @@ impl Dashboard {
                         SharedString::from(display_name.to_owned()),
                         status.peer_online(name),
                         detail,
+                        self.device_counts(name, status),
                     )
                     .pressed(selected)
                     .on_click(cx.listener(move |v, _, _, cx| {

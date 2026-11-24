@@ -26,7 +26,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::Update;
+use crate::{AttachmentId, Update};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -71,15 +71,14 @@ impl Presence {
 #[derive(Clone, Default, PartialEq)]
 struct ViewedPage {
     peer: Option<String>,
-    sessions: bool,
-    terminal: Option<u64>,
+    list_interval: Option<Duration>,
 }
 
 pub struct Client {
     viewed_peer: watch::Sender<ViewedPage>,
     transport: Arc<NativeTransport>,
     presence: tokio::task::JoinHandle<()>,
-    _router: iroh::protocol::Router,
+    router: iroh::protocol::Router,
     devices: Mutex<SavedDevices>,
     file: PathBuf,
 }
@@ -169,7 +168,7 @@ impl Client {
             viewed_peer,
             transport,
             presence,
-            _router: router,
+            router,
             devices: Mutex::new(devices),
             file,
         });
@@ -290,11 +289,15 @@ impl Client {
         Ok(client)
     }
 
-    pub fn watch_peer(&self, id: Option<&str>, sessions: bool, terminal: Option<u64>) {
+    pub async fn refresh_network(&self) {
+        self.router.endpoint().network_change().await;
+        self.transport.refresh_presence();
+    }
+
+    pub fn watch_peer(&self, id: Option<&str>, list_interval: Option<Duration>) {
         let page = ViewedPage {
             peer: id.map(str::to_owned),
-            sessions,
-            terminal,
+            list_interval,
         };
         self.viewed_peer.send_if_modified(|current| {
             if *current == page {
@@ -356,7 +359,7 @@ impl Client {
                 if page.peer.as_deref().is_some_and(|id| snapshot.online(id)) {
                     interval = Duration::from_secs(1);
                 }
-                if page.sessions { interval = Duration::from_secs(3); }
+                if let Some(list_interval) = page.list_interval { interval = list_interval; }
                 if updates.send(Update::Presence(snapshot)).await.is_err() {
                     break;
                 }
@@ -365,10 +368,7 @@ impl Client {
                 result = changes.changed() => if result.is_err() { break; },
                 result = config.changed() => if result.is_err() { break; },
                 result = viewed.changed() => if result.is_err() { break; },
-                result = foreground.changed() => {
-                    if result.is_err() { break; }
-                    if *foreground.borrow() { transport.refresh_presence(); }
-                }
+                result = foreground.changed() => if result.is_err() { break; },
                 _ = tokio::time::sleep(interval), if visible => {}
             }
         }
@@ -536,33 +536,54 @@ impl Client {
         peer: String,
         action: paxri_terminal::managed::Request,
         out: Sender<Update>,
-        id: u64,
+        id: AttachmentId,
     ) -> (mpsc::UnboundedSender<Frame>, tokio::task::JoinHandle<()>) {
         use paxri_terminal::managed::{Rejected, Request};
         let (input, keys) = mpsc::unbounded_channel();
         let job = rt.spawn(async move {
-            let connection = self.transport.online_session(&peer).ok();
-            let mut result = if matches!(action, Request::End(_)) {
-                self.manage_terminal(&peer, action).await.map(|_| 0)
-            } else {
-                self.terminal(&peer, action, keys, out.clone(), id).await
+            let mut changes = self.transport.subscribe_peer_changes();
+            let connection = match self.transport.online_session(&peer) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let _ = out.send(Update::End(id, Err(error))).await;
+                    return;
+                }
+            };
+            let run = async {
+                if matches!(action, Request::End(_)) {
+                    paxri_terminal::managed::request(connection.clone(), action).await.map(|_| 0)
+                } else {
+                    self.terminal(&peer, connection.clone(), action, keys, out.clone(), id).await
+                }
+            };
+            // A replaced connection also invalidates an in-flight attach or history replay.
+            let replaced = async {
+                loop {
+                    changes.changed().await?;
+                    if !self.transport.online_session(&peer).is_ok_and(|s| s.same_connection(&connection)) {
+                        bail!("Terminal connection was replaced");
+                    }
+                }
+            };
+            let mut result = tokio::select! {
+                result = run => result,
+                result = replaced => result,
             };
             if result
                 .as_ref()
                 .is_err_and(|e| e.is::<tokio::time::error::Elapsed>())
-                && let Some(connection) = connection
             {
                 let client = self.clone();
                 let peer = peer.clone();
                 tokio::spawn(async move {
                     // A single stalled viewer should not tear down working port forwards.
                     // Only retire its connection if a separate gateway request also times out.
-                    if timeout(
+                    let probe = timeout(
                         Duration::from_secs(8),
                         paxri_terminal::managed::request(connection.clone(), Request::List),
                     )
-                    .await
-                    .is_err()
+                    .await;
+                    if probe.is_err()
                         && client
                             .transport
                             .online_session(&peer)
@@ -594,10 +615,11 @@ impl Client {
     async fn terminal(
         &self,
         id: &str,
+        session: gateway::NativeSession,
         action: paxri_terminal::managed::Request,
         input: mpsc::UnboundedReceiver<Frame>,
         out: Sender<Update>,
-        generation: u64,
+        attachment_id: AttachmentId,
     ) -> Result<u32> {
         ensure!(
             self.devices
@@ -609,9 +631,6 @@ impl Client {
             "This device does not host an interactive shell"
         );
         use paxri_terminal::managed::{self, AttachmentEvent, Request};
-        let mut visibility = crate::ACTIVITY_VISIBLE.subscribe();
-        let mut connections = self.transport.subscribe_peer_changes();
-        let session = self.transport.online_session(id)?;
         let heartbeat = self
             .transport
             .subscribe_device_info()
@@ -639,45 +658,19 @@ impl Client {
             check_hosted().await?;
         }
         if matches!(action, Request::Attach(..)) || !history.is_empty() {
-            out.send(Update::Output(generation, history, true)).await?;
+            out.send(Update::Output(attachment_id, history, true)).await?;
         }
 
         let out = &out;
         let attachment = managed::attachment(stream, input, heartbeat, |event| async move {
             out.send(match event {
-                AttachmentEvent::Ready => Update::Connected(generation),
-                AttachmentEvent::Output(bytes) => Update::Output(generation, bytes, false),
+                AttachmentEvent::Ready => Update::Connected(attachment_id),
+                AttachmentEvent::Output(bytes) => Update::Output(attachment_id, bytes, false),
             })
             .await?;
             Ok(())
         });
-        let mut viewed = self.viewed_peer.subscribe();
-        let lifecycle = async {
-            loop {
-                tokio::select! {
-                    changed = visibility.changed() => {
-                        changed?;
-                        if *visibility.borrow_and_update() {
-                            bail!("Reattaching terminal after returning to the foreground");
-                        }
-                    }
-                    changed = connections.changed() => {
-                        changed?;
-                        if !self.transport.online_session(id).is_ok_and(|live| live.same_connection(&session)) {
-                            bail!("Terminal connection was replaced");
-                        }
-                    }
-                    changed = viewed.changed() => {
-                        changed?;
-                        if viewed.borrow_and_update().terminal == Some(generation) {
-                            bail!("Reattaching the reopened terminal");
-                        }
-                    }
-                }
-            }
-        };
         // Existing gateways can still confirm a round trip on the same QUIC connection.
-        // Returning to the foreground always verifies a fresh attachment to the original PTY.
         let legacy_probe = async {
             if heartbeat {
                 return std::future::pending().await;
@@ -688,8 +681,6 @@ impl Client {
             }
         };
         tokio::select! {
-            biased;
-            result = lifecycle => result,
             result = attachment => result,
             result = legacy_probe => result,
         }

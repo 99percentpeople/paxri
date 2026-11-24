@@ -3,14 +3,35 @@ use crate::{
     Dashboard, Workspace,
     components::{
         Button,
-        ButtonVariant::{Destructive, Ghost},
+        ButtonVariant::Destructive,
         Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Ui,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, DevicePlatform, Status};
+use paxri_ui::components::{DeviceCounts, DropdownState};
 
 impl Dashboard {
+    pub(super) fn device_counts(&self, peer: &str, status: &Status) -> DeviceCounts {
+        let online = status.peer_online(peer);
+        let sessions = if !status.peer_platform(peer).supports_shell(status.peer_capabilities.get(peer).copied()) {
+            Some(0)
+        } else {
+            self.terminal_sessions.get(peer)
+                .filter(|s| online && s.listed && !s.list_failed)
+                .map(|s| s.hosted.len())
+        };
+        let local = status.forwards.values().filter(|f| f.peer == peer).count();
+        let forwards = if !status.peer_supports_forward_rules(peer) {
+            Some(local)
+        } else {
+            status.peer_forwards.as_ref().filter(|_| online)
+                .and_then(|d| d.rules.get(peer))
+                .map(|rules| local + rules.len())
+        };
+        DeviceCounts { sessions, forwards }
+    }
+
     pub(super) fn new_session(&self, peer: &str, ui: Ui) -> Button {
         let peer = SharedString::from(peer.to_owned());
         ui.new_session_button()
@@ -68,41 +89,29 @@ impl Dashboard {
         peer: &str,
         status: &Status,
         ui: Ui,
-        cx: &Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Div {
-        let identity = status.peers.get(peer).map(|id| {
-            (
-                id.as_str(),
-                status
-                    .short_peer_ids()
-                    .remove(peer)
-                    .unwrap_or_else(|| id.clone()),
-            )
+        let Some(id) = status.peers.get(peer) else { return overview() };
+        let short = status.short_peer_ids().remove(peer).unwrap_or_else(|| id.clone());
+        let name = status.peer_display_name(peer);
+        let state = DropdownState::local(SharedString::from(format!("device-actions-{id}")).into(), window, cx);
+        let view = cx.weak_entity();
+        let selected = peer.to_owned();
+        let expected = id.clone();
+        let menu = ui.device_actions(name, &state, cx, move |w, cx| {
+            let _ = view.update(cx, |v, cx| v.confirm_unpair(&selected, &expected, w, cx));
         });
         let header = ui.device_heading(
-            ui.connection_badge(status.connections_for(peer), status.peer_presence),
-            status.peer_display_name(peer).to_owned().into(),
+            None,
+            name.to_owned().into(),
             status.peer_platform(peer),
-            identity,
-        );
-        let count = status
-            .forwards
-            .values()
-            .filter(|rule| rule.peer == peer)
-            .count();
-        let rule_count = match count {
-            0 => "View forwarding rules".to_owned(),
-            1 => "1 locally configured rule".to_owned(),
-            n => format!("{n} locally configured rules"),
-        };
+            Some((id, short)),
+        ).child(menu);
+        let counts = self.device_counts(peer, status);
         let selected = peer.to_owned();
         let forwards = ui
-            .navigation_row(
-                "device-forwards",
-                Icon::Forward.draw(18.),
-                "Port forwarding".into(),
-                rule_count,
-            )
+            .counted_navigation_row("device-forwards", Icon::Forward, "Port forwarding", counts.forwards)
             .on_click(cx.listener(move |v, _, _, cx| {
                 v.forward_filters.reset(Some(selected.clone()), cx);
                 v.show_devices_pane(DevicesPane::Forwards, cx);
@@ -112,30 +121,12 @@ impl Dashboard {
             .py_2()
             .child(header)
             .child(ui.separator())
-            .when_some(
-                status
-                    .connections_for(peer)
-                    .filter(|paths| !paths.is_empty())
-                    .zip(status.peers.get(peer)),
-                |page, (paths, id)| {
-                    page.child(self.connection_history.connection_paths(id, paths, *ui))
-                        .child(ui.separator())
-                },
-            )
-            .child(ui.navigation_row("device-sessions", Icon::Terminal.draw(18.), "Sessions".into(), "View sessions on this device")
-                .on_click(cx.listener(move |v, _, _, cx| v.show_sessions(Some(session_peer.clone()), cx))))
+            .child(self.connection_history.connection_section(id, status.connections_for(peer), status.peer_presence, *ui))
             .child(ui.separator())
+            .child(ui.counted_navigation_row("device-sessions", Icon::Terminal, "Sessions", counts.sessions)
+                .on_click(cx.listener(move |v, _, _, cx| v.show_sessions(Some(session_peer.clone()), cx))))
             // Android uses this gateway to store rules, including its first one.
-            .when(count > 0 || status.peer_platform(peer) == DevicePlatform::Android
-                || status.peer_supports_forward_rules(peer), |page| page.child(forwards))
-            .when_some(status.peers.get(peer), |page, id| {
-                let id = id.clone();
-                let name = peer.to_owned();
-                page.child(div().flex().justify_end().child(
-                    ui.button(Ghost, "unpair-device", "Unpair device").on_click(
-                        cx.listener(move |v, _, w, cx| v.confirm_unpair(&name, &id, w, cx)),
-                    ),
-                ))
-            })
+            .when(counts.forwards.is_some_and(|n| n > 0) || status.peer_platform(peer) == DevicePlatform::Android
+                || status.peer_supports_forward_rules(peer), |page| page.child(ui.separator()).child(forwards))
     }
 }

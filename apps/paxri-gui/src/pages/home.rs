@@ -49,6 +49,7 @@ impl Dashboard {
         let forwards = pane == DevicesPane::Forwards;
         self.devices_pane = Some(pane);
         if forwards {
+            self.refresh_forward_directory(cx);
             if self.busy { self.refresh_presence = true; }
             else { self.send(Command::Status, cx); }
         }
@@ -110,15 +111,15 @@ impl Dashboard {
         DockNavigation::new("Devices", body)
     }
 
-    pub(crate) fn home(&self, ui: Ui, width: Pixels, cx: &mut Context<Self>) -> DockPanel {
+    pub(crate) fn home(&self, ui: Ui, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> DockPanel {
         let transition = self.gateway_transition();
         let status = self.status.as_ref().filter(|_| transition.is_none());
         let (content, action) = match (&self.devices_pane, status) {
             (_, None) => self.gateway_notice(transition, ui, cx),
-            (Some(DevicesPane::Sessions), Some(status)) => self.sessions_page(status, ui, cx),
+            (Some(DevicesPane::Sessions), Some(status)) => self.sessions_page(status, ui, window, cx),
             (Some(DevicesPane::Peer(peer)), Some(status)) => {
                 let action = self.can_open_shell(peer).then(|| self.new_session(peer, ui).into_any_element());
-                (self.device_detail(peer, status, ui, cx), action)
+                (self.device_detail(peer, status, ui, window, cx), action)
             }
             (Some(DevicesPane::Forwards), Some(status)) => {
                 let action = (!status.peers.is_empty()).then(|| ui.floating_action("add-rule", Icon::Plus, "Add forwarding rule")
@@ -127,7 +128,7 @@ impl Dashboard {
             }
             (_, Some(status)) => (overview()
                 .child(ui.device_heading(
-                    ui.muted("This device").text_xs().flex_none(),
+                    Some(ui.muted("This device").text_xs().flex_none()),
                     self.local_name.clone(),
                     DevicePlatform::current(),
                     Some((

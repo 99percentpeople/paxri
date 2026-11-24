@@ -41,6 +41,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static native void deviceNameChanged(String name, String model);
     private static native void submitCode(String code);
     private static native void removeForward(String owner, String name);
+    private static native void renameSession(String peer, long number, long nonce, String name);
     private static native void unpairDevice(String id, String generation);
     private static native void systemTextSizeChanged(float size);
     private static native void insetsChanged(float left, float top, float right, float bottom);
@@ -54,6 +55,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private AlertDialog removalDialog;
     private PopupWindow terminalTouch;
     private long touchSession;
+    private boolean terminalTouchable = true;
     private TerminalGestures gestures;
     private TerminalKeybar keybar;
     private int keybarHeight;
@@ -255,7 +257,7 @@ public final class PaxriActivity extends GpuiInputActivity {
         });
     }
 
-    public void setTerminalTouchArea(long session, int x, int y, int width, int height, int toolbarHeight, String layout) {
+    public void setTerminalTouchArea(long session, int x, int y, int width, int height, int toolbarHeight, String layout, boolean touchable) {
         runOnUiThread(() -> {
             if (touchSession != session) dismissTerminalTouch();
             if (width > 0 && keybarScroll != null && !layout.equals(keyLayout)) {
@@ -265,6 +267,7 @@ public final class PaxriActivity extends GpuiInputActivity {
             }
             keyLayout = layout;
             touchSession = session;
+            terminalTouchable = touchable;
             keybarHeight = toolbarHeight;
             touchArea.set(x, y, x + width, y + height);
             updateTerminalTouch();
@@ -326,6 +329,7 @@ public final class PaxriActivity extends GpuiInputActivity {
             terminalTouch = new PopupWindow(panel, touchArea.width(), touchArea.height() + keybarHeight, false);
             terminalTouch.setSplitTouchEnabled(true);
             terminalTouch.setTouchModal(false);
+            terminalTouch.setTouchable(terminalTouchable);
             terminalTouch.setIsLaidOutInScreen(true);
             // Chinese IMEs can draw the unfinished spelling just above the keyboard.
             // Keep their window above the touch surface and shortcut keys.
@@ -335,6 +339,8 @@ public final class PaxriActivity extends GpuiInputActivity {
             if (keybarScroll.getLayoutParams().height != keybarHeight) {
                 keybarScroll.setLayoutParams(new LinearLayout.LayoutParams(-1, keybarHeight));
             }
+            // Let GPUI receive touches on menus drawn over the native gesture surface.
+            terminalTouch.setTouchable(terminalTouchable);
             terminalTouch.update(x, y, touchArea.width(), touchArea.height() + keybarHeight);
         }
     }
@@ -510,22 +516,41 @@ public final class PaxriActivity extends GpuiInputActivity {
     }
 
     public void requestPairingCode() {
+        requestText("Pair a computer", "Paste pairing code", "", "Pair",
+                value -> submitCode(value.trim()), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+    }
+
+    public void requestSessionName(String peer, long number, long nonce, String current) {
+        requestText("Rename session", "Use terminal title", current, "Rename",
+                value -> renameSession(peer, number, nonce, value), InputType.TYPE_CLASS_TEXT);
+    }
+
+    private void requestText(String title, String hint, String initial, String action,
+                             java.util.function.Consumer<String> submit, int inputType) {
         runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
             EditText field = new EditText(this);
             field.setSingleLine(true);
-            field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-            field.setHint("Paste pairing code");
+            field.setInputType(inputType);
+            field.setHint(hint);
+            if (!initial.isEmpty()) {
+                field.setText(initial);
+                field.setSelectAllOnFocus(true);
+            }
             FrameLayout content = new FrameLayout(this);
             int pad = (int) (24 * getResources().getDisplayMetrics().density);
             content.setPadding(pad, 0, pad, 0);
             content.addView(field);
             AlertDialog dialog = new AlertDialog.Builder(this)
-                    .setTitle("Pair a computer")
+                    .setTitle(title)
                     .setView(content)
                     .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Pair", (d, w) -> submitCode(field.getText().toString().trim()))
+                    .setPositiveButton(action, (d, w) -> submit.accept(field.getText().toString()))
                     .create();
             dialog.setOnShowListener(d -> field.requestFocus());
+            if (!initial.isEmpty()) {
+                dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+            }
             dialog.show();
         });
     }
