@@ -19,7 +19,7 @@ enum ButtonLayout {
     Floating,
     Row,
     Field,
-    Card(Pixels),
+    Card,
 }
 
 #[derive(IntoElement)]
@@ -93,7 +93,6 @@ impl Ui {
     pub fn choice_card(
         self,
         id: impl Into<ElementId>,
-        width: Pixels,
         label: impl IntoElement,
         preview: impl IntoElement,
         selected: bool,
@@ -114,7 +113,7 @@ impl Ui {
         let mut button = self
             .button(ButtonVariant::Outline, id, content)
             .pressed(selected);
-        button.layout = ButtonLayout::Card(width);
+        button.layout = ButtonLayout::Card;
         button
     }
 }
@@ -222,7 +221,7 @@ impl RenderOnce for Button {
             ButtonLayout::Floating => root.size(px(if cfg!(target_os = "android") { 56. } else { 48. })).rounded_full().shadow_md(),
             ButtonLayout::Row => row_layout(root),
             ButtonLayout::Field => root.w_full().px(SPACE_3).justify_between(),
-            ButtonLayout::Card(width) => root.w(width).max_w_full().h_auto().p(SPACE_2),
+            ButtonLayout::Card => root.w_full().min_w_0().h_auto().p(SPACE_2),
         };
         root.border_1()
             .border_color(transparent_black())
@@ -230,7 +229,7 @@ impl RenderOnce for Button {
                 button.border_color(rgb(colors.input_border))
             })
             .when(
-                matches!(self.layout, ButtonLayout::Card(_)) && self.pressed,
+                matches!(self.layout, ButtonLayout::Card) && self.pressed,
                 |button| button.border_color(rgb(colors.canvas.foreground)),
             )
             .cursor_pointer()

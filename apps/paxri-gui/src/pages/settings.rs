@@ -18,7 +18,7 @@ use paxri_control::{Command, GuiChange};
 impl Dashboard {
     fn appearance_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
         let settings = theme::current(cx);
-        let cards = theme_cards(*ui, settings.appearance, px(132.), cx.listener(|view, mode: &Appearance, _, cx| {
+        let cards = theme_cards(*ui, settings.appearance, cx.listener(|view, mode: &Appearance, _, cx| {
             view.send(Command::SetGui { change: GuiChange::Appearance(*mode) }, cx);
         }));
         let mut group = SettingsGroup::new(catalog::APPEARANCE);

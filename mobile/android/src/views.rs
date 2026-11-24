@@ -559,7 +559,6 @@ impl Render for Mobile {
         let show_add_rule =
             matches!(&self.page, Page::Forwards(_)) && self.can_add_rule(self.forward_filters.device.as_deref());
         let drawer = self.drawer.position(window, cx);
-        let content_width = window.viewport_size().width - px(left + right);
         let drawer_width =
             (f32::from(window.viewport_size().width) - left - right - 56.).clamp(0., 304.);
         div()
@@ -596,9 +595,8 @@ impl Render for Mobile {
                         Page::Devices | Page::PairingMenu => {
                             self.devices(ui, cx).into_any_element()
                         }
-                        Page::Settings => self.settings(None, ui, content_width, cx),
-                        Page::SettingsCategory(section) => self
-                            .settings(Some(section), ui, content_width, cx),
+                        Page::Settings => self.settings(None, ui, cx),
+                        Page::SettingsCategory(section) => self.settings(Some(section), ui, cx),
                         Page::ForwardEdit { owner, .. } => {
                             self.rule_editor(owner.as_deref(), ui, cx).into_any_element()
                         }

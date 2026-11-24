@@ -1,4 +1,4 @@
-use crate::components::{Icon, Select, Ui, actions};
+use crate::components::{Icon, Select, Ui};
 use crate::theme::{self, Appearance, SPACE_1, SPACE_2, TerminalScheme};
 use gpui::{prelude::*, *};
 
@@ -47,12 +47,15 @@ fn appearance_preview(mode: Appearance) -> Div {
 pub fn theme_cards(
     ui: Ui,
     selected: Appearance,
-    width: Pixels,
     change: impl Fn(&Appearance, &mut Window, &mut App) + 'static,
 ) -> Div {
     let change = std::rc::Rc::new(change);
-    actions()
-        .justify_end()
+    div()
+        .w(px(412.))
+        .max_w_full()
+        .grid()
+        .grid_cols(Appearance::ALL.len() as u16)
+        .gap(SPACE_2)
         .children(Appearance::ALL.into_iter().map(|mode| {
             let icon = match mode {
                 Appearance::System => Icon::Monitor,
@@ -61,8 +64,7 @@ pub fn theme_cards(
             };
             ui.choice_card(
                 ("theme", mode as usize),
-                width,
-                icon.label(mode.label()),
+                icon.label(mode.label()).gap(SPACE_1),
                 appearance_preview(mode),
                 selected == mode,
             )

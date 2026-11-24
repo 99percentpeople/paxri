@@ -93,7 +93,6 @@ impl Mobile {
         &self,
         selected: Option<SettingsSection>,
         ui: Ui,
-        available_width: Pixels,
         cx: &Context<Self>,
     ) -> AnyElement {
         if selected == Some(keybar::SECTION) {
@@ -106,15 +105,11 @@ impl Mobile {
         let mut terminal = SettingsGroup::new(catalog::TERMINAL);
         if selected == Some(catalog::page_for(catalog::TERMINAL)) {
             let settings = theme::current(cx);
-            let card_width = ((available_width - px(48.)) / 3.)
-                .max(px(96.))
-                .min(px(132.));
             appearance.setting(
                 catalog::THEME,
                 theme_cards(
                     ui,
                     settings.appearance,
-                    card_width,
                     cx.listener(|view, mode: &Appearance, _, cx| {
                         view.change_gui(GuiChange::Appearance(*mode), cx);
                     }),
