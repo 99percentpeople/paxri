@@ -1,0 +1,26 @@
+--- a/src/android/window.rs
++++ b/src/android/window.rs
+@@ -391,7 +391,11 @@
+             height,
+             scale_factor,
+             safe_area_insets: SafeAreaInsets::default(),
+-            appearance: WindowAppearance::Light,
++            appearance: if super::jni::query_night_mode_via_jni() {
++                WindowAppearance::Dark
++            } else {
++                WindowAppearance::Light
++            },
+             is_active: true,
+             transparent,
+             surface_window_addr,
+--- a/src/android/platform.rs
++++ b/src/android/platform.rs
+@@ -1095,3 +1095,7 @@
+     fn window_appearance(&self) -> WindowAppearance {
+-        WindowAppearance::Dark
++        if super::jni::query_night_mode_via_jni() {
++            WindowAppearance::Dark
++        } else {
++            WindowAppearance::Light
++        }
+     }
