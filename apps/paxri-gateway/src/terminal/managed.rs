@@ -115,8 +115,7 @@ impl Registry {
             "Session already exists"
         );
         let mut config = host.config.clone();
-        let mut cmd = command_for(None, &host.tools, &owner.0).await?;
-        cmd.env("TERM", "xterm-256color");
+        let cmd = command_for(None, &host.tools, &owner.0).await?;
         let cfg = config.clone();
         let peer = owner.0.clone();
         let (pty, output) = tokio::task::spawn_blocking(move || {

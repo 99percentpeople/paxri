@@ -149,10 +149,7 @@ impl Terminals {
                 return Err(wire::DENIED);
             }
             command
-                .and_then(|mut cmd| {
-                    cmd.env("TERM", "xterm-256color");
-                    Session::spawn(cmd, size.into())
-                })
+                .and_then(|cmd| Session::spawn(cmd, size.into()))
                 .map_err(|e| {
                     eprintln!("start native terminal: {e:#}");
                     wire::UNAVAILABLE

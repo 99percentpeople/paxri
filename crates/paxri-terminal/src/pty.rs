@@ -43,10 +43,14 @@ impl Session {
     }
 
     fn spawn_pty(
-        cmd: CommandBuilder,
+        mut cmd: CommandBuilder,
         size: PtySize,
         managed: bool,
     ) -> Result<(Self, Receiver<Output>)> {
+        // A remote PTY has its own display, independent of the gateway service's console.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env_remove("NO_COLOR");
         let pair = native_pty_system()
             .openpty(size)
             .context("open a terminal")?;

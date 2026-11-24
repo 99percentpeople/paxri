@@ -138,6 +138,7 @@ def check_native_terminal(root, keys, call, start, cli, ipc, wait):
     screen = r"""
 import os, sys, time, tty
 assert all(os.isatty(n) for n in (0, 1, 2)) and os.environ['TERM'] == 'xterm-256color'
+assert os.environ['COLORTERM'] == 'truecolor' and 'NO_COLOR' not in os.environ
 assert sys.argv[1:] == ['two words', '', '-x', '$HOME']
 assert os.get_terminal_size() == (89, 31)
 tty.setraw(0)
@@ -848,9 +849,11 @@ def main():
 
         def start(node):
             log = stack.enter_context((root / (node + ".log")).open("a+", encoding="utf-8"))
+            env = None
+            if args.native_terminal:
+                env = {**os.environ, "SHELL": "/bin/sh", "NO_COLOR": "1", "COLORTERM": ""}
             process = subprocess.Popen([gateway, "--no-relay", "--config", str(root / (node + ".toml")),
-                                        "--key", str(root / (node + ".key")), "--ipc", ipc(node)], stderr=log,
-                                       env={**os.environ, "SHELL": "/bin/sh"} if args.native_terminal else None)
+                                        "--key", str(root / (node + ".key")), "--ipc", ipc(node)], stderr=log, env=env)
 
             def stop():
                 if process.poll() is None:

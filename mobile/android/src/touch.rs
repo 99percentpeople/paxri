@@ -249,10 +249,6 @@ impl Mobile {
                         click.extend(report(mode, cell, 0, true, Modifiers::default()));
                         let _ = s.input.send(Frame::Data(click));
                     }
-                    // A custom shortcut layout can omit the keyboard button entirely.
-                    if self.keybar.rows.iter().flatten().any(|key| key == "Keys") {
-                        return;
-                    }
                 }
                 if let Err(error) =
                     activity_action(&self.android, ActivityAction::ShowTerminalKeyboard(id))
