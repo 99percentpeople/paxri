@@ -313,7 +313,9 @@ public final class PaxriActivity extends GpuiInputActivity {
             terminalTouch.setSplitTouchEnabled(true);
             terminalTouch.setTouchModal(false);
             terminalTouch.setIsLaidOutInScreen(true);
-            terminalTouch.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
+            // Chinese IMEs can draw the unfinished spelling just above the keyboard.
+            // Keep their window above the touch surface and shortcut keys.
+            terminalTouch.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
             terminalTouch.showAtLocation(decor, Gravity.TOP | Gravity.LEFT, x, y);
         } else {
             if (keybarScroll.getLayoutParams().height != keybarHeight) {
