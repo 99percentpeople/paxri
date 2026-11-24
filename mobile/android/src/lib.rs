@@ -328,6 +328,7 @@ enum ActivityAction<'a> {
     BackEnabled(bool),
     Appearance(bool, &'a theme::Palette),
     TouchArea(u64, [i32; 5], &'a KeybarSettings),
+    SelectionHandles(u64, [i32; 5]),
     StopFling(u64),
     ShowTerminalKeyboard(u64),
 }
@@ -397,6 +398,9 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
                     &[dark_icons.into(), argb(colors.border), argb(colors.secondary.background),
                       argb(colors.input_border), argb(colors.secondary.foreground), argb(colors.terminal.ansi[4])])
             }
+            ActivityAction::SelectionHandles(id, [x1,y1,x2,y2,h]) => env.call_method(
+                activity, jni_str!("setSelectionHandles"), jni_sig!("(JIIIII)V"),
+                &[(id as i64).into(), x1.into(), y1.into(), x2.into(), y2.into(), h.into()]),
             ActivityAction::StopFling(id) => env.call_method(
                 activity,
                 jni_str!("stopTerminalFling"),
@@ -450,6 +454,7 @@ struct Session {
     state: SessionState,
     screen: Emulator,
     wheel: paxri_ui::terminal::mouse::Wheel,
+    touch_mouse: paxri_ui::terminal::mouse::TouchMouseDrag,
     composing: Preedit,
     title: Entity<TabTitle>,
     input: mpsc::UnboundedSender<Frame>,
@@ -519,6 +524,7 @@ struct Mobile {
     ui_font: SharedString,
     terminal_zoom: f32,
     font: TerminalFont,
+    selection_handles: Option<(u64, [i32; 5])>,
     touch_area: Option<(u64, [i32; 5], Arc<KeybarSettings>)>,
     rt: Handle,
     client: Option<Arc<Client>>,
@@ -667,7 +673,10 @@ impl Mobile {
             gpui_mobile::set_text_input_callback(None);
             gpui_mobile::hide_keyboard();
             if let Some(session) = self.sessions.get_mut(&id) {
+                let release = session.touch_mouse.end(*session.screen.term.mode());
+                if !release.is_empty() { let _ = session.input.send(Frame::Data(release)); }
                 session.composing.clear();
+                session.screen.term.selection = None;
             }
         }
         if let Page::Terminal(id) = &page
@@ -872,6 +881,7 @@ impl Mobile {
                     font,
                 ),
                 wheel: Default::default(),
+                touch_mouse: Default::default(),
                 composing: Preedit::default(),
                 title: cx.new(|_| TabTitle::default()),
                 input,
@@ -1314,6 +1324,7 @@ fn android_main(android: AndroidApp) {
                     ui_font,
                     font,
                     touch_area: None,
+                    selection_handles: None,
                     rt: handle,
                     client: None,
                     updates: tx,

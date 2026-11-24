@@ -420,6 +420,12 @@ impl Mobile {
                                 cols: grid.cols,
                             }));
                         }
+                        let handles = s.handle_positions(scale);
+                        if this.selection_handles != Some((id, handles)) {
+                            if activity_action(&this.android, ActivityAction::SelectionHandles(id, handles)).is_ok() {
+                                this.selection_handles = Some((id, handles));
+                            }
+                        }
                     }
                 })
             },

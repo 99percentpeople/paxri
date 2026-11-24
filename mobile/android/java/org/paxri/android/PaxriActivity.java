@@ -270,6 +270,13 @@ public final class PaxriActivity extends GpuiInputActivity {
         });
     }
 
+    public void setSelectionHandles(long session, int x1, int y1, int x2, int y2, int lineHeight) {
+        runOnUiThread(() -> {
+            if (touchSession == session && gestures != null)
+                gestures.setHandles(x1, y1, x2, y2, lineHeight);
+        });
+    }
+
     public void stopTerminalFling(long session) {
         runOnUiThread(() -> {
             if (touchSession == session && gestures != null) {
@@ -406,7 +413,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     void terminalAction(long session, String key) {
         if (session == 0 || touchSession != session || keybar == null) return;
         if (key.equals("Keys")) {
-            TerminalGestures.tap(session);
+            TerminalGestures.keyboard(session);
             return;
         }
         finishTerminalComposition();
@@ -415,6 +422,7 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     private void sendTerminalInput(String value, boolean named) {
         if (keybar != null && !value.isEmpty()) {
+            if (gestures != null) gestures.dismissSelection();
             int first = keybar.takeModifiers();
             terminalKey(touchSession, value, named, first, keybar.heldModifiers());
         }
@@ -562,9 +570,10 @@ public final class PaxriActivity extends GpuiInputActivity {
     @android.annotation.TargetApi(33)
     private static final class SystemBack {
         private final android.window.OnBackInvokedDispatcher dispatcher;
-        private final android.window.OnBackInvokedCallback callback = PaxriActivity::goBack;
+        private final android.window.OnBackInvokedCallback callback;
 
         SystemBack(PaxriActivity activity) {
+            callback = activity::backFromTerminal;
             dispatcher = activity.getOnBackInvokedDispatcher();
             dispatcher.registerOnBackInvokedCallback(
                     android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
@@ -575,8 +584,12 @@ public final class PaxriActivity extends GpuiInputActivity {
         }
     }
 
+    private boolean backFromTerminal() {
+        return (gestures != null && gestures.dismissSelection()) || goBack();
+    }
+
     @Override
     public void onBackPressed() {
-        if (!goBack()) super.onBackPressed();
+        if (!backFromTerminal()) super.onBackPressed();
     }
 }

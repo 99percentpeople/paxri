@@ -133,7 +133,7 @@ def main():
             "-o", package, *sorted(compiled.glob("*.flat")))
         java = host / "java/dev/gpui/mobile"
         support = [java / (name + ".java") for name in
-                   ("GpuiInputActivity", "GpuiPlatformView", "GpuiCamera", "GpuiVideoPlayer")]
+                   ("GpuiInputActivity", "GpuiPlatformView", "GpuiCamera", "GpuiVideoPlayer", "GpuiClipboard")]
         classpath = os.pathsep.join(map(str, (platform, scanner_classes, zxing)))
         run("javac", "-proc:none", "-source", "8", "-target", "8", "-cp", classpath, "-d", classes,
             *support, *sorted(generated.rglob("*.java")), *sorted((APP / "java").rglob("*.java")))
