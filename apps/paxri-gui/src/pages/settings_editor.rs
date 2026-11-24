@@ -138,13 +138,10 @@ impl Dashboard {
         if pages.is_empty() {
             content = content
                 .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("No matching settings"),
+                    paxri_ui::components::ListState::empty(paxri_ui::components::Icon::Search, "No matching settings").render(*ui),
                 )
                 .child(
-                    div().flex().child(
+                    div().flex().justify_center().child(
                         ui.button(Ghost, "reset-empty-search", "Clear search")
                             .on_click(cx.listener(Self::clear_settings_search)),
                     ),

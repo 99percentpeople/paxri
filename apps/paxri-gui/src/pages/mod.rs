@@ -64,12 +64,11 @@ impl Dashboard {
                         ),
                 ),
             )
-            .child(ui.muted(self.error.clone().unwrap_or_else(|| {
-                self.address
-                    .clone()
-                    .unwrap_or_else(paxri_control::default_address)
-                    .display()
-                    .to_string()
-            })))
+            .child(match &self.error {
+                Some(error) => paxri_ui::components::ListState::empty(crate::components::Icon::Server, "Gateway unavailable")
+                    .detail(error.clone()),
+                None => paxri_ui::components::ListState::loading("Connecting to gateway…")
+                    .detail(self.address.clone().unwrap_or_else(paxri_control::default_address).display().to_string()),
+            }.render(*ui))
     }
 }

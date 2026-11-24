@@ -230,7 +230,7 @@ impl Dashboard {
                 .child(
                     ListItem::new(peer.name.clone())
                         .leading(ui.device_icon(peer.platform))
-                        .detail(ui.muted(peer_detail(peer.platform, &peer.device_id))),
+                        .detail(peer_detail(peer.platform, &peer.device_id)),
                 )
                 .child(ui.muted("Accept to let these devices open terminals and copy files."));
             return DialogContent::new(body, "Close")

@@ -6,6 +6,7 @@ use crate::{
 use gpui::{prelude::*, *};
 use paxri_control::{Status, terminal::managed::Request};
 use paxri_ui::components::directory::{DeviceOption, session_list_notice};
+use paxri_ui::components::ListView;
 use std::time::Duration;
 
 impl Dashboard {
@@ -152,11 +153,12 @@ impl Dashboard {
             .py_2()
             .child(heading("Sessions"))
             .child(filters.controls(&devices, |v| &mut v.session_filters, cx))
+            .when(!rows.is_empty() && !failed.is_empty(), |d| d.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", ")))))
             .when_some(
                 session_list_notice(total, rows.len(), initial_request, &failed),
-                |d, message| d.child(ui.muted(message)),
+                |d, state| d.child(state.render(*ui)),
             )
-            .child(div().flex().flex_col().children(rows));
+            .when(!rows.is_empty(), |page| page.child(ListView::new().children(rows)));
         (page, launcher)
     }
 }

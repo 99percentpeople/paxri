@@ -2,7 +2,7 @@ use super::settings_catalog as catalog;
 use crate::components::SettingsGroup;
 use crate::{
     Dashboard,
-    components::{ButtonVariant::Secondary, ListItem, Ui},
+    components::{ButtonVariant::Secondary, Ui, row},
     theme,
 };
 use gpui::{prelude::*, *};
@@ -111,9 +111,9 @@ impl Dashboard {
             } else {
                 "Restart the gateway through its service manager to apply saved changes."
             };
-            let mut note = ListItem::new(ui.muted(message));
+            let mut note = row().child(ui.muted(message));
             if status.user_managed {
-                note = note.trailing(
+                note = note.child(
                     ui.button(Secondary, "apply-network", "Restart gateway")
                         .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Restart, cx))),
                 );

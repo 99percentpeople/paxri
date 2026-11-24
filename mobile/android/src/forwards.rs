@@ -153,11 +153,8 @@ impl Mobile {
                     for (name, rule) in rules {
                         let owner = id.clone();
                         let key = name.clone();
-                        let label = ListItem::new(
-                            div().font_weight(FontWeight::SEMIBOLD).child(name.clone()),
-                        )
-                        .detail(ui.muted(rule.route_for(&peer.name)))
-                        .detail(ui.muted(rule.state().to_owned()).text_xs());
+                        let label = ListItem::new(name.clone())
+                            .detail(format!("{} · {}", rule.route_for(&peer.name), rule.state()));
                         group = group.child(
                             ui.button(
                                 Ghost,

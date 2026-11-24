@@ -54,26 +54,19 @@ pub fn session_list_notice(
     visible: usize,
     initial_request: bool,
     failed: &[&str],
-) -> Option<String> {
-    if !failed.is_empty() {
-        return Some(format!(
-            "Couldn’t refresh sessions on {}.",
-            failed.join(", ")
-        ));
+) -> Option<ListState> {
+    if !failed.is_empty() && visible == 0 {
+        return Some(ListState::empty(Icon::Terminal, "Sessions unavailable")
+            .detail(format!("Couldn’t refresh sessions on {}.", failed.join(", "))));
     }
-    if visible != 0 {
-        return None;
-    }
-    Some(
-        if initial_request {
-            "Loading sessions…"
-        } else if total == 0 {
-            "No sessions yet."
-        } else {
-            "No sessions match your filters."
-        }
-        .into(),
-    )
+    if visible != 0 { return None; }
+    Some(if initial_request {
+        ListState::loading("Loading sessions…")
+    } else if total == 0 {
+        ListState::empty(Icon::Terminal, "No sessions yet")
+    } else {
+        ListState::filtered("No matching sessions")
+    })
 }
 
 pub struct ListFilters<T> {

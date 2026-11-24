@@ -1,4 +1,5 @@
 use super::*;
+use paxri_ui::components::{ListState, ListView};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use paxri_core::connection::{peer_state, unix_time_ms};
 use paxri_ui::connections::presence_detail;
@@ -280,6 +281,7 @@ impl Mobile {
                 id.clone(),
                 peer.platform,
                 peer.name.clone().into(),
+                self.presence.online(&id),
                 presence_detail(peer_state(self.presence.paths_for(&id), true), now, changed),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -296,28 +298,20 @@ impl Mobile {
             .pt_2()
             .gap_2()
             .when(!self.peers.is_empty(), |page| page.child(filters.controls(|v| &mut v.device_filters, cx).with_state(&self.filter_menu)))
-            .when(no_matches, |page| page.child(ui.muted("No devices match your filters.")))
+            .when(no_matches, |page| page.child(ListState::filtered("No matching devices").render(ui)))
             .when(self.client.is_none(), |page| {
-                page.child(ui.muted(if self.starting_network { "Starting network…" } else { "Network unavailable" }))
+                page.child(if self.starting_network { ListState::loading("Starting network…") } else { ListState::empty(Icon::Server, "Network unavailable") }.render(ui))
             })
             .when(self.pairing, |page| page.child(ui.muted("Approve the request on your computer.")))
             .when(
                 self.peers.is_empty() && self.client.is_some() && !self.pairing,
-                |page| page.child(ui.muted("Tap + to pair a computer.")),
+                |page| page.child(ListState::empty(Icon::Monitor, "No paired devices").detail("Tap + to pair a computer.").render(ui)),
             )
-            .child(
-                div()
-                    .id("paired-devices")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .restrict_scroll_to_axis()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .pb(FLOATING_ACTION_CLEARANCE)
+            .when(!no_matches && !self.peers.is_empty(), |page| page.child(
+                ListView::scrollable("paired-devices")
+                    .with_floating_action(self.client.is_some() && !self.pairing)
                     .children(rows),
-            )
+            ))
     }
 
     fn peer(&self, id: &str, ui: Ui, cx: &Context<Self>) -> Div {

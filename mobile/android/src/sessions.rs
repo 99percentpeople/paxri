@@ -1,4 +1,5 @@
 use super::*;
+use paxri_ui::components::ListView;
 use paxri_ui::components::directory::{DeviceOption, session_entries, session_list_notice};
 
 impl Mobile {
@@ -89,25 +90,17 @@ impl Mobile {
             .pt_2()
             .gap_2()
             .child(filters.controls(&devices, |v| &mut v.session_filters, cx).with_state(&self.filter_menu))
+            .when(!rows.is_empty() && !failed.is_empty(), |d| d.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", ")))))
             .when_some(
-                session_list_notice(total, rows.len(), initial_request, &failed),
-                |d, message| d.child(ui.muted(message)),
+                if self.starting_network { Some(paxri_ui::components::ListState::loading("Loading sessions…")) }
+                else { session_list_notice(total, rows.len(), initial_request, &failed) },
+                |d, state| d.child(state.render(ui)),
             )
-            .child(
-                div()
-                    .id("session-list")
-                    .min_h_0()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .restrict_scroll_to_axis()
-                    .flex()
-                    .flex_col()
-                    .pb_3()
-                    .when(has_action, |list| {
-                        list.pb(paxri_ui::components::FLOATING_ACTION_CLEARANCE)
-                    })
+            .when(!rows.is_empty(), |page| page.child(
+                ListView::scrollable("session-list")
+                    .with_floating_action(has_action)
                     .children(rows),
-            )
+            ))
             .when_some(launcher, |page, button| {
                 page.child(paxri_ui::components::floating_corner().child(button))
             })

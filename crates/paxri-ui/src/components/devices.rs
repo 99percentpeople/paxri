@@ -56,30 +56,27 @@ impl Ui {
         id: impl Into<ElementId>,
         platform: DevicePlatform,
         name: SharedString,
+        online: bool,
         detail: String,
     ) -> Button {
-        self.button(
-            ButtonVariant::Ghost,
-            id,
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap_2()
-                .py_1()
-                .child(self.icon_tile(Icon::device(platform), 30., 18.))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .child(div().truncate().child(name))
-                        .child(self.muted(detail).text_xs().truncate()),
-                ),
-        )
-        .row()
+        let label = SharedString::from(format!("{name} · {} · {detail}", platform.label()));
+        let dot = div()
+            .size(px(7.))
+            .rounded_full()
+            .flex_none()
+            .border_1()
+            .border_color(rgb(self.colors.muted_foreground))
+            .when(online, |dot| {
+                dot.bg(rgb(self.colors.success))
+                    .border_color(rgb(self.colors.success))
+            });
+        let item = ListItem::new(name)
+            .leading(self.device_icon(platform))
+            .detail(detail)
+            .detail_icon(dot);
+        #[cfg(target_os = "android")]
+        let item = item.chevron(self);
+        item.button(self, id, label)
     }
 }
 
