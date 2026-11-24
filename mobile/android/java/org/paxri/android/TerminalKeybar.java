@@ -70,6 +70,103 @@ final class TerminalKeybar extends LinearLayout {
 
     private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
+    private static boolean repeatsOnHold(String key) {
+        switch (key) {
+        case "Backspace": case "Delete": case "Space":
+        case "Left": case "Right": case "Up": case "Down":
+        case "PageUp": case "PageDown":
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    private final class KeyButton extends Button implements Runnable {
+        private final String key;
+        private final int modifier;
+        private int pointer = MotionEvent.INVALID_POINTER_ID;
+        private boolean sent;
+
+        KeyButton(String key, int modifier) {
+            super(TerminalKeybar.this.activity);
+            this.key = key;
+            this.modifier = modifier;
+        }
+
+        @Override public boolean dispatchTouchEvent(MotionEvent event) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN && haptic != -1) {
+                performHapticFeedback(haptic);
+            }
+            return super.dispatchTouchEvent(event);
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            if (modifier != 0 || key.equals("Keys")) return super.onTouchEvent(event);
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                pointer = event.getPointerId(0);
+                setPressed(true);
+                // A held modifier must apply even if it is released before this key.
+                sent = held != 0;
+                if (sent) performClick();
+                if (repeatsOnHold(key)) postDelayed(this, ViewConfiguration.getKeyRepeatTimeout());
+                return true;
+            }
+            if (action == MotionEvent.ACTION_CANCEL) {
+                cancelPress();
+                return true;
+            }
+            if (pointer == MotionEvent.INVALID_POINTER_ID) return true;
+            int index = event.findPointerIndex(pointer);
+            if (index < 0) {
+                cancelPress();
+                return true;
+            }
+            boolean inside = event.getX(index) >= 0 && event.getX(index) < getWidth()
+                    && event.getY(index) >= 0 && event.getY(index) < getHeight();
+            if (!inside) {
+                cancelPress();
+            } else if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP)
+                    && event.getActionIndex() == index) {
+                cancelPress();
+                if (!sent) performClick();
+            }
+            return true;
+        }
+
+        @Override public void run() {
+            if (pointer == MotionEvent.INVALID_POINTER_ID) return;
+            sent = true;
+            activity.terminalAction(session, key);
+            postDelayed(this, ViewConfiguration.getKeyRepeatDelay());
+        }
+
+        private void cancelPress() {
+            if (pointer == MotionEvent.INVALID_POINTER_ID) return;
+            removeCallbacks(this);
+            pointer = MotionEvent.INVALID_POINTER_ID;
+            setPressed(false);
+        }
+
+        @Override public void onCancelPendingInputEvents() {
+            super.onCancelPendingInputEvents();
+            cancelPress();
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            cancelPress();
+            super.onDetachedFromWindow();
+        }
+
+        @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+            super.onInitializeAccessibilityNodeInfo(info);
+            if (modifier != 0) {
+                info.setCheckable(true);
+                info.setChecked(isSelected());
+            }
+        }
+    }
+
     private LinearLayout row(JSONArray keys, int rowHeight, int[] columns) throws JSONException {
         LinearLayout row = new LinearLayout(activity);
         row.setMotionEventSplittingEnabled(true);
@@ -82,40 +179,7 @@ final class TerminalKeybar extends LinearLayout {
             JSONArray item = keys.getJSONArray(i);
             String key = item.getString(0), label = item.getString(1);
             int bit = label.equals("Ctrl") ? CTRL : label.equals("Alt") ? ALT : label.equals("Shift") ? SHIFT : 0;
-            Button button = session == 0 ? new Button(activity) : new Button(activity) {
-                private boolean chord;
-
-                @Override public boolean dispatchTouchEvent(MotionEvent e) {
-                    if (e.getActionMasked() == MotionEvent.ACTION_DOWN && haptic != -1) {
-                        performHapticFeedback(haptic);
-                    }
-                    return super.dispatchTouchEvent(e);
-                }
-
-                @Override public boolean onTouchEvent(MotionEvent e) {
-                    if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                        chord = bit == 0 && held != 0 && !label.equals("Keys");
-                        if (chord) {
-                            setPressed(true);
-                            performClick();
-                        }
-                    }
-                    if (!chord) return super.onTouchEvent(e);
-                    if (e.getActionMasked() == MotionEvent.ACTION_UP || e.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                        setPressed(false);
-                        chord = false;
-                    }
-                    return true;
-                }
-
-                @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
-                    super.onInitializeAccessibilityNodeInfo(info);
-                    if (bit != 0) {
-                        info.setCheckable(true);
-                        info.setChecked(isSelected());
-                    }
-                }
-            };
+            Button button = session == 0 ? new Button(activity) : new KeyButton(key, bit);
             button.setAllCaps(false);
             button.setText(label);
             button.setSingleLine(true);

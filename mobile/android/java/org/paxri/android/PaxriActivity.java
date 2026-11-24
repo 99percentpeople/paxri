@@ -200,6 +200,12 @@ public final class PaxriActivity extends GpuiInputActivity {
     }
 
     @Override
+    protected void onPause() {
+        if (keybar != null) keybar.cancelPendingInputEvents();
+        super.onPause();
+    }
+
+    @Override
     protected void onStop() {
         visible = false;
         dismissTerminalTouch();
@@ -267,6 +273,7 @@ public final class PaxriActivity extends GpuiInputActivity {
             }
             keyLayout = layout;
             touchSession = session;
+            if (terminalTouchable && !touchable && keybar != null) keybar.cancelPendingInputEvents();
             terminalTouchable = touchable;
             keybarHeight = toolbarHeight;
             touchArea.set(x, y, x + width, y + height);
@@ -291,6 +298,7 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     private void dismissTerminalTouch() {
         if (terminalTouch != null) {
+            keybar.cancelPendingInputEvents();
             terminalTouch.dismiss();
             terminalTouch = null;
             gestures = null;
