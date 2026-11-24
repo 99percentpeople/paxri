@@ -153,7 +153,7 @@ impl Mobile {
             if let Some(entry) = self.forwards.entries.get(id) {
                 pending |= entry.request.is_some() && entry.rules.is_none();
                 if let Some(error) = &entry.error {
-                    failures.push((id, name, error));
+                    failures.push(format!("{name}: {error}"));
                 }
                 if let Some(rules) = &entry.rules {
                     count += rules.len();
@@ -223,13 +223,8 @@ impl Mobile {
             } else if self.client.is_none() {
                 ListState::empty(Icon::Server, "Network unavailable")
             } else if !failures.is_empty() {
-                ListState::empty(Icon::Forward, "Forwarding rules unavailable").detail(
-                    failures
-                        .iter()
-                        .map(|(_, n, _)| n.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
+                ListState::empty(Icon::Forward, "Forwarding rules unavailable")
+                    .detail(failures.join("\n"))
             } else if self.peers.is_empty() {
                 ListState::empty(Icon::Forward, "No forwarding rules")
                     .detail("Pair a device to create a forwarding rule.")
@@ -255,12 +250,8 @@ impl Mobile {
             };
             body = body.child(state.render(ui));
         } else {
-            for (id, name, error) in failures {
-                body = body.child(
-                    ui.muted(format!("{name} · Forwarding rules unavailable"))
-                        .id(SharedString::from(format!("forward-error-{id}")))
-                        .tooltip(paxri_ui::components::tooltip(error.clone().into())),
-                );
+            for error in failures {
+                body = body.child(ui.muted(error));
             }
             body = body.divided();
             if !narrow {

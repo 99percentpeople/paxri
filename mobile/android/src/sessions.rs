@@ -92,7 +92,7 @@ impl Mobile {
             .child(filters.controls(&devices, |v| &mut v.session_filters, cx).with_state(&self.filter_menu))
             .when(!rows.is_empty() && !failed.is_empty(), |d| d.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", ")))))
             .when_some(
-                if self.starting_network { Some(paxri_ui::components::ListState::loading("Loading sessions…")) }
+                if self.starting_network && rows.is_empty() { Some(paxri_ui::components::ListState::loading("Loading sessions…")) }
                 else { session_list_notice(total, rows.len(), initial_request, &failed) },
                 |d, state| d.child(state.render(ui)),
             )

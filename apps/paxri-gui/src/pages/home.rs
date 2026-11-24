@@ -9,8 +9,8 @@ use crate::{
     },
 };
 use gpui::{prelude::*, *};
-use paxri_control::{Command, DevicePlatform, PairingPeer, PairingStatus};
-use paxri_ui::components::ListView;
+use paxri_control::{Command, DevicePlatform, PairingPeer, PairingStatus, Status};
+use paxri_ui::components::{ListState, ListView};
 
 #[derive(PartialEq, Eq)]
 pub(crate) enum DevicesPane {
@@ -61,15 +61,8 @@ impl Dashboard {
         crate::components::copy_with_feedback(code, "Pairing code copied", window, cx);
     }
 
-    fn device_sidebar(&self, ui: Ui, cx: &Context<Self>) -> DockNavigation {
-        let requests = self.status.as_ref().map_or(0, |s| s.pairing.incoming.len());
-        let state = if self.status.is_some() {
-            "Gateway online"
-        } else if self.error.is_some() {
-            "Gateway offline"
-        } else {
-            "Connecting…"
-        };
+    fn device_sidebar(&self, status: Option<&Status>, ui: Ui, cx: &Context<Self>) -> DockNavigation {
+        let requests = status.map_or(0, |s| s.pairing.incoming.len());
         let body = div()
             .min_h_0()
             .min_w_0()
@@ -84,17 +77,17 @@ impl Dashboard {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .when_some(self.status.as_ref(), |d, s| {
+                    .when_some(status.filter(|s| !s.peers.is_empty()), |d, s| {
                         d.child(self.paired_devices(ui, s, cx))
                     })
-                    .when_some(self.status.as_ref().filter(|s| !s.pairing.pending_unpairs.is_empty()), |d, s| {
+                    .when_some(status.filter(|s| !s.pairing.pending_unpairs.is_empty()), |d, s| {
                         d.child(ui.muted(format!(
                             "Awaiting unpair confirmation: {}",
                             s.pairing.pending_unpairs.join(", ")
                         )).text_xs())
                     }),
             )
-            .when(self.status.as_ref().is_some_and(|s| !s.peers.is_empty() || requests > 0), |sidebar| {
+            .when(status.is_some() && (self.devices_pane.is_some() || requests > 0), |sidebar| {
                 let label = if requests > 0 { format!("Pair a device ({requests})") } else { "Pair a device".to_owned() };
                 sidebar.child(ui.button(Ghost, "add-device", label).icon(Icon::Plus).row()
                     .on_click(cx.listener(|v, _, w, cx| v.open_pairing(w, cx))))
@@ -113,13 +106,15 @@ impl Dashboard {
                     })),
             )
             .child(ui.separator())
-            .child(ui.local_device_footer(self.local_name.clone(), state));
+            .child(ui.local_device_footer(self.local_name.clone(), status.map(|_| "Gateway online")));
         DockNavigation::new("Devices", body)
     }
 
     pub(crate) fn home(&self, ui: Ui, width: Pixels, cx: &mut Context<Self>) -> DockPanel {
-        let (content, action) = match (&self.devices_pane, &self.status) {
-            (_, None) => (self.gateway_notice(ui, cx), self.gateway_start_button(ui, cx)),
+        let transition = self.gateway_transition();
+        let status = self.status.as_ref().filter(|_| transition.is_none());
+        let (content, action) = match (&self.devices_pane, status) {
+            (_, None) => self.gateway_notice(transition, ui, cx),
             (Some(DevicesPane::Sessions), Some(status)) => self.sessions_page(status, ui, cx),
             (Some(DevicesPane::Peer(peer)), Some(status)) => {
                 let action = self.can_open_shell(peer).then(|| self.new_session(peer, ui).into_any_element());
@@ -142,17 +137,14 @@ impl Dashboard {
                 ))
                 .child(ui.separator())
                 .child(
-                    ui.section()
-                        .child(crate::components::heading("Paired devices"))
-                        .child(ui.muted(
-                            "Use the + button to pair your first device.",
-                        )),
+                    ListState::empty(Icon::Monitor, "No paired devices")
+                        .detail("Use + to pair your first device.").render(*ui),
                 ), Some(ui.floating_action("pair-first-device", Icon::Plus, "Pair a device")
                     .on_click(cx.listener(|v, _, w, cx| v.open_pairing(w, cx))).into_any_element())),
         };
         DockPanel::scroll("devices-content", self.home_scroll.clone(), content)
             .with_action(action)
-            .with_navigation(self.device_sidebar(ui, cx))
+            .with_navigation(self.device_sidebar(status, ui, cx))
     }
 
     fn open_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {

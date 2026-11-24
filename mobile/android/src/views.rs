@@ -258,7 +258,18 @@ impl Mobile {
             })
             .collect();
         peers.sort_by_key(|(_, peer, changed)| (std::cmp::Reverse(*changed), &peer.name));
-        let no_matches = peers.is_empty() && !self.peers.is_empty() && self.pairing.is_none();
+        let notice = if !peers.is_empty() || self.pairing.is_some() {
+            None
+        } else if self.starting_network {
+            Some(ListState::loading("Starting network…"))
+        } else if self.client.is_none() {
+            Some(ListState::empty(Icon::Server, "Network unavailable"))
+        } else if self.peers.is_empty() {
+            Some(ListState::empty(Icon::Monitor, "No paired devices").detail("Tap + to pair a computer."))
+        } else {
+            Some(ListState::filtered("No matching devices"))
+        };
+        let show_list = notice.is_none();
         let rows = peers.into_iter().map(|(id, peer, changed)| {
             let id = id.clone();
             ui.device_row(
@@ -282,15 +293,8 @@ impl Mobile {
             .pt_2()
             .gap_2()
             .when(!self.peers.is_empty(), |page| page.child(filters.controls(|v| &mut v.device_filters, cx).with_state(&self.filter_menu)))
-            .when(no_matches, |page| page.child(ListState::filtered("No matching devices").render(ui)))
-            .when(self.client.is_none(), |page| {
-                page.child(if self.starting_network { ListState::loading("Starting network…") } else { ListState::empty(Icon::Server, "Network unavailable") }.render(ui))
-            })
-            .when(
-                self.peers.is_empty() && self.client.is_some() && self.pairing.is_none(),
-                |page| page.child(ListState::empty(Icon::Monitor, "No paired devices").detail("Tap + to pair a computer.").render(ui)),
-            )
-            .when(!no_matches && (!self.peers.is_empty() || self.pairing.is_some()), |page| page.child(
+            .when_some(notice, |page, state| page.child(state.render(ui)))
+            .when(show_list, |page| page.child(
                 ListView::scrollable("paired-devices")
                     .with_floating_action(self.client.is_some() && self.pairing.is_none())
                     .when_some(self.pairing.as_ref(), |list, pending| {

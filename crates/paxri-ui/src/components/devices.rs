@@ -2,7 +2,7 @@ use super::*;
 use paxri_config::DevicePlatform;
 
 impl Ui {
-    pub fn local_device_footer(self, name: SharedString, status: &'static str) -> Div {
+    pub fn local_device_footer(self, name: SharedString, status: Option<&'static str>) -> Div {
         div()
             .flex_none()
             .flex()
@@ -16,7 +16,7 @@ impl Ui {
                     .flex()
                     .flex_col()
                     .child(single_line(div()).child(name))
-                    .child(self.muted(status).text_xs()),
+                    .when_some(status, |labels, status| labels.child(self.muted(status).text_xs())),
             )
     }
 

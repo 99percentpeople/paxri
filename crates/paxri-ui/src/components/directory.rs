@@ -56,8 +56,7 @@ pub fn session_list_notice(
     failed: &[&str],
 ) -> Option<ListState> {
     if !failed.is_empty() && visible == 0 {
-        return Some(ListState::empty(Icon::Terminal, "Sessions unavailable")
-            .detail(format!("Couldn’t refresh sessions on {}.", failed.join(", "))));
+        return Some(ListState::empty(Icon::Terminal, format!("Couldn’t refresh sessions on {}.", failed.join(", "))));
     }
     if visible != 0 { return None; }
     Some(if initial_request {

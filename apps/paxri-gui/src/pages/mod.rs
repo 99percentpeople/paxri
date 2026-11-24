@@ -13,14 +13,10 @@ mod settings_editor;
 pub(crate) use settings_editor::SettingsEditor;
 mod terminal_settings;
 
-use crate::{
-    Dashboard,
-    components::{ButtonVariant::Secondary, Ui, actions, heading, row},
-    theme::SPACE_4,
-};
+use crate::{Dashboard, GatewayOffline, components::{Icon, Ui}, theme::SPACE_4};
 use gpui::{prelude::*, *};
 use paxri_cli::gateway::Action;
-use paxri_control::Command;
+use paxri_ui::components::ListState;
 
 fn overview() -> Div {
     div()
@@ -35,27 +31,27 @@ fn overview() -> Div {
 
 
 impl Dashboard {
-    fn gateway_start_button(&self, ui: Ui, cx: &Context<Self>) -> Option<AnyElement> {
-        (self.error.is_some() && !self.saving).then(|| ui.floating_action("start-gateway", crate::components::Icon::Play, "Start gateway")
-            .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Start, cx))).into_any_element())
+    fn gateway_transition(&self) -> Option<&'static str> {
+        match self.gateway_action {
+            Some(Action::Start) => Some("Starting gateway…"),
+            Some(Action::Stop) => Some("Stopping gateway…"),
+            Some(Action::Restart) => Some("Restarting gateway…"),
+            _ => None,
+        }
     }
 
-    fn gateway_notice(&self, ui: Ui, cx: &Context<Self>) -> Div {
-        ui.section()
-            .child(
-                row().child(heading("Local gateway")).child(
-                    actions()
-                        .child(
-                            ui.button(Secondary, "retry", "Refresh")
-                                .on_click(cx.listener(|v, _, _, cx| v.send(Command::Status, cx))),
-                        ),
-                ),
-            )
-            .child(match &self.error {
-                Some(error) => paxri_ui::components::ListState::empty(crate::components::Icon::Server, "Gateway unavailable")
-                    .detail(error.clone()),
-                None => paxri_ui::components::ListState::loading("Connecting to gateway…")
-                    .detail(self.address.clone().unwrap_or_else(paxri_control::default_address).display().to_string()),
-            }.render(*ui))
+    fn gateway_notice(&self, transition: Option<&'static str>, ui: Ui, cx: &Context<Self>) -> (Div, Option<AnyElement>) {
+        let state = match (transition, &self.offline) {
+            (Some(label), _) => ListState::loading(label),
+            (None, None) => ListState::loading("Connecting to gateway…"),
+            (None, Some(GatewayOffline::Stopped)) => ListState::empty(Icon::Server, "Gateway stopped"),
+            (None, Some(GatewayOffline::Failed(error))) => ListState::empty(Icon::Server, error.clone()),
+        };
+        let start = (self.offline.is_some() && !self.saving).then(|| {
+            ui.floating_action("start-gateway", Icon::Play, "Start gateway")
+                .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Start, cx)))
+                .into_any_element()
+        });
+        (state.render(*ui), start)
     }
 }

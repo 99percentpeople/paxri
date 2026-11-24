@@ -1176,12 +1176,8 @@ impl Mobile {
                 }
             }
             Update::ForwardRules(peer, request, result) => {
-                let error = result.as_ref().err().cloned();
                 if !self.forwards.complete(&peer, request, result) {
                     return;
-                }
-                if let Some(error) = error {
-                    Toast::show(error, self.window, cx);
                 }
             }
             Update::Presence(snapshot) => {

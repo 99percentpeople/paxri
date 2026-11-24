@@ -1,6 +1,6 @@
 use super::settings_catalog as catalog;
 use crate::{
-    Dashboard,
+    Dashboard, GatewayOffline,
     components::{
         ButtonVariant::Secondary, Icon, Select, SettingsGroup, SettingsSection, SettingsTable,
         Ui, actions, setting_field,
@@ -44,12 +44,11 @@ impl Dashboard {
     fn gateway_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
         let online = self.status.is_some();
         let external = self.status.as_ref().is_some_and(|s| !s.user_managed);
-        let (state, color) = match self.gateway_action {
-            Some(Action::Start) => ("Starting…", ui.colors.muted_foreground),
-            Some(Action::Stop) => ("Stopping…", ui.colors.muted_foreground),
-            Some(Action::Restart) => ("Restarting…", ui.colors.muted_foreground),
+        let (state, color) = match (self.gateway_transition(), &self.offline) {
+            (Some(label), _) => (label, ui.colors.muted_foreground),
             _ if online => ("Running", ui.colors.success),
-            _ if self.error.is_some() => ("Offline", ui.colors.warning),
+            (_, Some(GatewayOffline::Stopped)) => ("Stopped", ui.colors.muted_foreground),
+            (_, Some(GatewayOffline::Failed(_))) => ("Offline", ui.colors.warning),
             _ => ("Connecting", ui.colors.muted_foreground),
         };
         let mut group = SettingsGroup::new(catalog::GATEWAY);

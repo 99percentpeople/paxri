@@ -60,6 +60,11 @@ enum RequestResult {
     Stopped(Startup, Option<Native>),
 }
 
+enum GatewayOffline {
+    Stopped,
+    Failed(String),
+}
+
 struct Dashboard {
     presence_watch: Option<(PathBuf, Task<()>)>,
     refresh_presence: bool,
@@ -91,7 +96,7 @@ struct Dashboard {
     local_name: SharedString,
     status: Option<Status>,
     startup: Startup,
-    error: Option<String>,
+    offline: Option<GatewayOffline>,
     busy: bool,
     pending: VecDeque<GatewayRequest>,
 }
@@ -199,6 +204,7 @@ impl Dashboard {
             })
         );
         let joined = matches!(command, Operation::Api(Command::JoinPairing { .. }));
+        let opening = matches!(command, Operation::Open);
         self.busy = true;
         self.saving = changing || !self.pending.is_empty();
         if let Operation::Manage(action) = command {
@@ -328,12 +334,13 @@ impl Dashboard {
                         view.profile_native = native;
                         view.status = None;
                         view.startup = startup;
-                        view.error = Some("Gateway stopped.".into());
+                        view.offline = Some(GatewayOffline::Stopped);
                     }
                     Ok(RequestResult::OfflineNative(settings)) => {
                         view.presence_watch = None;
                         view.profile_native = Some(settings);
                         view.status = None;
+                        view.offline = Some(GatewayOffline::Stopped);
                     }
                     Ok(RequestResult::OfflineGui(settings)) => {
                         theme::apply(settings, cx);
@@ -403,9 +410,9 @@ impl Dashboard {
                         }
                         view.startup = status.startup;
                         view.status = Some(*status);
-                        view.error = None;
+                        view.offline = None;
                     }
-                    Err(error) if changing => {
+                    Err(error) if changing && !opening => {
                         if on_complete.is_none() && !name_saved && !relay_saved {
                             components::notify_active(error, cx);
                         }
@@ -413,7 +420,7 @@ impl Dashboard {
                     Err(error) => {
                         view.presence_watch = None;
                         view.status = None;
-                        view.error = Some(error);
+                        view.offline = Some(GatewayOffline::Failed(error));
                     }
                 }
                 if let Some(native) = view.status.as_ref()
@@ -487,7 +494,7 @@ impl Dashboard {
                 .into(),
             status: None,
             startup: Startup::default(),
-            error: None,
+            offline: None,
             busy: false,
             pending: VecDeque::new(),
         };

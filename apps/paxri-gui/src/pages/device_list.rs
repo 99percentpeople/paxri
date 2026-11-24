@@ -3,16 +3,13 @@ use crate::{
     components::Ui,
     pages::DevicesPane,
 };
-use paxri_ui::components::{Icon, ListState, ListView};
+use paxri_ui::components::{ListState, ListView};
 use gpui::{prelude::*, *};
 use paxri_control::{DevicePlatform, Status};
 use paxri_ui::connections::presence_detail;
 
 impl Dashboard {
     pub(super) fn paired_devices(&self, ui: Ui, status: &Status, cx: &Context<Self>) -> Div {
-        if status.peers.is_empty() {
-            return ListState::empty(Icon::Monitor, "No paired devices").detail("Pair a device to get started.").render(*ui);
-        }
         let filters = &self.device_filters;
         let query = filters.query(cx);
         let card = div().min_h_0().flex_1().flex().flex_col().gap_2()

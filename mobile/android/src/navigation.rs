@@ -144,13 +144,13 @@ impl Mobile {
             .child(ui.separator())
             .child(div().px_3().py_2().child(ui.local_device_footer(
                 DEVICE_NAME.borrow().effective().into(),
-                if self.client.is_some() {
+                Some(if self.client.is_some() {
                     "Network ready"
                 } else if self.starting_network {
                     "Starting network…"
                 } else {
                     "Network unavailable"
-                },
+                }),
             )));
         div()
             .absolute()
