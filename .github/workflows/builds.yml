@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: distribution-${{ github.ref }}
+  # Rebuilds of the same revision write the same per-architecture image tags.
+  group: build-${{ github.ref }}-${{ github.sha }}
   queue: max
 
 env:
@@ -95,8 +96,8 @@ jobs:
           - { runner: ubuntu-24.04-arm, platform: linux-arm64-glibc }
           - { runner: ubuntu-24.04-arm, platform: linux-arm64-musl }
           - { runner: windows-2025, platform: windows-x64 }
-          - { runner: macos-15, platform: macos-arm64 }
-          - { runner: macos-15-intel, platform: macos-amd64 }
+          - { runner: macos-15, platform: macos-arm64, cargo_jobs: 2 }
+          - { runner: macos-15-intel, platform: macos-amd64, cargo_jobs: 4 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 110
     env:
@@ -140,7 +141,7 @@ jobs:
           if ! xcrun --sdk macosx metal -v; then xcodebuild -downloadComponent MetalToolchain; fi
       - if: runner.os == 'macOS'
         env:
-          CARGO_BUILD_JOBS: '2'
+          CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs }}
         run: bash packaging/build-unix-release.sh
       - if: runner.os == 'Windows'
         run: python packaging/windows/build-portable.py
@@ -240,6 +241,9 @@ jobs:
     name: Publish rolling build
     needs: package
     if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: distribution-${{ github.ref }}
+      queue: max
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -250,6 +254,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Publish the multi-platform image for this commit
+        run: |
+          image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/paxri
+          printf '%s\n' "IMAGE=$image" >> "$GITHUB_ENV"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$image:$IMAGE_TAG" \
+            "$image:$IMAGE_TAG-linux-amd64" "$image:$IMAGE_TAG-linux-arm64"
       - name: Check publication order
         id: order
         run: |
@@ -277,13 +288,9 @@ jobs:
         if: steps.order.outputs.publish == 'true'
         working-directory: dist
         run: sha256sum --strict --check SHA256SUMS
-      - name: Publish multi-platform dev and commit tags
-        if: steps.order.outputs.publish == 'true'
-        run: |
-          image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/paxri
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx imagetools create -t "$image:$IMAGE_TAG" -t "$image:dev" \
-            "$image:$IMAGE_TAG-linux-amd64" "$image:$IMAGE_TAG-linux-arm64"
       - name: Update the rolling prerelease
         if: steps.order.outputs.publish == 'true'
         run: python3 packaging/publish-rolling.py
+      - name: Point the dev image at the published commit
+        if: steps.order.outputs.publish == 'true'
+        run: docker buildx imagetools create -t "$IMAGE:dev" "$IMAGE:$IMAGE_TAG"

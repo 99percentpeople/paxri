@@ -6,6 +6,8 @@ Each build is identified by its Git commit. Cargo uses `0.0.0-dev` as the worksp
 
 Every push to `main` runs the native tests and builds the desktop archives, Android APK, and Docker images in one workflow. After all jobs succeed, the `rolling` prerelease publishes the packages, their checksums, and the Compose files for the same commit. Pull requests run the native tests and build the Android APK. [Rolling build](../../../releases/tag/rolling)
 
+Different commits can build concurrently. Rebuilds of the same commit on the same ref queue together because they share image tags. Each successful main build publishes a multi-platform image tagged with its commit. Updates to `rolling` and the `dev` image run one at a time. A build that finishes after a newer commit has been published keeps its commit image and skips those updates.
+
 You can also start **Build** manually. A manual run on another branch uploads the packages as Actions artifacts. [Build runs](../../../actions/workflows/builds.yml)
 
 ```sh
