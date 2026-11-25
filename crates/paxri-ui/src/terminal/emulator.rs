@@ -175,6 +175,7 @@ struct PendingEvents {
     queue: Vec<Event>,
     // Only the last title in an output batch is visible. An empty title restores the default.
     title: Option<String>,
+    bell: bool,
 }
 
 #[derive(Clone, Default)]
@@ -185,6 +186,7 @@ impl EventListener for TerminalEvents {
         match event {
             Event::Title(title) => self.0.borrow_mut().title = Some(title),
             Event::ResetTitle => self.0.borrow_mut().title = Some(String::new()),
+            Event::Bell => self.0.borrow_mut().bell = true,
             Event::PtyWrite(_)
             | Event::TextAreaSizeRequest(_)
             | Event::ColorRequest(_, _)
@@ -374,6 +376,10 @@ impl Emulator {
         Some(title)
     }
 
+    pub fn take_bell(&self) -> bool {
+        std::mem::take(&mut self.events.0.borrow_mut().bell)
+    }
+
     pub fn resize(&mut self, size: GridSize) -> bool {
         let grid = self.term.grid();
         if grid.columns() == size.columns() && grid.screen_lines() == size.screen_lines() {
@@ -447,6 +453,9 @@ impl Emulator {
 
     pub fn scroll_metrics(&self) -> crate::components::ScrollMetrics {
         let grid = self.term.grid();
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return crate::components::ScrollMetrics::new(grid.screen_lines() as f32, 0., 0.);
+        }
         crate::components::ScrollMetrics::new(
             grid.screen_lines() as f32,
             grid.history_size() as f32,
@@ -636,6 +645,10 @@ mod tests {
         assert_eq!(em.take_title_update().as_deref(), Some(""));
         em.process(b"ordinary output");
         assert_eq!(em.take_title_update(), None);
+        assert!(!em.take_bell());
+        em.process(b"\x07hello\x07");
+        assert!(em.take_bell());
+        assert!(!em.take_bell());
     }
 
     #[test]

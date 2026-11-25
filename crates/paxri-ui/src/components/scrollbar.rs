@@ -29,6 +29,15 @@ impl ScrollMetrics {
         }
     }
 
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn position(self) -> f32 {
+        if self.max_offset > 0. {
+            self.offset / self.max_offset
+        } else {
+            0.
+        }
+    }
+
     fn thumb(self, track: Pixels) -> Option<Thumb> {
         if self.viewport <= 0. || self.max_offset <= 0. || track <= px(0.) {
             return None;
@@ -162,6 +171,7 @@ impl Thumb {
 pub struct Scrollbar<S: ScrollSource> {
     id: ElementId,
     source: S,
+    color: Option<u32>,
 }
 
 impl<S: ScrollSource> Scrollbar<S> {
@@ -169,7 +179,13 @@ impl<S: ScrollSource> Scrollbar<S> {
         Self {
             id: id.into(),
             source,
+            color: None,
         }
+    }
+
+    pub fn color(mut self, rgb: u32) -> Self {
+        self.color = Some(rgb);
+        self
     }
 }
 
@@ -178,6 +194,7 @@ impl<S: ScrollSource> RenderOnce for Scrollbar<S> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let grab = window.use_keyed_state(self.id, cx, |_, _| Cell::new(None::<f32>));
         let colors = Ui::new(window, cx).colors;
+        let thumb_color = self.color.unwrap_or(colors.muted_foreground);
         let source = self.source;
         let measure = source.clone();
         canvas(
@@ -195,7 +212,7 @@ impl<S: ScrollSource> RenderOnce for Scrollbar<S> {
                 let active = hovered || grab.read(cx).get().is_some();
                 let width = if active { px(8.) } else { px(6.) };
                 let origin = bounds.origin + point((bounds.size.width - width) / 2., thumb.start);
-                let color = Hsla::from(rgb(colors.muted_foreground)).opacity(if active {
+                let color = Hsla::from(rgb(thumb_color)).opacity(if active {
                     1.
                 } else {
                     0.65

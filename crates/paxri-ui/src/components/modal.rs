@@ -13,6 +13,7 @@ pub struct ModalDialog {
     cancel_label: &'static str,
     confirm_label: &'static str,
     confirm_variant: ButtonVariant,
+    secondary_action: Option<(&'static str, ModalAction)>,
     on_confirm: ModalAction,
     on_cancel: ModalAction,
 }
@@ -33,6 +34,7 @@ impl ModalDialog {
             cancel_label: "Cancel",
             confirm_label,
             confirm_variant: ButtonVariant::Primary,
+            secondary_action: None,
             on_confirm: Rc::new(on_confirm),
             on_cancel: Rc::new(on_cancel),
         }
@@ -45,6 +47,15 @@ impl ModalDialog {
 
     pub fn confirm_variant(mut self, variant: ButtonVariant) -> Self {
         self.confirm_variant = variant;
+        self
+    }
+
+    pub fn secondary_action(
+        mut self,
+        label: &'static str,
+        on_action: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.secondary_action = Some((label, Rc::new(on_action)));
         self
     }
 }
@@ -62,6 +73,15 @@ impl RenderOnce for ModalDialog {
             .on_click(move |_, w, cx| dismiss_button(w, cx));
         #[cfg(target_os = "android")]
         let cancel_btn = cancel_btn.role(Role::Button).aria_label(self.cancel_label);
+
+        let secondary_btn = self.secondary_action.map(|(label, action)| {
+            let btn = ui
+                .button(ButtonVariant::Secondary, "modal-secondary", label)
+                .on_click(move |_, w, cx| action(w, cx));
+            #[cfg(target_os = "android")]
+            let btn = btn.role(Role::Button).aria_label(label);
+            btn
+        });
 
         let confirm_btn = ui
             .button(self.confirm_variant, "modal-confirm", self.confirm_label)
@@ -125,6 +145,7 @@ impl RenderOnce for ModalDialog {
                     .border_t_1()
                     .border_color(rgb(ui.colors.border))
                     .child(cancel_btn)
+                    .children(secondary_btn)
                     .child(confirm_btn),
             );
 

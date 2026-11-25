@@ -180,6 +180,7 @@ impl Dashboard {
         let Some(peer_id) = status.peers.get(peer.as_ref()) else { return };
         let sessions = self.terminal_sessions.entry(peer.clone()).or_insert_with(|| PeerSessions::new(&status.device_id, peer_id));
         let title = view.read(cx).title.clone();
+        let bell = view.read(cx).bell.clone();
         if let Some(saved) = self.session_titles.get(&sessions.title_scope, key) {
             title.update(cx, |title, _| title.clone_from(saved));
         }
@@ -192,6 +193,7 @@ impl Dashboard {
             cx.notify();
         })
         .detach();
+        cx.observe(&bell, |_, _, cx| cx.notify()).detach();
         let id = view.entity_id();
         // Closing a native window also releases its tabs.
         cx.observe_release(view, move |d, terminal, cx| {

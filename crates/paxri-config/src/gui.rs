@@ -160,6 +160,8 @@ pub enum GuiChange {
     Keybar(KeybarSettings),
     Shortcut(TerminalAction, Option<Shortcut>),
     RemoteClipboard(bool),
+    ClickableLinks(bool),
+    TerminalBell(bool),
 }
 
 impl Appearance {

@@ -47,7 +47,10 @@ mod indicator {
     impl<S: ScrollSource> RenderOnce for Scrollbar<S> {
         fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
             let state = window.use_keyed_state(self.id, cx, |_, _| Indicator::default());
-            let color = Hsla::from(rgb(Ui::new(window, cx).colors.muted_foreground));
+            let rgb_color = self
+                .color
+                .unwrap_or_else(|| Ui::new(window, cx).colors.muted_foreground);
+            let color = Hsla::from(rgb(rgb_color));
             canvas(
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
@@ -55,8 +58,8 @@ mod indicator {
                     let thumb = metrics.thumb(bounds.size.height);
                     let reduce_motion = cx.reduce_motion();
                     let alpha = state.update(cx, |indicator, cx| {
-                        let offset = thumb.map(|_| metrics.offset);
-                        let Some(elapsed) = indicator.motion.elapsed(offset, Instant::now()) else {
+                        let position = thumb.map(|_| metrics.position());
+                        let Some(elapsed) = indicator.motion.elapsed(position, Instant::now()) else {
                             indicator.wake = None;
                             return 0.;
                         };
@@ -121,5 +124,26 @@ mod tests {
         assert_eq!(Motion::opacity(HOLD, true), 0.);
         assert_eq!(motion.elapsed(None, fling + HOLD + FADE), None);
         assert_eq!(motion.elapsed(Some(0.), fling + HOLD + FADE), None);
+    }
+
+    #[test]
+    fn terminal_output_at_bottom_does_not_wake_indicator_until_user_scrolls() {
+        use super::super::ScrollMetrics;
+        let mut motion = Motion::default();
+        let t0 = Instant::now();
+        // Growing scrollback while pinned at the bottom keeps normalized position at 1.0.
+        for (i, history) in [20., 50., 200.].into_iter().enumerate() {
+            let pos = ScrollMetrics::new(24., history, history).position();
+            assert_eq!(
+                motion.elapsed(Some(pos), t0 + Duration::from_millis(i as u64 * 50)),
+                None
+            );
+        }
+        // Scrolling up changes normalized position and wakes the indicator.
+        let scrolled = ScrollMetrics::new(24., 200., 190.).position();
+        assert_eq!(
+            motion.elapsed(Some(scrolled), t0 + Duration::from_millis(200)),
+            Some(Duration::ZERO)
+        );
     }
 }

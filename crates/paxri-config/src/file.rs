@@ -193,7 +193,19 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
                 shortcut.map(|chord| chord.serialize(ser)).transpose()?,
             ),
             GuiChange::RemoteClipboard(enabled) => (
-                subtable(gui, "controls")?, "remote_clipboard", Some(enabled.serialize(ser)?),
+                subtable(gui, "controls")?,
+                "remote_clipboard",
+                Some(enabled.serialize(ser)?),
+            ),
+            GuiChange::ClickableLinks(enabled) => (
+                subtable(gui, "controls")?,
+                "clickable_links",
+                Some(enabled.serialize(ser)?),
+            ),
+            GuiChange::TerminalBell(enabled) => (
+                subtable(gui, "controls")?,
+                "terminal_bell",
+                Some(enabled.serialize(ser)?),
             ),
             GuiChange::Keybar(v) => {
                 let keys = subtable(gui, "keybar")?;

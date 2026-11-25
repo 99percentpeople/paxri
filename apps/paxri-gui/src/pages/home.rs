@@ -20,6 +20,29 @@ pub(crate) enum DevicesPane {
 }
 
 impl Dashboard {
+    pub(crate) fn visible_searches(&self, settings: bool) -> Vec<Entity<crate::Input>> {
+        if settings {
+            return vec![self.settings_editor.search.clone()];
+        }
+        let Some(status) = self
+            .status
+            .as_ref()
+            .filter(|_| self.gateway_transition().is_none())
+        else {
+            return Vec::new();
+        };
+        let mut searches = Vec::new();
+        match self.devices_pane {
+            Some(DevicesPane::Sessions) => searches.push(self.session_filters.search.clone()),
+            Some(DevicesPane::Forwards) => searches.push(self.forward_filters.search.clone()),
+            _ => {}
+        }
+        if !status.peers.is_empty() {
+            searches.push(self.device_filters.search.clone());
+        }
+        searches
+    }
+
     pub(crate) fn reconcile_device_selection(&mut self, status: &paxri_control::Status) {
         let select_peer = match &self.devices_pane {
             None => true,

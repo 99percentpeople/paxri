@@ -4,6 +4,7 @@ use super::{
     cursor::{self, CursorCell, Preedit},
     emulator::Emulator,
     grid_glyph,
+    links::TerminalLink,
 };
 use crate::components::caret::GlyphSpan;
 use crate::theme::{
@@ -247,6 +248,7 @@ pub fn paint(
     bounds: Bounds<Pixels>,
     marked: Option<&Preedit>,
     cursor_shape: Option<CursorShape>,
+    hovered_link: Option<&TerminalLink>,
     palette: &TerminalPalette,
     window: &mut Window,
     cx: &mut App,
@@ -317,6 +319,9 @@ pub fn paint(
                 let selected = selection.is_some_and(|s| {
                     s.contains(coord(start)) || (wide && s.contains(coord(col - 1)))
                 });
+                let linked = hovered_link.is_some_and(|link| {
+                    link.contains(coord(start)) || (wide && link.contains(coord(col - 1)))
+                });
                 let block_here = block.is_some_and(|c| c.covers(coord(start)));
                 let paint = CellPaint {
                     fg: if block_here {
@@ -331,7 +336,7 @@ pub fn paint(
                     } else {
                         style.bg
                     },
-                    underline: style.underline,
+                    underline: style.underline || linked,
                     block: block_here,
                 };
                 if let Some(last) = spans.last_mut()

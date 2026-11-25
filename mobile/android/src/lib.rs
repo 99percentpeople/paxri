@@ -130,6 +130,9 @@ enum Modal {
         key: SessionKey,
         input: Entity<paxri_ui::components::input::Input>,
     },
+    OpenLink {
+        uri: String,
+    },
 }
 
 struct Mobile {
@@ -356,6 +359,10 @@ impl Mobile {
         cx: &mut Context<Self>,
     ) {
         self.open_modal(Modal::RemoveForward { owner, name, route }, cx);
+    }
+
+    fn open_link_modal(&mut self, uri: String, cx: &mut Context<Self>) {
+        self.open_modal(Modal::OpenLink { uri }, cx);
     }
 
     fn open_pair_code_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -840,6 +847,17 @@ impl Mobile {
                             Toast::show(error, self.window, cx);
                         }
                     });
+                    let belled = s.screen.take_bell();
+                    if !replay && belled && visible && theme::terminal_controls(cx).terminal_bell {
+                        if s.bell.ring_in(
+                            move |this: &mut Mobile| {
+                                this.sessions.get_mut(&id).map(|s| &mut s.bell)
+                            },
+                            cx,
+                        ) {
+                            let _ = activity_action(&self.android, ActivityAction::TerminalBell);
+                        }
+                    }
                     if !replay && !reply.is_empty() {
                         let _ = s.input.send(Frame::Data(reply));
                     }

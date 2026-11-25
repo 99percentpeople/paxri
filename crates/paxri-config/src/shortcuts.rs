@@ -221,6 +221,8 @@ impl fmt::Display for Shortcut {
 #[serde(default, deny_unknown_fields)]
 pub struct TerminalControls {
     pub remote_clipboard: bool,
+    pub clickable_links: bool,
+    pub terminal_bell: bool,
     pub shortcuts: BTreeMap<TerminalAction, Shortcut>,
     // Older profiles and gateway responses can still contain the retired switch.
     #[serde(rename = "copy_selection_on_ctrl_c", skip_serializing)]
@@ -231,6 +233,8 @@ impl Default for TerminalControls {
     fn default() -> Self {
         Self {
             remote_clipboard: true,
+            clickable_links: true,
+            terminal_bell: true,
             shortcuts: BTreeMap::new(),
             legacy_copy_switch: serde::de::IgnoredAny,
         }

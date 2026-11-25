@@ -232,6 +232,25 @@ impl Mobile {
             return;
         };
         match gesture {
+            Gesture::Tap { x, y } if theme::terminal_controls(cx).clickable_links => {
+                let (row, col) = s.screen.grid_position(x, y);
+                if let Some(link) = s.screen.link_at(row, col) {
+                    self.open_link_modal(link.uri, cx);
+                    return;
+                }
+                if s.connected() {
+                    if s.screen.mouse_enabled(true) {
+                        let mode = *s.screen.term.mode();
+                        let cell = s.screen.mouse_cell(x, y);
+                        let mut click = report(mode, cell, 0, false, Modifiers::default());
+                        if !click.is_empty() {
+                            click.extend(report(mode, cell, 0, true, Modifiers::default()));
+                            let _ = s.input.send(Frame::Data(click));
+                        }
+                    }
+                    self.show_terminal_keyboard(id);
+                }
+            }
             Gesture::Keyboard | Gesture::Tap { .. } if s.connected() => {
                 if let Gesture::Tap { x, y } = gesture
                     && s.screen.mouse_enabled(true)

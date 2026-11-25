@@ -3,7 +3,7 @@ use paxri_core::connection::{peer_state, unix_time_ms};
 use paxri_ui::components::{
     ButtonVariant::{Destructive, Ghost, Secondary},
     DeviceCounts, DropdownState, FLOATING_ACTION_CLEARANCE, Icon, ListState, ListView,
-    ModalDialog, floating_corner,
+    ModalDialog, ScrollMetrics, ScrollSource, Scrollbar, floating_corner,
 };
 use paxri_ui::connections::presence_detail;
 use paxri_ui::terminal::display;
@@ -30,6 +30,35 @@ pub(super) fn initial_size(window: &Window, cell: CellSize, keys: &KeybarSetting
         ),
         cell,
     )
+}
+
+#[derive(Clone)]
+struct TerminalHistory {
+    mobile: Entity<Mobile>,
+    id: u64,
+}
+
+impl ScrollSource for TerminalHistory {
+    fn metrics(&self, cx: &App) -> ScrollMetrics {
+        self.mobile
+            .read(cx)
+            .sessions
+            .get(&self.id)
+            .map_or_else(
+                || ScrollMetrics::new(0., 0., 0.),
+                |s| s.screen.scroll_metrics(),
+            )
+    }
+
+    fn scroll_to(&self, offset: f32, cx: &mut App) {
+        self.mobile.update(cx, |this, cx| {
+            if let Some(s) = this.sessions.get_mut(&self.id)
+                && s.screen.scroll_to_offset(offset)
+            {
+                cx.notify();
+            }
+        });
+    }
 }
 
 impl Mobile {
@@ -117,6 +146,7 @@ impl Mobile {
                 )
             }
         };
+        let terminal_bell = matches!(self.page, Page::Terminal(id) if self.sessions.get(&id).is_some_and(|s| s.bell.is_ringing()));
         div()
             .w_full()
             .h(px(app_bar_height(window)))
@@ -159,10 +189,19 @@ impl Mobile {
                     .flex_col()
                     .child(
                         div()
-                            .truncate()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .when(terminal_bell, |row| row.child(Icon::Bell.draw(16.)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            ),
                     )
                     .when_some(subtitle, |labels, subtitle| {
                         labels.child(ui.muted(subtitle).text_xs().truncate())
@@ -430,8 +469,13 @@ impl Mobile {
         let cursor_shape = s
             .screen
             .cursor_for_paint(s.connected(), !s.composing.text.is_empty(), window, cx);
+        let indicator_color = s.screen.palette.surface.foreground;
         let view = cx.entity();
         let sizing = view.clone();
+        let history = TerminalHistory {
+            mobile: view.clone(),
+            id,
+        };
         let screen = canvas(
             move |bounds, window, cx| {
                 let scale = window.scale_factor();
@@ -484,6 +528,7 @@ impl Mobile {
                             bounds,
                             marked,
                             cursor_shape,
+                            None,
                             s.screen.palette,
                             window,
                             cx,
@@ -495,11 +540,15 @@ impl Mobile {
         .size_full();
         let grid = div()
             .id("terminal")
+            .relative()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
             .bg(rgb(background))
-            .child(screen);
+            .child(screen)
+            .child(
+                Scrollbar::vertical(("terminal-history", id), history).color(indicator_color),
+            );
         // The Android touch surface owns the multi-pointer key row beneath the canvas.
         div()
             .flex_1()
@@ -600,6 +649,44 @@ impl Mobile {
                     move |window, cx| confirm(&(), window, cx),
                     on_cancel,
                 )
+            }
+            Modal::OpenLink { uri } => {
+                let open_uri = uri.clone();
+                let copy_uri = uri.clone();
+                let confirm = cx.listener(move |this, _: &(), window, cx| {
+                    this.dismiss_modal(Some(window), cx);
+                    if let Err(error) =
+                        activity_action(&this.android, ActivityAction::OpenUrl(&open_uri))
+                    {
+                        Toast::show(error, this.window, cx);
+                    }
+                });
+                let copy = cx.listener(move |this, _: &(), window, cx| {
+                    this.dismiss_modal(Some(window), cx);
+                    match gpui_mobile::packages::clipboard::set_text(&copy_uri) {
+                        Ok(()) => Toast::show("Link copied", this.window, cx),
+                        Err(error) => Toast::show(error, this.window, cx),
+                    }
+                });
+                let body = div()
+                    .w_full()
+                    .min_w_0()
+                    .p_3()
+                    .rounded(theme::CONTROL_RADIUS)
+                    .border_1()
+                    .border_color(rgb(ui.colors.border))
+                    .bg(rgb(ui.colors.card))
+                    .text_color(rgb(ui.colors.canvas.foreground))
+                    .child(paxri_ui::terminal::links::wrappable_uri(uri));
+                ModalDialog::new(
+                    "open-link-modal",
+                    "Open link",
+                    body,
+                    "Open",
+                    move |window, cx| confirm(&(), window, cx),
+                    on_cancel,
+                )
+                .secondary_action("Copy", move |window, cx| copy(&(), window, cx))
             }
         };
         Some(dialog.into_any_element())

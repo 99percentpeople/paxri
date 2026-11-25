@@ -18,7 +18,7 @@ fn button_code(button: MouseButton) -> Option<u8> {
 
 #[derive(Default)]
 pub(super) struct Mouse {
-    held: u8,
+    pub(super) held: u8,
     last_motion: Option<(Cell, u8)>,
     wheel: Wheel,
 }
@@ -67,6 +67,20 @@ impl Terminal {
     ) {
         self.cancel_touch();
         self.touch.handles = false;
+        if e.button == MouseButton::Left
+            && self.mouse.held == 0
+            && Self::link_modifier_active(e.modifiers)
+            && let Some(link) = self.link_at(e.position, cx)
+        {
+            self.focus.focus(w);
+            self.link_modifier = true;
+            self.pending_link = Some(link.clone());
+            self.hovered_link = Some(link);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        self.pending_link = None;
         // A selection made locally with Shift can still be copied after Shift is released.
         let copy_local_selection = e.button == MouseButton::Right
             && self.mouse.held == 0
@@ -115,6 +129,20 @@ impl Terminal {
 
     // Window capture keeps a reported drag paired with its release even across the viewport edge.
     pub(super) fn mouse_up(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
+        if e.button == MouseButton::Left
+            && let Some(pending) = self.pending_link.take()
+        {
+            if Self::link_modifier_active(e.modifiers)
+                && self
+                    .link_at(e.position, cx)
+                    .is_some_and(|current| current.uri == pending.uri)
+            {
+                cx.open_url(&pending.uri);
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if let Some(code) = button_code(e.button)
             && self.mouse.held & (1 << code) != 0
         {
@@ -181,8 +209,9 @@ impl Terminal {
         &mut self,
         e: &MouseMoveEvent,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        self.update_hovered_link(e.position, e.modifiers, cx);
         if e.pressed_button.is_none()
             && !e.modifiers.shift
             && !self.selecting

@@ -69,10 +69,11 @@ impl Page {
         }
     }
 
-    fn icon(&self) -> Icon {
+    fn icon(&self, cx: &App) -> Icon {
         match self {
             Self::Home => Icon::Monitor,
             Self::Settings => Icon::Settings,
+            Self::Terminal { view, .. } if view.read(cx).is_bell_ringing(cx) => Icon::Bell,
             Self::Terminal { .. } => Icon::Terminal,
         }
     }
@@ -92,11 +93,12 @@ impl Page {
         selected: bool,
         close: impl IntoElement,
         label: impl IntoElement,
+        cx: &App,
     ) -> Div {
         dock_tab(
             ui,
             settings,
-            self.icon(),
+            self.icon(cx),
             label,
             selected,
             (*self != Self::Home).then_some(close),
@@ -493,7 +495,7 @@ impl Workspace {
                 cx.listener(move |v, _, w, cx| v.close_tab(&closing, w, cx)),
             );
             let tab = page
-                .tab(ui, settings, self.active == *page, close, label)
+                .tab(ui, settings, self.active == *page, close, label, cx)
                 .id(page.element_id())
                 .when(*page != Page::Home, |tab| {
                     tab.on_mouse_down(
@@ -583,11 +585,13 @@ impl Render for Workspace {
         let tabs = self.tab_bar(ui, window, cx);
         let panel = self.active_panel(ui, window, cx);
         let dock = DockLayout::new("paxri", tabs, panel, self.titlebar_actions(ui, cx));
-        let sessions_visible = self.active == Page::Home && self.dashboard.read(cx).devices_pane == Some(pages::DevicesPane::Sessions);
+        let searches = match self.active {
+            Page::Settings => self.dashboard.read(cx).visible_searches(true),
+            Page::Home => self.dashboard.read(cx).visible_searches(false),
+            Page::Terminal { .. } => Vec::new(),
+        };
         let dock = dock
-            .when(self.active == Page::Settings || sessions_visible, |dock| {
-                let dashboard = self.dashboard.read(cx);
-                let search = if sessions_visible { dashboard.session_filters.search.clone() } else { dashboard.settings_editor.search.clone() };
+            .when(!searches.is_empty(), |dock| {
                 dock.capture_key_down(move |event, window, cx| {
                     if window.default_prevented() {
                         return;
@@ -595,11 +599,19 @@ impl Render for Workspace {
                     let key = &event.keystroke;
                     let shortcut = Modifiers::secondary_key();
                     if key.modifiers == shortcut && key.key.eq_ignore_ascii_case("f") {
-                        search.read(cx).focus_handle(cx).focus(window);
-                    } else if key.key == "escape" && !key.modifiers.modified()
-                        && search.read(cx).focus_handle(cx).is_focused(window)
-                        && !search.read(cx).is_composing() && !search.read(cx).text().is_empty()
-                    {
+                        if let Some(primary) = searches.first() {
+                            primary.read(cx).focus_handle(cx).focus(window);
+                        }
+                    } else if key.key == "escape" && !key.modifiers.modified() {
+                        let focused = searches.iter().find(|search| {
+                            let field = search.read(cx);
+                            field.focus_handle(cx).is_focused(window)
+                                && !field.is_composing()
+                                && !field.text().is_empty()
+                        });
+                        let Some(search) = focused else {
+                            return;
+                        };
                         search.update(cx, |field, cx| field.set_text("", cx));
                     } else {
                         return;
@@ -617,6 +629,7 @@ impl Render for Workspace {
                         true,
                         tab_close(ui),
                         drag.page.label(cx),
+                        cx,
                     ),
                 )
             })

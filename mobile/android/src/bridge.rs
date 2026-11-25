@@ -294,6 +294,8 @@ pub(crate) enum ActivityAction<'a> {
     SelectionHandles(u64, [i32; 5], bool),
     StopFling(u64),
     ShowTerminalKeyboard(u64),
+    OpenUrl(&'a str),
+    TerminalBell,
 }
 
 pub(crate) fn load_terminal_zoom(app: &AndroidApp) -> f32 {
@@ -403,6 +405,18 @@ pub(crate) fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> R
                 jni_sig!("(J)V"),
                 &[(id as i64).into()],
             ),
+            ActivityAction::OpenUrl(url) => {
+                let value = JString::from_str(env, url).map_err(|e| e.to_string())?;
+                env.call_method(
+                    activity,
+                    jni_str!("openUrl"),
+                    jni_sig!("(Ljava/lang/String;)V"),
+                    &[(&value).into()],
+                )
+            }
+            ActivityAction::TerminalBell => {
+                env.call_method(activity, jni_str!("terminalBell"), jni_sig!("()V"), &[])
+            }
             ActivityAction::TouchArea(id, [x, y, width, height, toolbar], keys, touchable) => {
                 let rows: Vec<Vec<_>> = keys
                     .rows

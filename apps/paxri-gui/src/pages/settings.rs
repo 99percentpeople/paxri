@@ -7,7 +7,6 @@ use crate::{
     },
     theme::{self, Appearance, SPACE_2, SPACE_3},
 };
-use anyhow::Context as _;
 use paxri_ui::settings::{controls::theme_cards, shortcuts};
 use gpui::{prelude::*, *};
 use paxri_config::gui::TabPlacement;
@@ -260,16 +259,21 @@ impl Dashboard {
     }
 
     pub(super) fn open_config_file(&self, path: std::path::PathBuf, window: AnyWindowHandle, cx: &mut Context<Self>) {
-        let launch = self.runtime.spawn_blocking(move || -> anyhow::Result<()> {
+        let prepare = self.runtime.spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
             let path = std::path::absolute(path)?;
             if !path.try_exists()? {
                 paxri_config::file::init(&path)?;
             }
-            open::that(&path).with_context(|| format!("Could not open {}", path.display()))
+            Ok(path)
         });
         cx.spawn(async move |_, cx| {
-            if let Err(error) = launch.await.map_err(anyhow::Error::from).and_then(|r| r) {
-                let _ = cx.update(|cx| crate::components::Toast::show(format!("Open config file: {error:#}"), window, cx));
+            match prepare.await.map_err(anyhow::Error::from).and_then(|r| r) {
+                Ok(path) => {
+                    let _ = cx.update(|cx| cx.open_with_system(&path));
+                }
+                Err(error) => {
+                    let _ = cx.update(|cx| crate::components::Toast::show(format!("Open config file: {error:#}"), window, cx));
+                }
             }
         })
         .detach();

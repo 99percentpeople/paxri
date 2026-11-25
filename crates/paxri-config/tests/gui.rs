@@ -21,10 +21,14 @@ fn terminal_shortcuts_round_trip_and_conflicting_edits_preserve_the_file() {
     let change = defaults.rebind(paste, Some(Shortcut::from_keys(CTRL | ALT, "v").unwrap())).unwrap();
     set_gui(&path, GuiChange::Shortcut(paste, change), false).unwrap();
     set_gui(&path, GuiChange::RemoteClipboard(false), false).unwrap();
+    set_gui(&path, GuiChange::ClickableLinks(false), false).unwrap();
+    set_gui(&path, GuiChange::TerminalBell(false), false).unwrap();
     let saved = read_gui(&path).unwrap().controls;
     assert_eq!(saved.resolve(CTRL | ALT, "v"), Some(paste));
     assert_eq!(saved.resolve(CTRL | SHIFT, "v"), None);
     assert!(!saved.remote_clipboard);
+    assert!(!saved.clickable_links);
+    assert!(!saved.terminal_bell);
 
     let before = fs::read_to_string(&path).unwrap();
     assert!(before.starts_with(original));

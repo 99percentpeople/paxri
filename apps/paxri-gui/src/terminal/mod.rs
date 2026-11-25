@@ -1,14 +1,16 @@
+use paxri_ui::terminal::bell::BellState;
 use paxri_ui::terminal::cursor;
 use paxri_ui::terminal::display;
 use paxri_ui::terminal::emulator;
 use paxri_ui::terminal::keys;
+use paxri_ui::terminal::links::TerminalLink;
 mod mouse;
 mod session;
 mod touch;
 pub(crate) use paxri_ui::terminal::title::TabTitle;
 
 use crate::components::{ScrollMetrics, ScrollSource, Scrollbar, Ui};
-use crate::theme::{SPACE_2, Zoom};
+use crate::theme::{CONTROL_RADIUS, SPACE_2, Zoom};
 use crate::theme::fonts::{CellSize, MonospaceFonts};
 use alacritty_terminal::{grid::Scroll, term::TermMode};
 use emulator::{Emulator, GridSize};
@@ -45,9 +47,51 @@ fn layout_grid(available: Bounds<Pixels>, cell: CellSize) -> (GridSize, Bounds<P
     (grid, Bounds::centered_at(available.center(), cells))
 }
 
+fn play_system_bell(cx: &App) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = cx;
+        objc2_app_kit::NSBeep();
+    }
+    #[cfg(windows)]
+    {
+        cx.background_executor()
+            .spawn(async move {
+                unsafe {
+                    windows_sys::Win32::System::Diagnostics::Debug::MessageBeep(
+                        windows_sys::Win32::UI::WindowsAndMessaging::MB_OK,
+                    );
+                }
+            })
+            .detach();
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        cx.background_executor()
+            .spawn(async move {
+                let played = std::process::Command::new("canberra-gtk-play")
+                    .args(["-i", "bell"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !played
+                    && let Ok((conn, _)) = x11rb::connect(None)
+                {
+                    use x11rb::connection::Connection as _;
+                    let _ = x11rb::protocol::xproto::bell(&conn, 0);
+                    let _ = conn.flush();
+                }
+            })
+            .detach();
+    }
+}
+
 pub struct Terminal {
     focus: FocusHandle,
     pub(super) title: Entity<TabTitle>,
+    pub(super) bell: Entity<BellState>,
     emulator: Emulator,
     session: Option<Session>,
     error: Option<String>,
@@ -56,6 +100,9 @@ pub struct Terminal {
     selecting: bool,
     mouse: mouse::Mouse,
     touch: touch::Touch,
+    link_modifier: bool,
+    hovered_link: Option<TerminalLink>,
+    pending_link: Option<TerminalLink>,
     hidden_pointer_at: Option<Point<Pixels>>,
     focused: bool,
     focus_observers: Option<(WindowId, [Subscription; 3])>,
@@ -132,6 +179,14 @@ impl Terminal {
                                 }
                             });
                         }
+                        if view.emulator.take_bell()
+                            && crate::theme::terminal_controls(cx).terminal_bell
+                        {
+                            let play = view.bell.update(cx, |bell, cx| bell.ring(cx));
+                            if play {
+                                play_system_bell(cx);
+                            }
+                        }
                         if !reply.is_empty() {
                             view.send(reply);
                         }
@@ -152,6 +207,7 @@ impl Terminal {
             Terminal {
                 focus,
                 title: cx.new(|_| TabTitle::default()),
+                bell: cx.new(|_| BellState::default()),
                 emulator,
                 session: Some(session),
                 error: None,
@@ -160,6 +216,9 @@ impl Terminal {
                 selecting: false,
                 touch: Default::default(),
                 mouse: mouse::Mouse::default(),
+                link_modifier: false,
+                hovered_link: None,
+                pending_link: None,
                 hidden_pointer_at: None,
                 focused: false,
                 focus_observers: None,
@@ -177,6 +236,10 @@ impl Terminal {
 
     pub(super) fn has_exited(&self) -> bool {
         self.session.is_none() && self.error.is_none()
+    }
+
+    pub(super) fn is_bell_ringing(&self, cx: &App) -> bool {
+        self.bell.read(cx).is_ringing()
     }
 
     fn resize(&mut self, available: Bounds<Pixels>, cx: &mut Context<Self>) -> Bounds<Pixels> {
@@ -197,6 +260,7 @@ impl Terminal {
             Output::Replay(bytes) => {
                 self.emulator.process(&bytes);
                 let _ = self.emulator.finish_batch();
+                let _ = self.emulator.take_bell();
             }
             Output::Bytes(bytes) => self.emulator.process(&bytes),
             Output::Error(error) => {
@@ -220,6 +284,39 @@ impl Terminal {
         let local = position - self.viewport.origin;
         self.emulator
             .grid_position(f32::from(local.x), f32::from(local.y))
+    }
+
+    pub(super) fn link_modifier_active(modifiers: Modifiers) -> bool {
+        modifiers == Modifiers::secondary_key()
+    }
+
+    pub(super) fn link_at(&self, position: Point<Pixels>, cx: &App) -> Option<TerminalLink> {
+        if !crate::theme::terminal_controls(cx).clickable_links || !self.viewport.contains(&position)
+        {
+            return None;
+        }
+        let (row, x) = self.cell_at(position);
+        self.emulator.link_at(row, x)
+    }
+
+    pub(super) fn update_hovered_link(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let active = Self::link_modifier_active(modifiers);
+        self.link_modifier = active;
+        let next = (active
+            && !self.selecting
+            && self.mouse.held == 0
+            && self.hidden_pointer_at.is_none())
+        .then(|| self.link_at(position, cx))
+        .flatten();
+        if next != self.hovered_link {
+            self.hovered_link = next;
+            cx.notify();
+        }
     }
 
     fn start_selection(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
@@ -257,6 +354,9 @@ impl Terminal {
                 }
                 self.marked.clear();
                 self.selecting = false;
+                self.link_modifier = false;
+                self.hovered_link = None;
+                self.pending_link = None;
                 self.hidden_pointer_at = None;
                 self.cancel_touch();
                 self.release_pointer();
@@ -351,6 +451,16 @@ impl Render for Terminal {
             self.hidden_pointer_at = None;
         }
         let hide_pointer = self.hidden_pointer_at.is_some();
+        let pointer = window.mouse_position();
+        let hovered_link = (self.link_modifier
+            && window.is_window_hovered()
+            && !self.selecting
+            && self.mouse.held == 0
+            && !hide_pointer)
+        .then(|| self.link_at(pointer, cx))
+        .flatten();
+        self.hovered_link = hovered_link.clone();
+        let preview_top = hovered_link.is_some() && pointer.y > self.viewport.bottom() - px(48.);
         let cursor_shape = self.emulator.cursor_for_paint(
             self.focused && self.is_running(),
             !self.marked.text.is_empty(),
@@ -377,6 +487,7 @@ impl Render for Terminal {
                         bounds,
                         (!view.marked.text.is_empty()).then_some(&view.marked),
                         cursor_shape,
+                        view.hovered_link.as_ref(),
                         palette,
                         window,
                         cx,
@@ -414,6 +525,9 @@ impl Render for Terminal {
             .text_color(rgb(palette.surface.foreground))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_modifiers_changed(cx.listener(|view, e: &ModifiersChangedEvent, window, cx| {
+                view.update_hovered_link(window.mouse_position(), e.modifiers, cx);
+            }))
             .when_some(self.error.clone(), |d, error| {
                 d.child(
                     div()
@@ -436,13 +550,37 @@ impl Render for Terminal {
                     .min_h_0()
                     .p(SPACE_2)
                     .overflow_hidden()
-                    .cursor(CursorStyle::Arrow)
+                    .cursor(if hovered_link.is_some() {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::Arrow
+                    })
                     .on_any_mouse_down(cx.listener(Self::mouse_down))
                     .on_mouse_move(cx.listener(Self::mouse_hover))
                     .on_pinch(|event, window, cx| TerminalZoom::apply(Zoom::Pinch(event.scale), window, cx))
                     .on_scroll_wheel(cx.listener(Self::wheel))
                     .child(screen)
                     .child(Scrollbar::vertical("terminal-history", TerminalHistory(cx.entity())))
+                    .when_some(hovered_link, |screen, link| {
+                        let pill = div()
+                            .absolute()
+                            .left_2()
+                            .when(preview_top, |d| d.top_2())
+                            .when(!preview_top, |d| d.bottom_2())
+                            .max_w(px(460.))
+                            .px_2()
+                            .py_1()
+                            .rounded(CONTROL_RADIUS)
+                            .border_1()
+                            .border_color(rgb(ui.colors.border))
+                            .bg(rgb(ui.colors.card))
+                            .text_color(rgb(ui.colors.canvas.foreground))
+                            .text_xs()
+                            .truncate()
+                            .shadow_sm()
+                            .child(link.uri);
+                        screen.child(pill)
+                    })
                     .when(self.touch.handles && self.emulator.selected_range().is_some(), |screen| screen.child(
                         div().absolute().right_3().top_2().occlude().child(
                             ui.button(crate::components::ButtonVariant::Outline, "copy-touch-selection", "Copy")

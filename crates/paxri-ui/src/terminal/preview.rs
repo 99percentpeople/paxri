@@ -58,6 +58,7 @@ impl RenderOnce for TerminalPreview {
                                 bounds,
                                 None,
                                 cursor_on.then_some(cursor::default_style(&appearance).shape),
+                                None,
                                 palette,
                                 window,
                                 cx,

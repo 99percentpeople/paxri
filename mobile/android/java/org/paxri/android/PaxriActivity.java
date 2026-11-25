@@ -16,6 +16,7 @@ import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.View;
@@ -70,6 +71,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     private EditText terminalInput;
     private long terminalInputSession;
     private boolean terminalComposing;
+    private android.media.Ringtone bellRingtone;
 
     private void clearTerminalComposition() {
         if (terminalComposing) {
@@ -211,6 +213,10 @@ public final class PaxriActivity extends GpuiInputActivity {
     protected void onDestroy() {
         connectionHandler.removeCallbacks(stopConnections);
         stopConnectionService();
+        if (bellRingtone != null) {
+            bellRingtone.stop();
+            bellRingtone = null;
+        }
         super.onDestroy();
     }
 
@@ -528,6 +534,51 @@ public final class PaxriActivity extends GpuiInputActivity {
             if (toast != null) toast.cancel();
             toast = Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT);
             toast.show();
+        });
+    }
+
+    public void openUrl(String url) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            try {
+                Intent intent = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            } catch (android.content.ActivityNotFoundException | SecurityException e) {
+                showToast("No app can open this link");
+            }
+        });
+    }
+
+    public void terminalBell() {
+        runOnUiThread(() -> {
+            if (!visible || isFinishing() || isDestroyed()) return;
+            android.media.AudioManager audio = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            int mode = audio != null ? audio.getRingerMode() : android.media.AudioManager.RINGER_MODE_NORMAL;
+            if (mode == android.media.AudioManager.RINGER_MODE_NORMAL) {
+                try {
+                    if (bellRingtone == null) {
+                        android.net.Uri uri = android.media.RingtoneManager.getDefaultUri(
+                                android.media.RingtoneManager.TYPE_NOTIFICATION);
+                        if (uri != null) {
+                            bellRingtone = android.media.RingtoneManager.getRingtone(
+                                    getApplicationContext(), uri);
+                        }
+                    }
+                    if (bellRingtone != null) {
+                        if (bellRingtone.isPlaying()) bellRingtone.stop();
+                        bellRingtone.play();
+                    }
+                } catch (RuntimeException e) {
+                    android.util.Log.w("paxri", "Playing terminal bell", e);
+                }
+            } else if (mode == android.media.AudioManager.RINGER_MODE_VIBRATE) {
+                View view = gestures != null ? gestures : getWindow().getDecorView();
+                int feedback = Build.VERSION.SDK_INT >= 30
+                        ? HapticFeedbackConstants.REJECT
+                        : HapticFeedbackConstants.LONG_PRESS;
+                view.performHapticFeedback(feedback);
+            }
         });
     }
 
