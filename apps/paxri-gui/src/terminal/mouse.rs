@@ -77,7 +77,12 @@ impl Terminal {
     ) {
         self.cancel_touch();
         self.touch.handles = false;
+        // A selection made locally with Shift can still be copied after Shift is released.
+        let copy_local_selection = e.button == MouseButton::Right
+            && self.mouse.held == 0
+            && self.emulator.selected_range().is_some();
         if self.mouse_enabled()
+            && !copy_local_selection
             && !e.modifiers.shift
             && !self.selecting
             && self.viewport.contains(&e.position)

@@ -281,10 +281,10 @@ public final class PaxriActivity extends GpuiInputActivity {
         });
     }
 
-    public void setSelectionHandles(long session, int x1, int y1, int x2, int y2, int lineHeight) {
+    public void setSelectionHandles(long session, int x1, int y1, int x2, int y2, int lineHeight, boolean connected) {
         runOnUiThread(() -> {
             if (touchSession == session && gestures != null)
-                gestures.setHandles(x1, y1, x2, y2, lineHeight);
+                gestures.setHandles(x1, y1, x2, y2, lineHeight, connected);
         });
     }
 

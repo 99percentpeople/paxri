@@ -126,7 +126,17 @@ impl Terminal {
                         for event in std::iter::from_fn(|| events.try_recv().ok()).take(32) {
                             view.output(event, cx);
                         }
-                        let reply = view.emulator.finish_batch();
+                        let reply = view.emulator.finish_batch_with_clipboard(|_target, text| {
+                            if view.focused {
+                                let item = ClipboardItem::new_string(text);
+                                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                                if _target == alacritty_terminal::term::ClipboardType::Selection {
+                                    cx.write_to_primary(item);
+                                    return;
+                                }
+                                cx.write_to_clipboard(item);
+                            }
+                        });
                         if let Some(title) = view.emulator.take_title_update() {
                             view.title.update(cx, |tab, cx| {
                                 if tab.set_pty(title) {
@@ -319,18 +329,8 @@ impl Terminal {
     }
     fn paste(&mut self, window: &Window, cx: &App) {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            let text = text.replace("\r\n", "\n").replace('\n', "\r");
-            let bytes = if self
-                .emulator
-                .term
-                .mode()
-                .contains(TermMode::BRACKETED_PASTE)
-            {
-                format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
-            } else {
-                text.into_bytes()
-            };
-            self.write(bytes, window);
+            let bracketed = self.emulator.term.mode().contains(TermMode::BRACKETED_PASTE);
+            self.write(keys::paste(&text, bracketed), window);
         }
     }
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

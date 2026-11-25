@@ -26,6 +26,7 @@ pub(super) enum Gesture {
     FinishSelection {
         copy: bool,
     },
+    Paste,
     Scroll {
         dy: f32,
         x: f32,
@@ -133,6 +134,15 @@ pub extern "system" fn Java_org_paxri_android_TerminalGestures_finishSelection(
         session as u64,
         Gesture::FinishSelection { copy },
     ));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_TerminalGestures_paste(
+    _env: EnvUnowned,
+    _class: JClass,
+    session: i64,
+) {
+    post(Update::Gesture(session as u64, Gesture::Paste));
 }
 
 #[unsafe(no_mangle)]
@@ -308,6 +318,18 @@ impl Mobile {
                     Toast::show(error, self.window, cx);
                 }
                 s.screen.term.selection = None;
+            }
+            Gesture::Paste => {
+                if s.connected() {
+                    match gpui_mobile::packages::clipboard::get_text() {
+                        Ok(Some(text)) => {
+                            let bracketed = s.screen.term.mode().contains(TermMode::BRACKETED_PASTE);
+                            s.write_input(keys::paste(&text, bracketed));
+                        }
+                        Ok(None) => {}
+                        Err(error) => Toast::show(error, self.window, cx),
+                    }
+                }
             }
             Gesture::Scroll { dy, x, y, fling } => {
                 let mode = *s.screen.term.mode();

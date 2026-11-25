@@ -1,5 +1,14 @@
 use gpui::{Keystroke, Modifiers};
 
+pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = text.replace("\r\n", "\n").replace('\n', "\r");
+    if bracketed {
+        format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
+    } else {
+        text.into_bytes()
+    }
+}
+
 pub fn sequence(key: &Keystroke, application_cursor: bool) -> Option<Vec<u8>> {
     let mods = key.modifiers;
     if mods.platform {
@@ -147,6 +156,15 @@ pub fn named_key(name: &str, mods: Modifiers, application_cursor: bool) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_preserves_unicode_and_frames_multiline_input() {
+        assert_eq!(paste(" 中\r\n文\n ", false), " 中\r文\r ".as_bytes());
+        assert_eq!(
+            paste("中\n\x1b[201~文", true),
+            "\x1b[200~中\r[201~文\x1b[201~".as_bytes()
+        );
+    }
 
     #[test]
     fn virtual_modifiers_apply_to_the_first_key_or_the_whole_commit() {

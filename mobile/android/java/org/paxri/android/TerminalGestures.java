@@ -1,6 +1,7 @@
 package org.paxri.android;
 
 import android.app.Activity;
+import android.content.ClipboardManager;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
 import android.graphics.Rect;
@@ -26,6 +27,7 @@ final class TerminalGestures extends View {
     private static native void appDrag(long session, int action, float x, float y);
     private static native void moveHandle(long session, float x, float y, boolean leading);
     private static native void finishSelection(long session, boolean copy);
+    private static native void paste(long session);
     private static native void scroll(long session, float dy, float x, float y, boolean fromFling);
     private static native void zoom(long session, float factor, boolean finished);
 
@@ -37,6 +39,7 @@ final class TerminalGestures extends View {
     private final int minimumFlingVelocity;
     private final int touchSlop;
     private ActionMode selectionMode;
+    private boolean connected;
     private boolean selecting;
     private boolean selectionDragging;
     private boolean scrolling;
@@ -217,7 +220,7 @@ final class TerminalGestures extends View {
             }
             if (action == MotionEvent.ACTION_UP) {
                 selecting = false;
-                if (!reportingDrag) showCopyAction();
+                if (!reportingDrag) showSelectionMenu();
             }
         } else if (action == MotionEvent.ACTION_CANCEL) {
             cancelDragSelection();
@@ -249,11 +252,14 @@ final class TerminalGestures extends View {
 
     void stopFling() { fling.forceFinished(true); }
 
-    void setHandles(int x1, int y1, int x2, int y2, int height) {
+    void setHandles(int x1, int y1, int x2, int y2, int height, boolean connected) {
+        boolean connectionChanged = this.connected != connected;
+        this.connected = connected;
         lineHeight = height;
         leading.place(x1, y1);
         trailing.place(x2, y2);
         if (height == 0 && selectionMode != null) dismissSelection();
+        else if (connectionChanged && selectionMode != null) selectionMode.invalidate();
         invalidate();
     }
 
@@ -285,18 +291,38 @@ final class TerminalGestures extends View {
         }
     }
 
-    private void showCopyAction() {
-        View decor = ((Activity)getContext()).getWindow().getDecorView();
+    // hasText checks for nonempty text without retrieving the clipboard contents.
+    @SuppressWarnings("deprecation")
+    private boolean canPaste(ClipboardManager clipboard) {
+        return connected && clipboard != null && clipboard.hasText();
+    }
+
+    private void showSelectionMenu() {
+        PaxriActivity activity = (PaxriActivity)getContext();
+        View decor = activity.getWindow().getDecorView();
+        ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
         selectionMode = decor.startActionMode(new ActionMode.Callback2() {
             private boolean copy;
+            private final ClipboardManager.OnPrimaryClipChangedListener clipboardChanged = () -> {
+                if (selectionMode != null) selectionMode.invalidate();
+            };
 
             @Override public boolean onCreateActionMode(ActionMode mode, Menu menu) {
                 menu.add(Menu.NONE, android.R.id.copy, Menu.NONE, android.R.string.copy)
                         .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
+                menu.add(Menu.NONE, android.R.id.paste, Menu.NONE, android.R.string.paste)
+                        .setVisible(canPaste(clipboard)).setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
+                if (clipboard != null) clipboard.addPrimaryClipChangedListener(clipboardChanged);
                 return true;
             }
 
-            @Override public boolean onPrepareActionMode(ActionMode mode, Menu menu) { return false; }
+            @Override public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                MenuItem paste = menu.findItem(android.R.id.paste);
+                boolean visible = canPaste(clipboard);
+                if (paste.isVisible() == visible) return false;
+                paste.setVisible(visible);
+                return true;
+            }
 
             @Override public void onGetContentRect(ActionMode mode, View view, Rect outRect) {
                 int[] origin = new int[2], anchor = new int[2];
@@ -308,13 +334,20 @@ final class TerminalGestures extends View {
             }
 
             @Override public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
-                if (item.getItemId() != android.R.id.copy) return false;
-                copy = true;
+                if (item.getItemId() == android.R.id.copy) {
+                    copy = true;
+                } else if (item.getItemId() == android.R.id.paste) {
+                    activity.finishTerminalComposition();
+                    paste(session);
+                } else {
+                    return false;
+                }
                 mode.finish();
                 return true;
             }
 
             @Override public void onDestroyActionMode(ActionMode mode) {
+                if (clipboard != null) clipboard.removePrimaryClipChangedListener(clipboardChanged);
                 selectionMode = null;
                 dragged = null;
                 invalidate();

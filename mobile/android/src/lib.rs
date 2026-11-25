@@ -379,7 +379,7 @@ enum ActivityAction<'a> {
     BackEnabled(bool),
     Appearance(bool, &'a theme::Palette),
     TouchArea(u64, [i32; 5], &'a KeybarSettings, bool),
-    SelectionHandles(u64, [i32; 5]),
+    SelectionHandles(u64, [i32; 5], bool),
     StopFling(u64),
     ShowTerminalKeyboard(u64),
 }
@@ -463,9 +463,9 @@ fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), S
                     &[dark_icons.into(), argb(colors.border), argb(colors.secondary.background),
                       argb(colors.input_border), argb(colors.secondary.foreground), argb(colors.terminal.ansi[4])])
             }
-            ActivityAction::SelectionHandles(id, [x1,y1,x2,y2,h]) => env.call_method(
-                activity, jni_str!("setSelectionHandles"), jni_sig!("(JIIIII)V"),
-                &[(id as i64).into(), x1.into(), y1.into(), x2.into(), y2.into(), h.into()]),
+            ActivityAction::SelectionHandles(id, [x1,y1,x2,y2,h], connected) => env.call_method(
+                activity, jni_str!("setSelectionHandles"), jni_sig!("(JIIIIIZ)V"),
+                &[(id as i64).into(), x1.into(), y1.into(), x2.into(), y2.into(), h.into(), connected.into()]),
             ActivityAction::StopFling(id) => env.call_method(
                 activity,
                 jni_str!("stopTerminalFling"),
@@ -542,6 +542,12 @@ enum SessionState {
 }
 
 impl Session {
+    fn write_input(&mut self, bytes: Vec<u8>) {
+        self.screen.input_started();
+        self.screen.scroll(Scroll::Bottom);
+        let _ = self.input.send(Frame::Data(bytes));
+    }
+
     fn grid_size(&self) -> GridSize {
         GridSize {
             rows: self.screen.term.screen_lines() as u16,
@@ -610,7 +616,7 @@ struct Mobile {
     ui_font: SharedString,
     terminal_zoom: f32,
     font: TerminalFont,
-    selection_handles: Option<(u64, [i32; 5])>,
+    selection_handles: Option<(u64, [i32; 5], bool)>,
     touch_area: Option<(u64, [i32; 5], Arc<KeybarSettings>, bool)>,
     keyboard_on_entry: Option<u64>,
     rt: Handle,
@@ -1216,9 +1222,7 @@ impl Mobile {
                     } else {
                         keys::committed_text(&value, first, held)
                     };
-                    s.screen.input_started();
-                    s.screen.scroll(Scroll::Bottom);
-                    let _ = s.input.send(Frame::Data(bytes));
+                    s.write_input(bytes);
                 }
             }
             Update::Resumed => {
@@ -1294,7 +1298,14 @@ impl Mobile {
                         s.screen = Emulator::with_palette(s.grid_size(), s.screen.palette, s.screen.font.clone());
                     }
                     s.screen.process(&bytes);
-                    let reply = s.screen.finish_batch();
+                    let visible = self.page == Page::Terminal(id) && *ACTIVITY_VISIBLE.borrow();
+                    let reply = s.screen.finish_batch_with_clipboard(|_, text| {
+                        if !replay && visible
+                            && let Err(error) = gpui_mobile::packages::clipboard::set_text(&text)
+                        {
+                            Toast::show(error, self.window, cx);
+                        }
+                    });
                     if !replay && !reply.is_empty() {
                         let _ = s.input.send(Frame::Data(reply));
                     }

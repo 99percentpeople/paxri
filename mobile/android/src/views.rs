@@ -473,10 +473,11 @@ impl Mobile {
                             }));
                         }
                         let handles = s.handle_positions(scale);
-                        if this.selection_handles != Some((id, handles)) {
-                            if activity_action(&this.android, ActivityAction::SelectionHandles(id, handles)).is_ok() {
-                                this.selection_handles = Some((id, handles));
-                            }
+                        let connected = s.connected();
+                        if this.selection_handles != Some((id, handles, connected))
+                            && activity_action(&this.android, ActivityAction::SelectionHandles(id, handles, connected)).is_ok()
+                        {
+                            this.selection_handles = Some((id, handles, connected));
                         }
                         // The IME binds to the session registered by set_touch_area above.
                         if this.keyboard_on_entry == Some(id) && s.connected() && touchable

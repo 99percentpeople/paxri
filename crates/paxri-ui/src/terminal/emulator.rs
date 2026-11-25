@@ -7,7 +7,7 @@ use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     index::{Column, Line, Point},
     term::{
-        Config, Osc52, TermMode,
+        ClipboardType, Config, Osc52, TermMode,
         cell::{Cell, Flags, LineLength},
     },
     vte::ansi::{Color, CursorStyle, NamedColor, Processor, Rgb},
@@ -172,7 +172,7 @@ impl CursorAnchor {
 
 #[derive(Default)]
 struct PendingEvents {
-    replies: Vec<Event>,
+    queue: Vec<Event>,
     // Only the last title in an output batch is visible. An empty title restores the default.
     title: Option<String>,
 }
@@ -185,8 +185,11 @@ impl EventListener for TerminalEvents {
         match event {
             Event::Title(title) => self.0.borrow_mut().title = Some(title),
             Event::ResetTitle => self.0.borrow_mut().title = Some(String::new()),
-            Event::PtyWrite(_) | Event::TextAreaSizeRequest(_) | Event::ColorRequest(_, _) => {
-                self.0.borrow_mut().replies.push(event);
+            Event::PtyWrite(_)
+            | Event::TextAreaSizeRequest(_)
+            | Event::ColorRequest(_, _)
+            | Event::ClipboardStore(_, _) => {
+                self.0.borrow_mut().queue.push(event);
             }
             _ => {}
         }
@@ -210,7 +213,7 @@ impl Emulator {
     fn config(default_cursor_style: CursorStyle) -> Config {
         Config {
             scrolling_history: 2000,
-            osc52: Osc52::Disabled,
+            osc52: Osc52::OnlyCopy,
             default_cursor_style,
             ..Config::default()
         }
@@ -266,10 +269,10 @@ impl Emulator {
             };
             if matches!(event, Boundary::ColorQuery) {
                 // Resolve at the query, even if a later OSC in this same read resets the slot.
-                let first = self.events.0.borrow().replies.len();
+                let first = self.events.0.borrow().queue.len();
                 self.parser.advance(&mut self.term, chunk);
                 self.flush_sync();
-                for event in &mut self.events.0.borrow_mut().replies[first..] {
+                for event in &mut self.events.0.borrow_mut().queue[first..] {
                     if let Event::ColorRequest(index, format) = event {
                         let name = match *index {
                             i if i == NamedColor::Foreground as usize => NamedColor::Foreground,
@@ -321,6 +324,13 @@ impl Emulator {
     }
 
     pub fn finish_batch(&mut self) -> Vec<u8> {
+        self.finish_batch_with_clipboard(|_, _| {})
+    }
+
+    pub fn finish_batch_with_clipboard(
+        &mut self,
+        mut copy: impl FnMut(ClipboardType, String),
+    ) -> Vec<u8> {
         self.flush_sync();
         if !self.term.mode().contains(TermMode::ALT_SCREEN) {
             if self.resized_in_alt {
@@ -338,8 +348,12 @@ impl Emulator {
             self.last_primary_top = Some(RowAnchor::at(self.term.grid(), Line(0)));
         }
         let mut bytes = Vec::new();
-        for event in self.events.0.borrow_mut().replies.drain(..) {
+        for event in self.events.0.borrow_mut().queue.drain(..) {
             let reply = match event {
+                Event::ClipboardStore(target, text) => {
+                    copy(target, text);
+                    continue;
+                }
                 Event::PtyWrite(text) => text,
                 Event::TextAreaSizeRequest(format) => format(WindowSize {
                     num_cols: self.term.columns() as u16,
@@ -472,6 +486,27 @@ mod tests {
         )
         .trim_end_matches('\n')
         .into()
+    }
+
+    #[test]
+    fn osc52_copies_live_utf8_without_answering_reads_or_repeating_history() {
+        let mut em = Emulator::new(grid(4, 20));
+        em.process(b"\x1b]52;c;b2xk\x07");
+        assert!(em.finish_batch().is_empty());
+
+        let mut copied = Vec::new();
+        for chunk in [
+            b"\x1b]52;;5Lit".as_slice(),
+            b"5paH\x1b",
+            b"\\\x1b]52;p;eA==\x07\x1b]52;c;?\x07\x1b]52;c;***\x07",
+        ] {
+            em.process(chunk);
+            assert!(em.finish_batch_with_clipboard(|target, text| copied.push((target, text))).is_empty());
+        }
+        assert_eq!(copied, [
+            (ClipboardType::Clipboard, String::from("中文")),
+            (ClipboardType::Selection, String::from("x")),
+        ]);
     }
 
     #[test]

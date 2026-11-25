@@ -610,6 +610,7 @@ impl Ui {
         let open = state.read(cx).is_open();
         let trigger = self
             .icon_button(ButtonVariant::Ghost, id, Icon::Ellipsis, label.clone())
+            .block_mouse_except_scroll()
             .pressed(open);
         #[cfg(target_os = "android")]
         let trigger = trigger.role(Role::Button).aria_label(label).aria_expanded(open);

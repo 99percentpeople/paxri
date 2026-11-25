@@ -150,17 +150,15 @@ fn cell() -> Div {
     div().min_w_0().flex_1().flex().flex_col()
 }
 
-fn action_column() -> Div {
-    div().w(BUTTON_HEIGHT).flex_none().flex().items_center()
-}
-
 impl Ui {
-    pub fn forwarding_header(self) -> ListItem {
+    pub fn forwarding_header(self) -> Div {
         let mut header = columns();
         for label in ["Rule / Direction", "Device", "Listen", "Target", "State"] {
             header = header.child(cell().child(self.muted(label)));
         }
-        ListItem::custom(header).trailing(action_column())
+        ListItem::custom(header)
+            .trailing(div().w(BUTTON_HEIGHT))
+            .inset_row()
     }
 
     pub fn forwarding_row(
@@ -171,9 +169,8 @@ impl Ui {
         display_name: &str,
         narrow: bool,
         actions: impl IntoElement,
-    ) -> AnyElement {
+    ) -> Div {
         let ui = self;
-        let actions = action_column().child(actions);
         let local = f.direction == Direction::Local;
         let direction = if local { "Forward" } else { "Reverse" };
         let (source, destination) = if local {
@@ -197,20 +194,17 @@ impl Ui {
         let title = super::list_item::list_title(name.to_owned())
             .id((ElementId::from("rule"), SharedString::from(key.clone())))
             .tooltip(tooltip(name.to_owned().into()));
-        let row = div().w_full().min_w_0().flex_none().rounded(CONTROL_RADIUS)
-            .hover(|s| s.bg(rgb(ui.colors.accent.background)));
-        if narrow {
-            row.flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    ListItem::custom(title)
-                        .detail(format!("{direction} · {}", f.state()))
-                        .trailing(actions),
+        let item = if narrow {
+            ListItem::custom(title)
+                .detail(format!("{direction} · {}", f.state()))
+                .below_detail(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(ui.muted(format!("{source} / {listen}")))
+                        .child(ui.muted(format!("→ {destination} / {}", f.target))),
                 )
-                .child(ui.muted(format!("{source} / {listen}")).w_full())
-                .child(ui.muted(format!("→ {destination} / {}", f.target)).w_full())
-                .into_any_element()
         } else {
             let fields = columns()
                 .child(cell().child(title).child(ui.muted(direction).text_xs()))
@@ -218,8 +212,12 @@ impl Ui {
                 .child(endpoint("listen", source, listen))
                 .child(endpoint("target", destination, &f.target))
                 .child(cell().child(line("state", f.state())));
-            row.child(ListItem::custom(fields).trailing(actions)).into_any_element()
-        }
+            ListItem::custom(fields)
+        };
+        item.trailing(actions)
+            .inset_row()
+            .rounded(CONTROL_RADIUS)
+            .hover(|s| s.bg(rgb(ui.colors.accent.background)))
     }
 }
 

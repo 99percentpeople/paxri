@@ -172,25 +172,18 @@ impl Ui {
         location: directory::SessionLocation,
         actions: Option<Dropdown<Button>>,
         open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Div {
+    ) -> Button {
         let id = SharedString::from(format!("show-terminal-{peer}-{}-{}", key.number, key.nonce));
-        let item = ListItem::new(title.clone())
+        ListItem::new(title.clone())
             .leading(Icon::Terminal.draw(18.))
             .detail(format!(
                 "{name} · Session {} · {}",
                 key.number,
                 location.label()
             ))
+            .when_some(actions, |item, actions| item.trailing(actions))
             .button(self, id, title)
-            .on_click(open);
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(div().min_w_0().flex_1().child(item))
-            .children(actions)
+            .on_click(open)
     }
 }
 
