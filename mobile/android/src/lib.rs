@@ -60,7 +60,6 @@ enum Update {
     Devices(Peers),
     Paired(Result<Option<Peers>, String>),
     PairCode(String),
-    Unpair { id: String, generation: Option<String> },
     Composing {
         id: u64,
         text: String,
@@ -85,9 +84,7 @@ enum Update {
     Output(AttachmentId, Vec<u8>, bool),
     Hosted(String, Option<Vec<SessionKey>>),
     EndedHosted(String, SessionKey, Result<(), String>),
-    RenameSession(String, SessionKey, String),
     Presence(Presence),
-    RemoveForward { owner: String, name: String },
     ForwardChanged(String, Result<(), String>),
     ForwardRules(
         String,
@@ -112,6 +109,27 @@ enum Page {
     SettingsCategory(paxri_ui::settings::SettingsSection),
     Peer(String),
     Terminal(u64),
+}
+
+enum Modal {
+    Unpair {
+        id: String,
+        generation: Option<String>,
+        name: String,
+    },
+    RemoveForward {
+        owner: String,
+        name: String,
+        route: String,
+    },
+    PairCode {
+        input: Entity<paxri_ui::components::input::Input>,
+    },
+    RenameSession {
+        peer: String,
+        key: SessionKey,
+        input: Entity<paxri_ui::components::input::Input>,
+    },
 }
 
 struct Mobile {
@@ -145,6 +163,7 @@ struct Mobile {
     terminal_return: Page,
     page: Page,
     drawer: Drawer,
+    modal: Option<Modal>,
     name_input: Entity<paxri_ui::components::input::Input>,
     keybar: Arc<KeybarSettings>,
     key_editor: Option<keybar::Editor>,
@@ -187,6 +206,7 @@ impl Mobile {
                 let _ = mobile.update(cx, |view, cx| {
                     if let Page::Terminal(id) = view.page
                         && !view.drawer.open
+                        && view.modal.is_none()
                         && !DropdownState::has_open(cx)
                         && view.terminal_shortcut(id, &event.keystroke, action, cx)
                     {
@@ -271,7 +291,155 @@ impl Mobile {
         .detach();
     }
 
+    fn short_peer_id(&self, id: &str) -> String {
+        let peers: BTreeMap<_, _> = self.peers.keys().map(|k| (k.clone(), k.clone())).collect();
+        paxri_config::peer_id::short_ids(&peers)
+            .remove(id)
+            .unwrap_or_else(|| paxri_config::peer_id::default_prefix(id).to_owned())
+    }
+
+    fn open_modal(&mut self, modal: Modal, cx: &mut Context<Self>) {
+        DropdownState::dismiss_active(cx);
+        if matches!(self.page, Page::Terminal(_)) {
+            self.set_touch_area(0, [0; 5], self.keybar.clone(), false);
+        }
+        self.modal = Some(modal);
+        self.sync_back(cx);
+        cx.notify();
+    }
+
+    fn dismiss_modal(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let Some(modal) = self.modal.take() else {
+            return;
+        };
+        if let Modal::PairCode { input } | Modal::RenameSession { input, .. } = modal {
+            if self.editing_input.as_ref() == Some(&input) {
+                self.editing_input = None;
+                gpui_mobile::set_text_input_callback(None);
+                gpui_mobile::hide_keyboard();
+            }
+            if let Some(window) = window {
+                window.blur(cx);
+            }
+        }
+        if let Page::Terminal(id) = self.page
+            && let Some(s) = self.sessions.get(&id).filter(|s| s.connected())
+        {
+            Self::start_input(s);
+        }
+        self.sync_back(cx);
+        cx.notify();
+    }
+
+    fn confirm_unpair(
+        &mut self,
+        id: String,
+        generation: Option<String>,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_modal(
+            Modal::Unpair {
+                id,
+                generation,
+                name,
+            },
+            cx,
+        );
+    }
+
+    fn confirm_remove_forward(
+        &mut self,
+        owner: String,
+        name: String,
+        route: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_modal(Modal::RemoveForward { owner, name, route }, cx);
+    }
+
+    fn open_pair_code_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = paxri_ui::components::input::Input::setting("Paste pairing code", cx);
+        Self::bind_input(&input, gpui_mobile::KeyboardType::Default, cx);
+        let focus_input = input.clone();
+        self.open_modal(Modal::PairCode { input }, cx);
+        window.on_next_frame(move |w, cx| {
+            focus_input.update(cx, |field, cx| field.edit_at_end(w, cx));
+        });
+    }
+
+    fn open_rename_session_modal(
+        &mut self,
+        peer: String,
+        key: SessionKey,
+        current: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = paxri_ui::components::input::Input::setting("Use terminal title", cx);
+        input.update(cx, |field, cx| field.set_text(&current, cx));
+        Self::bind_input(&input, gpui_mobile::KeyboardType::Default, cx);
+        let focus_input = input.clone();
+        self.open_modal(Modal::RenameSession { peer, key, input }, cx);
+        window.on_next_frame(move |w, cx| {
+            focus_input.update(cx, |field, cx| field.edit_at_end(w, cx));
+        });
+    }
+
+    fn unpair_device(
+        &mut self,
+        id: String,
+        generation: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let updates = self.updates.clone();
+        self.rt.spawn(async move {
+            let event = match client.unpair(&id, generation.as_deref()).await {
+                Ok(peers) => Update::Devices(peers),
+                Err(err) => Update::Error(format!("Unpairing device: {err:#}")),
+            };
+            let _ = updates.send(event).await;
+        });
+        cx.notify();
+    }
+
+    fn submit_pair_code(&mut self, code: String, cx: &mut Context<Self>) -> bool {
+        let Some(client) = self.client.clone() else {
+            return false;
+        };
+        if self.pairing.is_some() {
+            return false;
+        }
+        let invite = match paxri_native::gateway::pairing::Invitation::parse(&code) {
+            Ok(invite) => invite,
+            Err(error) => {
+                Toast::show(error.to_string(), self.window, cx);
+                return false;
+            }
+        };
+        let (cancel, canceled) = oneshot::channel();
+        self.pairing = Some(PendingPairing {
+            peer_id: invite.ticket.endpoint_addr().id.to_string(),
+            cancel: Some(cancel),
+        });
+        self.navigate(Page::Devices, cx);
+        let tx = self.updates.clone();
+        self.rt.spawn(async move {
+            let outcome = client.pair(invite, canceled).await;
+            let _ = tx
+                .send(Update::Paired(outcome.map_err(|e| format!("{e:#}"))))
+                .await;
+        });
+        true
+    }
+
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page != page {
+            self.modal = None;
+        }
         if let Page::Forwards(scope) = &page
             && !matches!(self.page, Page::ForwardEdit { .. })
         {
@@ -359,7 +527,10 @@ impl Mobile {
     }
 
     fn sync_back(&self, cx: &App) {
-        let enabled = self.drawer.open || self.page != Page::Devices || DropdownState::has_open(cx);
+        let enabled = self.drawer.open
+            || self.modal.is_some()
+            || self.page != Page::Devices
+            || DropdownState::has_open(cx);
         if CAN_GO_BACK.swap(enabled, Ordering::AcqRel) != enabled
             && let Err(error) = activity_action(&self.android, ActivityAction::BackEnabled(enabled))
         {
@@ -418,46 +589,8 @@ impl Mobile {
                 self.starting_network = false;
                 Toast::show(error, self.window, cx);
             }
-            Update::Unpair { id, generation } => {
-                let Some(client) = self.client.clone() else {
-                    return;
-                };
-                let updates = self.updates.clone();
-                self.rt.spawn(async move {
-                    let event = match client.unpair(&id, generation.as_deref()).await {
-                        Ok(peers) => Update::Devices(peers),
-                        Err(err) => Update::Error(format!("Unpairing device: {err:#}")),
-                    };
-                    let _ = updates.send(event).await;
-                });
-            }
             Update::PairCode(code) => {
-                let Some(client) = self.client.clone() else {
-                    return;
-                };
-                if self.pairing.is_some() {
-                    return;
-                }
-                let invite = match paxri_native::gateway::pairing::Invitation::parse(&code) {
-                    Ok(invite) => invite,
-                    Err(error) => {
-                        Toast::show(error.to_string(), self.window, cx);
-                        return;
-                    }
-                };
-                let (cancel, canceled) = oneshot::channel();
-                self.pairing = Some(PendingPairing {
-                    peer_id: invite.ticket.endpoint_addr().id.to_string(),
-                    cancel: Some(cancel),
-                });
-                self.navigate(Page::Devices, cx);
-                let tx = self.updates.clone();
-                self.rt.spawn(async move {
-                    let outcome = client.pair(invite, canceled).await;
-                    let _ = tx
-                        .send(Update::Paired(outcome.map_err(|e| format!("{e:#}"))))
-                        .await;
-                });
+                self.submit_pair_code(code, cx);
             }
             Update::Paired(result) => {
                 self.pairing = None;
@@ -556,13 +689,19 @@ impl Mobile {
                 }
             }
             Update::Close => {
-                if !DropdownState::back_active(cx) {
-                    self.back(cx);
+                if DropdownState::back_active(cx) {
+                    return;
                 }
+                if self.modal.is_some() {
+                    self.dismiss_modal(None, cx);
+                    return;
+                }
+                self.back(cx);
             }
             Update::Shortcut(id, key, action) => {
                 if self.page == Page::Terminal(id)
                     && !self.drawer.open
+                    && self.modal.is_none()
                     && !DropdownState::has_open(cx)
                 {
                     self.terminal_shortcut(id, &key, action, cx);
@@ -635,7 +774,6 @@ impl Mobile {
                 self.retry_sessions();
                 return;
             }
-            Update::RenameSession(peer, key, name) => self.rename_session(peer, key, name, cx),
             Update::EndedHosted(peer, key, result) => {
                 self.ending_hosted.remove(&(peer.clone(), key));
                 if !self.peers.contains_key(&peer) {
@@ -714,7 +852,6 @@ impl Mobile {
                     }
                 }
             }
-            Update::RemoveForward { owner, name } => self.remove_forward(&owner, name, cx),
             Update::ForwardChanged(owner, result) => {
                 self.rule_form.saving = false;
                 if let Page::ForwardEdit {
@@ -983,6 +1120,7 @@ fn android_main(android: AndroidApp) {
                     rule_form,
                     page: Page::Devices,
                     drawer: Drawer::default(),
+                    modal: None,
                     settings_scroll: ScrollHandle::new(),
                     bottom_inset: 0.,
                     dark_system_bar_icons: None,

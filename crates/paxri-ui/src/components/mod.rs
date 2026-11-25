@@ -17,6 +17,8 @@ mod icons;
 mod list_item;
 mod list_view;
 pub use list_view::ListView;
+mod modal;
+pub use modal::ModalDialog;
 mod scrollbar;
 pub use scrollbar::{ScrollArea, ScrollMetrics, ScrollSource, Scrollbar};
 mod list_state;

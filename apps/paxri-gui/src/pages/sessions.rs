@@ -177,7 +177,11 @@ impl Dashboard {
         let section = ui
             .section()
             .child(heading("Sessions"))
-            .child(filters.controls(&devices, |v| &mut v.session_filters, cx))
+            .child(
+                filters
+                    .controls(&devices, |v| &mut v.session_filters, cx)
+                    .results(rows.len(), total),
+            )
             .when(!rows.is_empty() && !failed.is_empty(), |section| {
                 section.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", "))))
             })

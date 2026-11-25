@@ -140,11 +140,17 @@ impl Mobile {
         let mut body = ListView::scrollable("forward-list")
             .with_floating_action(self.can_add_rule(filters.scope.device.as_deref()));
         let narrow = window.viewport_size().width < NARROW_WIDTH;
-        let mut count = 0;
+        let mut total = 0;
         let mut pending = false;
         let mut failures = Vec::new();
         let mut rows = Vec::new();
         for (id, name, _) in &options {
+            let Some(entry) = self.forwards.entries.get(id) else {
+                continue;
+            };
+            if let Some(rules) = &entry.rules {
+                total += rules.len();
+            }
             if filters
                 .scope
                 .device
@@ -153,62 +159,56 @@ impl Mobile {
             {
                 continue;
             }
-            if let Some(entry) = self.forwards.entries.get(id) {
-                pending |= entry.request.is_some() && entry.rules.is_none();
-                if let Some(error) = &entry.error {
-                    failures.push(format!("{name}: {error}"));
-                }
-                if let Some(rules) = &entry.rules {
-                    count += rules.len();
-                    for (key, rule) in rules {
-                        if !filters.matches(id, key, rule, name, &query) {
-                            continue;
-                        }
-                        let owner = id.clone();
-                        let rule_key = key.clone();
-                        let route = rule.route_for(name);
-                        let view = cx.weak_entity();
-                        let menu_id = format!("rule-actions-{id}/{key}");
-                        let menu =
-                            RuleMenu::new(menu_id, key, rule.enabled(), move |action, _, cx| {
-                                let _ = view.update(cx, |v, cx| match action {
-                                    RuleAction::Edit => v.open_rule(Some((&owner, &rule_key)), cx),
-                                    RuleAction::SetEnabled(enabled) => v.send_forward(
-                                        &owner,
-                                        PeerForward::SetEnabled {
-                                            name: rule_key.clone(),
-                                            enabled,
-                                        },
-                                        cx,
-                                    ),
-                                    RuleAction::Remove => {
-                                        if !v.rule_form.saving
-                                            && let Err(error) = activity_action(
-                                                &v.android,
-                                                ActivityAction::ConfirmRemoveForward {
-                                                    owner: &owner,
-                                                    name: &rule_key,
-                                                    route: &route,
-                                                },
-                                            )
-                                        {
-                                            Toast::show(error, v.window, cx);
-                                        }
-                                    }
-                                });
-                            });
-                        rows.push(ui.forwarding_row(
-                            format!("{id}/{key}"),
-                            key,
-                            rule,
-                            name,
-                            narrow,
-                            menu,
-                        ));
+            pending |= entry.request.is_some() && entry.rules.is_none();
+            if let Some(error) = &entry.error {
+                failures.push(format!("{name}: {error}"));
+            }
+            if let Some(rules) = &entry.rules {
+                for (key, rule) in rules {
+                    if !filters.matches(id, key, rule, name, &query) {
+                        continue;
                     }
+                    let owner = id.clone();
+                    let rule_key = key.clone();
+                    let route = rule.route_for(name);
+                    let view = cx.weak_entity();
+                    let menu_id = format!("rule-actions-{id}/{key}");
+                    let menu =
+                        RuleMenu::new(menu_id, key, rule.enabled(), move |action, _, cx| {
+                            let _ = view.update(cx, |v, cx| match action {
+                                RuleAction::Edit => v.open_rule(Some((&owner, &rule_key)), cx),
+                                RuleAction::SetEnabled(enabled) => v.send_forward(
+                                    &owner,
+                                    PeerForward::SetEnabled {
+                                        name: rule_key.clone(),
+                                        enabled,
+                                    },
+                                    cx,
+                                ),
+                                RuleAction::Remove => {
+                                    if !v.rule_form.saving {
+                                        v.confirm_remove_forward(
+                                            owner.clone(),
+                                            rule_key.clone(),
+                                            route.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                    rows.push(ui.forwarding_row(
+                        format!("{id}/{key}"),
+                        key,
+                        rule,
+                        name,
+                        narrow,
+                        menu,
+                    ));
                 }
             }
         }
+        let shown = rows.len();
         if rows.is_empty() {
             let selected = filters
                 .scope
@@ -237,7 +237,7 @@ impl Mobile {
             } else if self.forwards.entries.is_empty() {
                 ListState::empty(Icon::Forward, "No devices available")
                     .detail("Connect a device that shares forwarding rules.")
-            } else if count > 0 {
+            } else if total > 0 {
                 ListState::filtered("No matching rules")
             } else if !self.can_add_rule(filters.scope.device.as_deref()) {
                 ListState::empty(Icon::Forward, "No forwarding rules")
@@ -260,7 +260,11 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .child(filters.toolbar(&options, |v| &mut v.forward_filters, cx))
+            .child(
+                filters
+                    .toolbar(&options, |v| &mut v.forward_filters, cx)
+                    .results(shown, total),
+            )
             .child(body)
     }
 }

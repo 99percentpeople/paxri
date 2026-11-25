@@ -346,14 +346,15 @@ impl Mobile {
         let menu = DropdownContent::new().item(
             "rename-session",
             Icon::Pencil.label("Rename session"),
-            move |_, cx| {
+            move |window, cx| {
                 let _ = view.update(cx, |v, cx| {
-                    if let Err(e) = activity_action(
-                        &v.android,
-                        ActivityAction::RenameSession(&rename_peer, key, &title),
-                    ) {
-                        Toast::show(e, v.window, cx);
-                    }
+                    v.open_rename_session_modal(
+                        rename_peer.clone(),
+                        key,
+                        title.to_string(),
+                        window,
+                        cx,
+                    );
                 });
             },
         );
@@ -546,7 +547,11 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .child(filters.controls(&devices, |v| &mut v.session_filters, cx))
+            .child(
+                filters
+                    .controls(&devices, |v| &mut v.session_filters, cx)
+                    .results(rows.len(), total),
+            )
             .when(!rows.is_empty() && !failed.is_empty(), |d| {
                 d.child(ui.muted(format!(
                     "Couldn’t refresh sessions on {}.",

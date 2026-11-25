@@ -2,7 +2,7 @@ use crate::{
     Dashboard, Input,
     components::{
         ButtonVariant::Primary, Dialog, DialogContent, DialogMode, DialogSuccess, Ui, form_row,
-        heading, row,
+        heading,
     },
 };
 use gpui::{prelude::*, *};
@@ -271,21 +271,12 @@ impl Dashboard {
             .collect();
         let mut table = ui
             .section()
+            .child(heading("Port forwarding"))
             .child(
-                row().child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(heading("Port forwarding"))
-                        .when(active && total > 0, |r| {
-                            r.child(ui.muted(format!("{} of {total}", rows.len())).text_xs())
-                        }),
-                ),
-            )
-            .child(filters.toolbar(&devices, |v| &mut v.forward_filters, cx));
+                filters
+                    .toolbar(&devices, |v| &mut v.forward_filters, cx)
+                    .results(rows.len(), total),
+            );
         let mut failures = Vec::new();
         if let Some(directory) = &s.peer_forwards {
             for (peer, error) in &directory.errors {

@@ -1,9 +1,9 @@
 use super::*;
 use paxri_core::connection::{peer_state, unix_time_ms};
 use paxri_ui::components::{
-    ButtonVariant::{Ghost, Secondary},
+    ButtonVariant::{Destructive, Ghost, Secondary},
     DeviceCounts, DropdownState, FLOATING_ACTION_CLEARANCE, Icon, ListState, ListView,
-    floating_corner,
+    ModalDialog, floating_corner,
 };
 use paxri_ui::connections::presence_detail;
 use paxri_ui::terminal::display;
@@ -50,7 +50,7 @@ impl Mobile {
                 "Sessions".into(), None, origin.as_ref().map(|_| "Back to device details"), None,
             ),
             Page::Peer(id) => (
-                self.peers[id].name.clone().into(),
+                SharedString::from("Device"),
                 None,
                 Some("Back to devices"),
                 Some(self.device_actions(id, ui, cx)),
@@ -172,20 +172,13 @@ impl Mobile {
     }
 
     fn pairing_actions(&self, expanded: bool, ui: Ui, cx: &Context<Self>) -> Div {
-        let action = |id: &'static str, label: &'static str, icon, action| {
+        let action = |id: &'static str, label: &'static str, icon| {
             let text = div().h(px(48.)).flex().items_center().child(label);
             ui.button(Ghost, id, text)
                 .row()
                 .icon(icon)
                 .role(Role::Button)
                 .aria_label(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.navigate(Page::Devices, cx);
-                    if let Err(error) = activity_action(&this.android, action) {
-                        Toast::show(error, this.window, cx);
-                    }
-                    cx.notify();
-                }))
         };
         let toggle_icon = if expanded { Icon::Close } else { Icon::Plus };
         floating_corner()
@@ -206,18 +199,27 @@ impl Mobile {
                         .shadow_md()
                         .flex()
                         .flex_col()
-                        .child(action(
-                            "enter-code",
-                            "Enter pairing code",
-                            Icon::Pencil,
-                            ActivityAction::Pair,
-                        ))
-                        .child(action(
-                            "scan-qr",
-                            "Scan QR code",
-                            Icon::ScanQr,
-                            ActivityAction::Scan,
-                        )),
+                        .child(
+                            action("enter-code", "Enter pairing code", Icon::Pencil).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.navigate(Page::Devices, cx);
+                                    this.open_pair_code_modal(window, cx);
+                                }),
+                            ),
+                        )
+                        .child(
+                            action("scan-qr", "Scan QR code", Icon::ScanQr).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.navigate(Page::Devices, cx);
+                                    if let Err(error) =
+                                        activity_action(&this.android, ActivityAction::Scan)
+                                    {
+                                        Toast::show(error, this.window, cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
                 )
             })
             .child(
@@ -289,6 +291,7 @@ impl Mobile {
             Some(ListState::filtered("No matching devices"))
         };
         let show_list = notice.is_none();
+        let matched = peers.len();
         let rows = peers.into_iter().map(|(id, peer, changed)| {
             let id = id.clone();
             ui.device_row(
@@ -311,7 +314,13 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .when(!self.peers.is_empty(), |page| page.child(filters.controls(|v| &mut v.device_filters, cx)))
+            .when(!self.peers.is_empty(), |page| {
+                page.child(
+                    filters
+                        .controls(|v| &mut v.device_filters, cx)
+                        .results(matched, self.peers.len()),
+                )
+            })
             .when_some(notice, |page, state| page.child(state.render(ui)))
             .when(show_list, |page| page.child(
                 ListView::scrollable("paired-devices")
@@ -353,17 +362,13 @@ impl Mobile {
         let view = cx.weak_entity();
         ui.device_actions(menu_id, name, move |_, cx| {
             let _ = view.update(cx, |this, cx| {
-                if let Some(peer) = this.peers.get(&id)
-                    && let Err(error) = activity_action(
-                        &this.android,
-                        ActivityAction::ConfirmUnpair {
-                            id: &id,
-                            name: &peer.name,
-                            generation: peer.generation.as_deref().unwrap_or_default(),
-                        },
-                    )
-                {
-                    Toast::show(error, this.window, cx);
+                if let Some(peer) = this.peers.get(&id) {
+                    this.confirm_unpair(
+                        id.clone(),
+                        peer.generation.clone(),
+                        peer.name.clone(),
+                        cx,
+                    );
                 }
             });
         })
@@ -384,7 +389,12 @@ impl Mobile {
             .gap_4()
             .pt_4()
             .when(can_connect, |page| page.pb(FLOATING_ACTION_CLEARANCE))
-            .child(ui.device_identity_row(peer.platform, id))
+            .child(ui.device_heading(
+                None,
+                peer.name.clone().into(),
+                peer.platform,
+                Some((id, self.short_peer_id(id))),
+            ))
             .child(ui.device_detail_sections(
                 self.connection_history.connection_section(id, paths, true, ui),
                 counts,
@@ -434,6 +444,10 @@ impl Mobile {
                 ]
                 .map(|v| (f32::from(v) * scale).round() as i32);
                 sizing.update(cx, |this, cx| {
+                    if this.modal.is_some() {
+                        this.set_touch_area(0, [0; 5], this.keybar.clone(), false);
+                        return;
+                    }
                     let touchable = !DropdownState::has_open(cx);
                     this.set_touch_area(id, area, this.keybar.clone(), touchable);
                     if let Some(s) = this.sessions.get_mut(&id) {
@@ -494,6 +508,101 @@ impl Mobile {
             .flex_col()
             .child(grid)
             .child(div().h(px(toolbar)).flex_none())
+    }
+    fn modal_overlay(&self, ui: Ui, cx: &Context<Self>) -> Option<AnyElement> {
+        let modal = self.modal.as_ref()?;
+        let cancel = cx.listener(|this, _: &(), window, cx| this.dismiss_modal(Some(window), cx));
+        let on_cancel = move |window: &mut Window, cx: &mut App| cancel(&(), window, cx);
+        let dialog = match modal {
+            Modal::Unpair {
+                id,
+                generation,
+                name,
+            } => {
+                let id = id.clone();
+                let generation = generation.clone();
+                let confirm = cx.listener(move |this, _: &(), window, cx| {
+                    this.dismiss_modal(Some(window), cx);
+                    this.unpair_device(id.clone(), generation.clone(), cx);
+                });
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(format!("Unpair this device and {name}?"))
+                    .child(ui.muted(
+                        "Active connections will close. If the device is offline, it will be notified when reachable.",
+                    ));
+                ModalDialog::new(
+                    "unpair-modal",
+                    "Unpair device?",
+                    body,
+                    "Unpair device",
+                    move |window, cx| confirm(&(), window, cx),
+                    on_cancel,
+                )
+                .confirm_variant(Destructive)
+            }
+            Modal::RemoveForward { owner, name, route } => {
+                let owner = owner.clone();
+                let rule_name = name.clone();
+                let confirm = cx.listener(move |this, _: &(), window, cx| {
+                    this.dismiss_modal(Some(window), cx);
+                    this.remove_forward(&owner, rule_name.clone(), cx);
+                });
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                    .child(ui.muted(route.clone()));
+                ModalDialog::new(
+                    "remove-forward-modal",
+                    "Remove forwarding rule?",
+                    body,
+                    "Remove rule",
+                    move |window, cx| confirm(&(), window, cx),
+                    on_cancel,
+                )
+                .confirm_variant(Destructive)
+            }
+            Modal::PairCode { input } => {
+                let submit_input = input.clone();
+                let confirm = cx.listener(move |this, _: &(), window, cx| {
+                    let code = submit_input.read(cx).text().trim().to_owned();
+                    if this.submit_pair_code(code, cx) {
+                        this.dismiss_modal(Some(window), cx);
+                    }
+                });
+                ModalDialog::new(
+                    "pair-code-modal",
+                    "Pair a computer",
+                    div().w_full().child(input.clone()),
+                    "Pair",
+                    move |window, cx| confirm(&(), window, cx),
+                    on_cancel,
+                )
+            }
+            Modal::RenameSession { peer, key, input } => {
+                let peer = peer.clone();
+                let key = *key;
+                let submit_input = input.clone();
+                let confirm = cx.listener(move |this, _: &(), window, cx| {
+                    let name = submit_input.read(cx).text().to_owned();
+                    this.dismiss_modal(Some(window), cx);
+                    this.rename_session(peer.clone(), key, name, cx);
+                });
+                ModalDialog::new(
+                    "rename-session-modal",
+                    "Rename session",
+                    div().w_full().child(input.clone()),
+                    "Rename",
+                    move |window, cx| confirm(&(), window, cx),
+                    on_cancel,
+                )
+            }
+        };
+        Some(dialog.into_any_element())
     }
 }
 
@@ -615,6 +724,7 @@ impl Render for Mobile {
                     .when(self.drawer.open || drawer > 0., |page| {
                         page.child(self.navigation_drawer(drawer, drawer_width, ui, cx))
                     })
+                    .children(self.modal_overlay(ui, cx))
                     .children(Toast::overlay(window, cx)),
             )
     }

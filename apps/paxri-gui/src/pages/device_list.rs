@@ -12,10 +12,8 @@ impl Dashboard {
     pub(super) fn paired_devices(&self, ui: Ui, status: &Status, cx: &Context<Self>) -> Div {
         let filters = &self.device_filters;
         let query = filters.query(cx);
-        let card = div().min_h_0().flex_1().flex().flex_col().gap_2()
-            .child(filters.controls(|v| &mut v.device_filters, cx));
         let now = paxri_control::unix_time_ms();
-        let rows = status
+        let rows: Vec<_> = status
             .peers_by_last_change()
             .into_iter()
             .filter_map(|(name, id)| {
@@ -46,9 +44,14 @@ impl Dashboard {
                         v.show_devices_pane(DevicesPane::Peer(peer.to_string()), cx)
                     })),
                 )
-            });
-        let mut rows = rows.peekable();
-        if rows.peek().is_none() {
+            })
+            .collect();
+        let card = div().min_h_0().flex_1().flex().flex_col().gap_2().child(
+            filters
+                .controls(|v| &mut v.device_filters, cx)
+                .results(rows.len(), status.peers.len()),
+        );
+        if rows.is_empty() {
             return card.child(ListState::filtered("No matching devices").render(ui));
         }
         card.child(ListView::scrollable("paired-list").children(rows))

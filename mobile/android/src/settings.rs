@@ -19,8 +19,7 @@ pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
     let settings = if path.try_exists()? {
         file::read_gui(&path)?
     } else {
-        // Keep the existing Android dark theme on first launch and on upgrade.
-        file::set_gui(&path, GuiChange::Appearance(Appearance::Dark), true)?
+        GuiSettings::default()
     };
     // Import the previous pinch/stepper preference once. The shared GUI config owns subsequent edits.
     let legacy = path.with_file_name("terminal-font-size");

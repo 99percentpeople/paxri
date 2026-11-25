@@ -1,6 +1,5 @@
 package org.paxri.android;
 
-import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
@@ -26,7 +25,6 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
-import android.widget.FrameLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.LinearLayout;
@@ -40,9 +38,6 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static native void activityVisibilityChanged(boolean visible);
     private static native void deviceNameChanged(String name, String model);
     private static native void submitCode(String code);
-    private static native void removeForward(String owner, String name);
-    private static native void renameSession(String peer, long number, long nonce, String name);
-    private static native void unpairDevice(String id, String generation);
     private static native void systemTextSizeChanged(float size);
     private static native void insetsChanged(float left, float top, float right, float bottom);
     private static native boolean goBack();
@@ -52,7 +47,6 @@ public final class PaxriActivity extends GpuiInputActivity {
     private long imeSession;
     private boolean networkReady;
     private Toast toast;
-    private AlertDialog removalDialog;
     private PopupWindow terminalTouch;
     private long touchSession;
     private boolean terminalTouchable = true;
@@ -215,7 +209,6 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     @Override
     protected void onDestroy() {
-        if (removalDialog != null) removalDialog.dismiss();
         connectionHandler.removeCallbacks(stopConnections);
         stopConnectionService();
         super.onDestroy();
@@ -535,70 +528,6 @@ public final class PaxriActivity extends GpuiInputActivity {
             if (toast != null) toast.cancel();
             toast = Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT);
             toast.show();
-        });
-    }
-
-    public void confirmRemoveForward(String owner, String name, String route) {
-        confirmRemoval("Remove forwarding rule?", name + "\n" + route, "Remove rule",
-                () -> removeForward(owner, name));
-    }
-
-    public void confirmUnpair(String id, String generation, String name) {
-        confirmRemoval("Unpair device?", "Unpair this device and " + name
-                + "? Active connections will close. If the device is offline, it will be notified when reachable.",
-                "Unpair device", () -> unpairDevice(id, generation));
-    }
-
-    private void confirmRemoval(String title, String message, String action, Runnable confirm) {
-        runOnUiThread(() -> {
-            if (isFinishing() || isDestroyed() || removalDialog != null) return;
-            removalDialog = new AlertDialog.Builder(this)
-                    .setTitle(title)
-                    .setMessage(message)
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton(action, (d, w) -> confirm.run())
-                    .setOnDismissListener(d -> removalDialog = null)
-                    .show();
-        });
-    }
-
-    public void requestPairingCode() {
-        requestText("Pair a computer", "Paste pairing code", "", "Pair",
-                value -> submitCode(value.trim()), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-    }
-
-    public void requestSessionName(String peer, long number, long nonce, String current) {
-        requestText("Rename session", "Use terminal title", current, "Rename",
-                value -> renameSession(peer, number, nonce, value), InputType.TYPE_CLASS_TEXT);
-    }
-
-    private void requestText(String title, String hint, String initial, String action,
-                             java.util.function.Consumer<String> submit, int inputType) {
-        runOnUiThread(() -> {
-            if (isFinishing() || isDestroyed()) return;
-            EditText field = new EditText(this);
-            field.setSingleLine(true);
-            field.setInputType(inputType);
-            field.setHint(hint);
-            if (!initial.isEmpty()) {
-                field.setText(initial);
-                field.setSelectAllOnFocus(true);
-            }
-            FrameLayout content = new FrameLayout(this);
-            int pad = (int) (24 * getResources().getDisplayMetrics().density);
-            content.setPadding(pad, 0, pad, 0);
-            content.addView(field);
-            AlertDialog dialog = new AlertDialog.Builder(this)
-                    .setTitle(title)
-                    .setView(content)
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton(action, (d, w) -> submit.accept(field.getText().toString()))
-                    .create();
-            dialog.setOnShowListener(d -> field.requestFocus());
-            if (!initial.isEmpty()) {
-                dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-            }
-            dialog.show();
         });
     }
 

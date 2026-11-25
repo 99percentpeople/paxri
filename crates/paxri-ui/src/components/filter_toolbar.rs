@@ -9,12 +9,17 @@ pub struct FilterToolbar {
     active: usize,
     fields: Vec<FilterField>,
     clear: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    results: Option<(usize, usize)>,
 }
 
 struct FilterField {
     title: &'static str,
     value: Div,
     choices: DropdownContent,
+}
+
+fn filter_summary(active: usize, query: &str, shown: usize, total: usize) -> Option<String> {
+    ((active > 0 || !query.trim().is_empty()) && total > 0).then(|| format!("{shown} of {total}"))
 }
 
 impl FilterToolbar {
@@ -31,7 +36,13 @@ impl FilterToolbar {
             active,
             fields: Vec::new(),
             clear: None,
+            results: None,
         }
+    }
+
+    pub fn results(mut self, shown: usize, total: usize) -> Self {
+        self.results = Some((shown, total));
+        self
     }
 
     pub fn group<T: PartialEq + 'static>(
@@ -114,8 +125,10 @@ impl RenderOnce for FilterToolbar {
             .role(Role::Button)
             .aria_label(self.label)
             .aria_expanded(open);
-        div()
-            .id(self.id)
+        let summary = self
+            .results
+            .and_then(|(shown, total)| filter_summary(self.active, self.search.read(cx).text(), shown, total));
+        let bar = div()
             .w_full()
             .min_w_0()
             .flex_none()
@@ -123,6 +136,33 @@ impl RenderOnce for FilterToolbar {
             .items_center()
             .gap_1()
             .child(div().flex_1().min_w_0().child(self.search))
-            .child(Dropdown::new(&state, DropdownTrigger::new(button), menu).filters())
+            .child(Dropdown::new(&state, DropdownTrigger::new(button), menu).filters());
+        div()
+            .id(self.id)
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(bar)
+            .when_some(summary, |root, text| {
+                root.child(ui.muted(text).text_xs().px_1())
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filter_summary;
+
+    #[test]
+    fn filter_summary_only_appears_when_filtering_non_empty_lists() {
+        assert_eq!(filter_summary(0, "", 3, 3), None);
+        assert_eq!(filter_summary(0, "   ", 3, 3), None);
+        assert_eq!(filter_summary(1, "", 0, 0), None);
+        assert_eq!(filter_summary(0, "pi", 1, 3).as_deref(), Some("1 of 3"));
+        assert_eq!(filter_summary(1, "", 0, 4).as_deref(), Some("0 of 4"));
+        assert_eq!(filter_summary(2, "web", 2, 5).as_deref(), Some("2 of 5"));
     }
 }

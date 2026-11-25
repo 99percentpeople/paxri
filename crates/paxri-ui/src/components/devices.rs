@@ -39,14 +39,24 @@ impl Ui {
     ) -> Div {
         let detail = match id {
             Some((id, display_id)) => {
-                single_line(self.muted(format!("{} · {display_id}", platform.label())))
+                let text = single_line(self.muted(format!("{} · {display_id}", platform.label())))
                     .w_full()
                     .id("device-identity")
-                    .tooltip(tooltip(id.to_owned().into()))
-                    .into_any_element()
+                    .tooltip(tooltip(id.to_owned().into()));
+                #[cfg(target_os = "android")]
+                let text = text.text_ellipsis();
+                text.into_any_element()
             }
             None => self.muted(platform.label()).into_any_element(),
         };
+        let title = single_line(div())
+            .text_2xl()
+            .font_weight(FontWeight::SEMIBOLD)
+            .id("device-heading")
+            .tooltip(tooltip(name.clone()))
+            .child(name);
+        #[cfg(target_os = "android")]
+        let title = title.text_ellipsis();
         div()
             .min_w_0()
             .flex()
@@ -65,14 +75,7 @@ impl Ui {
                             .flex()
                             .items_center()
                             .gap(SPACE_2)
-                            .child(
-                                single_line(div())
-                                    .text_2xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .id("device-heading")
-                                    .tooltip(tooltip(name.clone()))
-                                    .child(name),
-                            )
+                            .child(title)
                             .children(badge),
                     )
                     .child(detail),
@@ -140,29 +143,6 @@ impl Ui {
         self.button(ButtonVariant::Ghost, "end-session", Icon::Stop.draw(14.))
             .icon_only()
             .tooltip(tooltip("End session".into()))
-    }
-
-    pub fn device_identity_row(self, platform: DevicePlatform, id: &str) -> Div {
-        let short = paxri_config::peer_id::default_prefix(id);
-        div()
-            .flex()
-            .items_center()
-            .gap(SPACE_3)
-            .child(self.device_icon(platform))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().font_weight(FontWeight::MEDIUM).child(platform.label()))
-                    .child(
-                        single_line(self.muted(format!("Device ID · {short}")))
-                            .text_xs()
-                            .id("device-identity")
-                            .tooltip(tooltip(id.to_owned().into())),
-                    ),
-            )
     }
 
     pub fn device_detail_sections(

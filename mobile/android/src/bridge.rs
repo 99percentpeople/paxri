@@ -129,64 +129,6 @@ pub extern "system" fn Java_org_paxri_android_PairingScannerActivity_isInvitatio
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_renameSession(
-    mut env: EnvUnowned,
-    _class: JClass,
-    peer: JString,
-    number: i64,
-    nonce: i64,
-    name: JString,
-) {
-    env.with_env(|_| {
-        post(Update::RenameSession(
-            peer.to_string(),
-            SessionKey {
-                number: number as usize,
-                nonce: nonce as u64,
-            },
-            name.to_string(),
-        ));
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_unpairDevice(
-    mut env: EnvUnowned,
-    _class: JClass,
-    id: JString,
-    generation: JString,
-) {
-    env.with_env(|_| {
-        let generation = generation.to_string();
-        post(Update::Unpair {
-            id: id.to_string(),
-            generation: (!generation.is_empty()).then_some(generation),
-        });
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_removeForward(
-    mut env: EnvUnowned,
-    _class: JClass,
-    owner: JString,
-    name: JString,
-) {
-    env.with_env(|_| {
-        post(Update::RemoveForward {
-            owner: owner.to_string(),
-            name: name.to_string(),
-        });
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_submitCode(
     mut env: EnvUnowned,
     _class: JClass,
@@ -337,20 +279,8 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
 #[derive(Clone, Copy)]
 pub(crate) enum ActivityAction<'a> {
     Toast(&'a str),
-    RenameSession(&'a str, SessionKey, &'a str),
-    ConfirmRemoveForward {
-        owner: &'a str,
-        name: &'a str,
-        route: &'a str,
-    },
-    ConfirmUnpair {
-        id: &'a str,
-        generation: &'a str,
-        name: &'a str,
-    },
     SaveDeviceName(&'a str),
     SaveZoom(f32),
-    Pair,
     Scan,
     PairingReady,
     DeviceConnections {
@@ -398,47 +328,6 @@ pub(crate) fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> R
                     jni_str!("showToast"),
                     jni_sig!("(Ljava/lang/String;)V"),
                     &[(&text).into()],
-                )
-            }
-            ActivityAction::RenameSession(peer, key, title) => {
-                let peer = JString::from_str(env, peer).map_err(|e| e.to_string())?;
-                let title = JString::from_str(env, title).map_err(|e| e.to_string())?;
-                env.call_method(
-                    activity,
-                    jni_str!("requestSessionName"),
-                    jni_sig!("(Ljava/lang/String;JJLjava/lang/String;)V"),
-                    &[
-                        (&peer).into(),
-                        (key.number as i64).into(),
-                        (key.nonce as i64).into(),
-                        (&title).into(),
-                    ],
-                )
-            }
-            ActivityAction::ConfirmRemoveForward { owner, name, route } => {
-                let owner = JString::from_str(env, owner).map_err(|e| e.to_string())?;
-                let name = JString::from_str(env, name).map_err(|e| e.to_string())?;
-                let route = JString::from_str(env, route).map_err(|e| e.to_string())?;
-                env.call_method(
-                    activity,
-                    jni_str!("confirmRemoveForward"),
-                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
-                    &[(&owner).into(), (&name).into(), (&route).into()],
-                )
-            }
-            ActivityAction::ConfirmUnpair {
-                id,
-                generation,
-                name,
-            } => {
-                let id = JString::from_str(env, id).map_err(|e| e.to_string())?;
-                let generation = JString::from_str(env, generation).map_err(|e| e.to_string())?;
-                let name = JString::from_str(env, name).map_err(|e| e.to_string())?;
-                env.call_method(
-                    activity,
-                    jni_str!("confirmUnpair"),
-                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
-                    &[(&id).into(), (&generation).into(), (&name).into()],
                 )
             }
             ActivityAction::SaveZoom(scale) => env.call_method(
@@ -547,12 +436,6 @@ pub(crate) fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> R
                     ],
                 )
             }
-            ActivityAction::Pair => env.call_method(
-                activity,
-                jni_str!("requestPairingCode"),
-                jni_sig!("()V"),
-                &[],
-            ),
             ActivityAction::Scan => {
                 env.call_method(activity, jni_str!("scanPairingCode"), jni_sig!("()V"), &[])
             }
