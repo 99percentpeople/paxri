@@ -252,6 +252,8 @@ final class TerminalGestures extends View {
 
     void stopFling() { fling.forceFinished(true); }
 
+    boolean hasSelection() { return lineHeight > 0; }
+
     void setHandles(int x1, int y1, int x2, int y2, int height, boolean connected) {
         boolean connectionChanged = this.connected != connected;
         this.connected = connected;

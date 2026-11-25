@@ -2,6 +2,7 @@
 pub mod catalog;
 pub mod controls;
 pub mod terminal;
+pub mod shortcuts;
 use crate::components::{Icon, Ui, actions, row};
 use crate::theme::{SPACE_1, SPACE_2, SPACE_3, SPACE_4};
 use catalog::page_for;

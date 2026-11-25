@@ -7,6 +7,7 @@ use url::{Host, Url};
 pub mod file;
 pub mod gui;
 pub mod keybar;
+pub mod shortcuts;
 pub mod peer_id;
 pub mod startup;
 

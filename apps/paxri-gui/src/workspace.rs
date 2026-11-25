@@ -583,6 +583,9 @@ impl Render for Workspace {
                 let dashboard = self.dashboard.read(cx);
                 let search = if sessions_visible { dashboard.session_filters.search.clone() } else { dashboard.settings_editor.search.clone() };
                 dock.capture_key_down(move |event, window, cx| {
+                    if window.default_prevented() {
+                        return;
+                    }
                     let key = &event.keystroke;
                     let shortcut = Modifiers::secondary_key();
                     if key.modifiers == shortcut && key.key.eq_ignore_ascii_case("f") {

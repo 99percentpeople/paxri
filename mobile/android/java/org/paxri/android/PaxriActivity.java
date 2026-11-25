@@ -89,7 +89,8 @@ public final class PaxriActivity extends GpuiInputActivity {
         public void onChange(boolean selfChange) { publishDeviceName(); }
     };
 
-    private static native void zoomKey(long session, int direction);
+    private native boolean terminalShortcut(long session, int modifiers, String key, boolean hasSelection);
+    private final android.util.SparseBooleanArray shortcutKeys = new android.util.SparseBooleanArray();
 
     public float terminalZoom() {
         android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
@@ -101,18 +102,55 @@ public final class PaxriActivity extends GpuiInputActivity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (visible && touchSession != 0 && event.isCtrlPressed() && !event.isAltPressed() && !event.isMetaPressed()
-                && !event.isFunctionPressed()) {
-            int symbol = event.getUnicodeChar(event.isShiftPressed() ? KeyEvent.META_SHIFT_ON : 0);
-            int direction;
-            if (symbol == '+' || symbol == '=') direction = 1;
-            else if (symbol == '-' && !event.isShiftPressed()) direction = -1;
-            else if (symbol == '0' && !event.isShiftPressed()) direction = 0;
-            else return super.dispatchKeyEvent(event);
-            if (event.getAction() == KeyEvent.ACTION_DOWN) zoomKey(touchSession, direction);
+        int code = event.getKeyCode();
+        if (event.getAction() == KeyEvent.ACTION_UP && shortcutKeys.get(code)) {
+            shortcutKeys.delete(code);
             return true;
         }
+        if (event.getAction() == KeyEvent.ACTION_DOWN && visible && terminalTouchable && touchSession != 0
+                && !event.isFunctionPressed()) {
+            int mods = (event.isCtrlPressed() ? 1 : 0) | (event.isAltPressed() ? 2 : 0)
+                    | (event.isShiftPressed() ? 4 : 0) | (event.isMetaPressed() ? 8 : 0);
+            boolean functionKey = code >= KeyEvent.KEYCODE_F1 && code <= KeyEvent.KEYCODE_F12;
+            if ((mods & ~4) != 0 || functionKey) {
+                String key = shortcutKey(event, functionKey);
+                // GPUI reports the shifted symbol itself on non-letter keys.
+                if (key != null && key.length() == 1 && !Character.isLetter(key.charAt(0))
+                        && key.charAt(0) != event.getUnicodeChar(0)) {
+                    mods &= ~4;
+                }
+                if (key != null && terminalShortcut(touchSession, mods, key, gestures != null && gestures.hasSelection())) {
+                    shortcutKeys.put(code, true);
+                    return true;
+                }
+            }
+        }
         return super.dispatchKeyEvent(event);
+    }
+
+    private static String shortcutKey(KeyEvent event, boolean functionKey) {
+        int code = event.getKeyCode();
+        if (functionKey) return "F" + (code - KeyEvent.KEYCODE_F1 + 1);
+        switch (code) {
+            case KeyEvent.KEYCODE_DPAD_UP: return "up";
+            case KeyEvent.KEYCODE_DPAD_DOWN: return "down";
+            case KeyEvent.KEYCODE_DPAD_LEFT: return "left";
+            case KeyEvent.KEYCODE_DPAD_RIGHT: return "right";
+            case KeyEvent.KEYCODE_MOVE_HOME: return "home";
+            case KeyEvent.KEYCODE_MOVE_END: return "end";
+            case KeyEvent.KEYCODE_PAGE_UP: return "pageup";
+            case KeyEvent.KEYCODE_PAGE_DOWN: return "pagedown";
+            case KeyEvent.KEYCODE_DEL: return "backspace";
+            case KeyEvent.KEYCODE_FORWARD_DEL: return "delete";
+            case KeyEvent.KEYCODE_INSERT: return "insert";
+            case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER: return "enter";
+            case KeyEvent.KEYCODE_SPACE: return "space";
+            case KeyEvent.KEYCODE_TAB: return "tab";
+            case KeyEvent.KEYCODE_ESCAPE: return "escape";
+            default:
+                int symbol = event.getUnicodeChar(event.isShiftPressed() ? KeyEvent.META_SHIFT_ON : 0);
+                return symbol > 32 && symbol < 127 ? Character.toString((char)symbol) : null;
+        }
     }
 
     private String systemDeviceName() {
@@ -201,6 +239,7 @@ public final class PaxriActivity extends GpuiInputActivity {
 
     @Override
     protected void onPause() {
+        shortcutKeys.clear();
         if (keybar != null) keybar.cancelPendingInputEvents();
         super.onPause();
     }

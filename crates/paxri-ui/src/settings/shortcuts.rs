@@ -1,0 +1,73 @@
+//! Terminal shortcut and clipboard settings shared by both clients.
+use super::{SettingSpec, SettingsGroup, catalog};
+use crate::{
+    components::{ShortcutRecorder, Ui},
+    theme,
+};
+use gpui::{prelude::*, *};
+use paxri_config::{gui::GuiChange, shortcuts::TerminalAction};
+use std::rc::Rc;
+
+pub fn group(
+    ui: Ui,
+    cx: &App,
+    change: impl Fn(GuiChange, &mut Window, &mut App) + 'static,
+) -> SettingsGroup {
+    let mut group = SettingsGroup::new(catalog::SHORTCUTS);
+    let hint = if cfg!(target_os = "android") {
+        "Tap a shortcut to record it with a hardware keyboard, or choose keys on screen from its menu."
+    } else {
+        "Select a shortcut and press the keys together. Esc cancels recording."
+    };
+    group.notice = Some(ui.muted(hint).into_any_element());
+    let change = Rc::new(change);
+    for action in TerminalAction::ALL {
+        let change = change.clone();
+        let recorder = ShortcutRecorder::new(
+            action.key(),
+            action.title(),
+            theme::terminal_controls(cx).shortcut(action),
+            move |binding, window, cx| {
+                let controls = theme::terminal_controls(cx);
+                let binding = controls.rebind(action, binding)?;
+                if binding.as_ref() != controls.shortcuts.get(&action) {
+                    change(GuiChange::Shortcut(action, binding), window, cx);
+                }
+                Ok(())
+            },
+        );
+        let description = match action {
+            TerminalAction::Copy => "Copies selected text. With no selection, the terminal handles the shortcut.",
+            _ => "",
+        };
+        let spec = SettingSpec::new(action.key(), action.title(), description, "keyboard shortcut");
+        if cfg!(target_os = "android") {
+            group.setting(spec, Empty).details = Some(recorder.into_any_element());
+        } else {
+            group.setting(spec, recorder);
+        }
+    }
+    group
+}
+
+pub fn features_group(
+    ui: Ui,
+    cx: &App,
+    change: impl Fn(GuiChange, &mut Window, &mut App) + 'static,
+) -> SettingsGroup {
+    let controls = theme::terminal_controls(cx);
+    let mut group = SettingsGroup::new(catalog::TERMINAL_CONTROLS);
+    let enabled = controls.remote_clipboard;
+    group.grouped_setting(
+        "Features",
+        SettingSpec::new(
+            "remote_clipboard",
+            "Remote clipboard writes",
+            "Allow programs in the active terminal to copy text to this device.",
+            "OSC 52 copy",
+        ),
+        ui.switch("terminal-remote-clipboard", enabled)
+            .on_click(move |_, w, cx| change(GuiChange::RemoteClipboard(!enabled), w, cx)),
+    );
+    group
+}

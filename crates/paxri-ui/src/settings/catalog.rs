@@ -16,8 +16,15 @@ pub const TERMINAL: SettingsSection = SettingsSection::new(
 );
 pub const INTERFACE: SettingsSection =
     SettingsSection::new(SettingsTable::Named("gui"), "Interface", Icon::Settings);
+pub const TERMINAL_CONTROLS: SettingsSection =
+    SettingsSection::new(SettingsTable::Named("gui.controls"), "Terminal controls", Icon::Terminal);
+pub const SHORTCUTS: SettingsSection =
+    SettingsSection::new(SettingsTable::Named("gui.controls.shortcuts"), "Keyboard shortcuts", Icon::Terminal);
 
 pub fn page_for(section: SettingsSection) -> SettingsSection {
+    if section == TERMINAL_CONTROLS || section == SHORTCUTS {
+        return TERMINAL_CONTROLS;
+    }
     let table = section.table.top_level();
     [DEVICE, GATEWAY, NETWORK, INTERFACE]
         .into_iter()

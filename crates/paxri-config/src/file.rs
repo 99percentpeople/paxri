@@ -182,8 +182,19 @@ pub fn set_gui(path: &Path, change: GuiChange, create: bool) -> Result<GuiSettin
     let text = edit(path, create, |current| {
         let mut doc: DocumentMut = current.parse()?;
         let gui = subtable(doc.as_table_mut(), "gui")?;
+        if let Some(controls) = gui.get_mut("controls").and_then(Item::as_table_like_mut) {
+            controls.remove("copy_selection_on_ctrl_c");
+        }
         let ser = ValueSerializer::new();
         let (table, key, value) = match change {
+            GuiChange::Shortcut(action, shortcut) => (
+                subtable(subtable(gui, "controls")?, "shortcuts")?,
+                action.key(),
+                shortcut.map(|chord| chord.serialize(ser)).transpose()?,
+            ),
+            GuiChange::RemoteClipboard(enabled) => (
+                subtable(gui, "controls")?, "remote_clipboard", Some(enabled.serialize(ser)?),
+            ),
             GuiChange::Keybar(v) => {
                 let keys = subtable(gui, "keybar")?;
                 for (name, mut value) in [

@@ -1,4 +1,4 @@
-use gpui::{Keystroke, Modifiers};
+use paxri_config::shortcuts::TerminalAction;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Zoom {
@@ -9,16 +9,11 @@ pub enum Zoom {
 }
 
 impl Zoom {
-    pub fn from_key(key: &Keystroke) -> Option<Self> {
-        let mut modifiers = key.modifiers;
-        modifiers.shift = false;
-        if modifiers != Modifiers::control() && modifiers != Modifiers::secondary_key() {
-            return None;
-        }
-        match key.key.as_str() {
-            "+" | "=" | "add" => Some(Self::In),
-            "-" | "subtract" if !key.modifiers.shift => Some(Self::Out),
-            "0" if !key.modifiers.shift => Some(Self::Reset),
+    pub fn from_action(action: TerminalAction) -> Option<Self> {
+        match action {
+            TerminalAction::ZoomIn => Some(Self::In),
+            TerminalAction::ZoomOut => Some(Self::Out),
+            TerminalAction::ZoomReset => Some(Self::Reset),
             _ => None,
         }
     }
@@ -53,7 +48,7 @@ mod tests {
             ("ctrl-shift-0", None),
         ] {
             assert_eq!(
-                Zoom::from_key(&Keystroke::parse(key).unwrap()),
+                crate::terminal::keys::local_action(&gpui::Keystroke::parse(key).unwrap(), &Default::default()).and_then(Zoom::from_action),
                 expected,
                 "{key}"
             );

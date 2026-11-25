@@ -4,8 +4,61 @@ use paxri_config::{
     file::{read_gui, save_gateway, set_gui, set_startup},
     gui::{Appearance, CursorShape, GuiChange, GuiSettings, TabPlacement, TerminalScheme},
     parse,
+    shortcuts::{ALT, CTRL, SHIFT, Shortcut, TerminalAction, TerminalControls},
     startup::Startup,
 };
+
+#[test]
+fn terminal_shortcuts_round_trip_and_conflicting_edits_preserve_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    let original = "version = 1\ndevice_name = 'Desk' # keep\n";
+    fs::write(&path, original).unwrap();
+    let defaults = read_gui(&path).unwrap().controls;
+    assert_eq!(defaults, TerminalControls::default());
+
+    let paste = TerminalAction::Paste;
+    let change = defaults.rebind(paste, Some(Shortcut::from_keys(CTRL | ALT, "v").unwrap())).unwrap();
+    set_gui(&path, GuiChange::Shortcut(paste, change), false).unwrap();
+    set_gui(&path, GuiChange::RemoteClipboard(false), false).unwrap();
+    let saved = read_gui(&path).unwrap().controls;
+    assert_eq!(saved.resolve(CTRL | ALT, "v"), Some(paste));
+    assert_eq!(saved.resolve(CTRL | SHIFT, "v"), None);
+    assert!(!saved.remote_clipboard);
+
+    let before = fs::read_to_string(&path).unwrap();
+    assert!(before.starts_with(original));
+    for text in ["Ctrl+=", "Ctrl+Shift++", "a", "Shift+Z", "Ctrl+", "Ctrl+Ctrl+C"] {
+        assert!(text.parse().and_then(|chord| saved.rebind(paste, Some(chord))).is_err(), "{text}");
+    }
+    let conflict = GuiChange::Shortcut(paste, Some("Ctrl++".parse().unwrap()));
+    assert!(set_gui(&path, conflict, false).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+    let off = saved.rebind(paste, Some(Shortcut::disabled())).unwrap();
+    let disabled = set_gui(&path, GuiChange::Shortcut(paste, off), false).unwrap().controls;
+    assert_eq!(disabled.resolve(CTRL | ALT, "v"), None);
+    assert_eq!(disabled.shortcut(paste).to_string(), "Off");
+    let reset = disabled.rebind(paste, None).unwrap();
+    let restored = set_gui(&path, GuiChange::Shortcut(paste, reset), false).unwrap().controls;
+    assert_eq!(restored.shortcut(paste), defaults.shortcut(paste));
+    assert!(restored.shortcuts.is_empty());
+    assert!(!restored.remote_clipboard);
+}
+
+#[test]
+fn retired_copy_switch_preserves_shortcuts_when_opening_an_older_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    let old = "version=1\n[gui.controls]\ncopy_selection_on_ctrl_c=true\n[gui.controls.shortcuts]\ncopy='Ctrl+K'\n";
+    fs::write(&path, old).unwrap();
+    let controls = read_gui(&path).unwrap().controls;
+    assert_eq!(controls.resolve(CTRL, "k"), Some(TerminalAction::Copy));
+    assert_eq!(controls.resolve(CTRL, "c"), None);
+    let edited = set_gui(&path, GuiChange::RemoteClipboard(false), false).unwrap();
+    assert_eq!(edited.controls.shortcuts, controls.shortcuts);
+    assert!(!fs::read_to_string(path).unwrap().contains("copy_selection_on_ctrl_c"));
+}
 
 #[test]
 fn editing_one_gui_key_preserves_siblings_comments_and_gateway_data() {

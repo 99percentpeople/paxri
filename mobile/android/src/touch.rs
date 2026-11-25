@@ -324,6 +324,7 @@ impl Mobile {
                     match gpui_mobile::packages::clipboard::get_text() {
                         Ok(Some(text)) => {
                             let bracketed = s.screen.term.mode().contains(TermMode::BRACKETED_PASTE);
+                            s.screen.term.selection = None;
                             s.write_input(keys::paste(&text, bracketed));
                         }
                         Ok(None) => {}

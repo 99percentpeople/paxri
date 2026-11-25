@@ -8,7 +8,7 @@ use crate::{
     theme::{self, Appearance, SPACE_2, SPACE_3},
 };
 use anyhow::Context as _;
-use paxri_ui::settings::controls::theme_cards;
+use paxri_ui::settings::{controls::theme_cards, shortcuts};
 use gpui::{prelude::*, *};
 use paxri_config::gui::TabPlacement;
 use paxri_cli::gateway::Action;
@@ -226,8 +226,15 @@ impl Dashboard {
             catalog::TERMINAL,
             Box::new(move || self.terminal_settings(ui, cx)),
         ));
+        let view = cx.entity().downgrade();
+        let change = move |change, _: &mut Window, cx: &mut App| {
+            let _ = view.update(cx, |view, cx| view.change_terminal_setting(change, cx));
+        };
+        let shortcut_change = change.clone();
+        sources.push((catalog::SHORTCUTS, Box::new(move || shortcuts::group(*ui, cx, shortcut_change))));
+        sources.push((catalog::TERMINAL_CONTROLS, Box::new(move || shortcuts::features_group(*ui, cx, change))));
         let selected = requested.map(|page| {
-            if sources.iter().any(|(s, _)| s.table.top_level() == page) {
+            if sources.iter().any(|(s, _)| catalog::page_for(*s).table == page) {
                 page
             } else {
                 catalog::GATEWAY.table
@@ -236,7 +243,7 @@ impl Dashboard {
         let groups = sources
             .into_iter()
             .map(|(section, build)| {
-                if selected.is_none_or(|page| section.table.top_level() == page) {
+                if selected.is_none_or(|page| catalog::page_for(section).table == page) {
                     build()
                 } else {
                     SettingsGroup::new(section)

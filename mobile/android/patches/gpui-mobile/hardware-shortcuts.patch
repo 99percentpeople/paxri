@@ -31,3 +31,37 @@
  
                  let keystroke = match android_key_to_keystroke(
                      key_event.key_code,
+--- a/src/android/keyboard.rs
++++ b/src/android/keyboard.rs
+@@ -343,11 +343,26 @@
+         None
+     };
+
+-    Some(Keystroke {
+-        modifiers,
+-        key,
+-        key_char,
+-    })
++    // Match the Activity's hardware shortcut names, including layout-dependent symbols.
++    // Keep key_char intact for text input.
++    let mut modifiers = modifiers;
++    let mut key = key;
++    if (modifiers.control || modifiers.alt || modifiers.platform) && key.len() == 1 {
++        if key == " " {
++            key = "space".to_owned();
++        } else {
++            let shift = if modifiers.shift { AMETA_SHIFT_ON } else { 0 };
++            let symbol = super::jni::unicode_char_for_key_event(key_code, 0, shift);
++            if let Some(ch) = char::from_u32(symbol).filter(char::is_ascii_graphic) {
++                if modifiers.shift && !ch.is_ascii_alphabetic()
++                    && symbol != super::jni::unicode_char_for_key_event(key_code, 0, 0) {
++                    modifiers.shift = false;
++                }
++                key = ch.to_ascii_lowercase().to_string();
++            }
++        }
++    }
++    Some(Keystroke { modifiers, key, key_char })
+ }
+
+ /// Create a [`Keystroke`] for a software-keyboard text insertion.

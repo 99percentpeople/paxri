@@ -78,6 +78,7 @@ impl Mobile {
                 self.font = cx.global::<theme::fonts::MonospaceFonts>().resolve(&settings.terminal);
                 self.update_session_fonts();
                 self.keybar = settings.keybar.clone().unwrap_or_default();
+                *HARDWARE_CONTROLS.lock().unwrap() = settings.controls.clone();
                 theme::apply(settings, cx);
                 cx.notify();
                 true
@@ -126,7 +127,18 @@ impl Mobile {
             );
         }
 
-        let pages = SettingsPage::collect(vec![device, appearance, terminal]);
+        let mut groups = vec![device, appearance, terminal];
+        if selected == Some(catalog::TERMINAL_CONTROLS) {
+            let view = cx.entity().downgrade();
+            let change = move |change, _: &mut Window, cx: &mut App| {
+                let _ = view.update(cx, |view, cx| view.change_gui(change, cx));
+            };
+            groups.push(paxri_ui::settings::shortcuts::group(ui, cx, change.clone()));
+            groups.push(paxri_ui::settings::shortcuts::features_group(ui, cx, change));
+        } else {
+            groups.push(SettingsGroup::new(catalog::TERMINAL_CONTROLS));
+        }
+        let pages = SettingsPage::collect(groups);
         let mut body = self.settings_body((
             ElementId::from("settings"),
             SharedString::from(selected.map(|section| section.title).unwrap_or("categories")),
@@ -153,7 +165,7 @@ impl Mobile {
                 body = body.child(page.render(ui, SettingsLayout::Mobile));
             }
         }
-        if selected.is_none() {
+        if selected == Some(catalog::TERMINAL_CONTROLS) {
             body = body.child(paxri_ui::settings::controls::category_button(
                 ui, Some(keybar::SECTION), false, None, SettingsLayout::Mobile,
             ).role(Role::Button).aria_label("Terminal keys")

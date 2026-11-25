@@ -1,4 +1,46 @@
+use super::emulator::Emulator;
+use crate::theme::Zoom;
+use alacritty_terminal::term::TermMode;
 use gpui::{Keystroke, Modifiers};
+use paxri_config::shortcuts::{ALT, CTRL, META, SHIFT, TerminalAction, TerminalControls};
+
+pub fn local_action(key: &Keystroke, controls: &TerminalControls) -> Option<TerminalAction> {
+    let mask = modifier_mask(key.modifiers)?;
+    controls.resolve(mask, &key.key)
+}
+
+pub enum TerminalInput {
+    Copy(String),
+    Paste,
+    Zoom(Zoom),
+    Send(Vec<u8>),
+}
+
+/// Resolve a key against the live emulator, including selections owned by the client.
+pub fn terminal_input(
+    key: &Keystroke,
+    action: Option<TerminalAction>,
+    screen: &Emulator,
+) -> Option<TerminalInput> {
+    match action {
+        Some(TerminalAction::Copy) => {
+            if let Some(text) = screen.selected_text() {
+                return Some(TerminalInput::Copy(text));
+            }
+        }
+        Some(TerminalAction::Paste) => return Some(TerminalInput::Paste),
+        Some(zoom) => return Zoom::from_action(zoom).map(TerminalInput::Zoom),
+        None => {}
+    }
+    sequence(key, screen.term.mode().contains(TermMode::APP_CURSOR)).map(TerminalInput::Send)
+}
+
+pub fn modifier_mask(m: Modifiers) -> Option<u8> {
+    (!m.function).then_some(
+        (u8::from(m.control) * CTRL) | (u8::from(m.alt) * ALT)
+        | (u8::from(m.shift) * SHIFT) | (u8::from(m.platform) * META)
+    )
+}
 
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     let text = text.replace("\r\n", "\n").replace('\n', "\r");
@@ -156,6 +198,25 @@ pub fn named_key(name: &str, mods: Modifiers, application_cursor: bool) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_configured_copy_key_claims_a_local_selection() {
+        let mut screen = Emulator::new(super::super::emulator::GridSize { rows: 2, cols: 16 });
+        screen.process(b"one two");
+        let mut controls = TerminalControls::default();
+        let copy = TerminalAction::Copy;
+        controls.shortcuts.insert(copy, "Ctrl+K".parse().unwrap());
+        let input = |name: &str, controls: &TerminalControls, screen: &Emulator| {
+            let key = Keystroke::parse(name).unwrap();
+            terminal_input(&key, local_action(&key, controls), screen)
+        };
+        assert!(matches!(input("ctrl-k", &controls, &screen), Some(TerminalInput::Send(b)) if b == [11]));
+        screen.start_selection(0, 1., 2);
+        assert!(matches!(input("ctrl-k", &controls, &screen), Some(TerminalInput::Copy(s)) if s == "one"));
+        assert!(matches!(input("ctrl-c", &controls, &screen), Some(TerminalInput::Send(b)) if b == [3]));
+        controls.shortcuts.insert(copy, paxri_config::shortcuts::Shortcut::disabled());
+        assert!(matches!(input("ctrl-k", &controls, &screen), Some(TerminalInput::Send(b)) if b == [11]));
+    }
 
     #[test]
     fn paste_preserves_unicode_and_frames_multiline_input() {

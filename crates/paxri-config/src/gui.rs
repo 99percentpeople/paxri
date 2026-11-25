@@ -1,5 +1,6 @@
 //! Desktop settings in the node's [gui] and [gui.terminal] tables.
 use crate::keybar::KeybarSettings;
+use crate::shortcuts::{Shortcut, TerminalAction, TerminalControls};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -129,6 +130,8 @@ pub struct GuiSettings {
     #[serde(skip_serializing_if = "TabPlacement::is_top")]
     pub tab_placement: TabPlacement,
     pub terminal: TerminalAppearance,
+    #[serde(skip_serializing_if = "TerminalControls::is_default")]
+    pub controls: TerminalControls,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keybar: Option<Arc<KeybarSettings>>,
 }
@@ -136,6 +139,7 @@ pub struct GuiSettings {
 impl GuiSettings {
     pub(crate) fn validate(&self) -> Result<(), String> {
         self.terminal.validate()?;
+        self.controls.validate()?;
         if let Some(keys) = &self.keybar { keys.validate()?; }
         Ok(())
     }
@@ -154,6 +158,8 @@ pub enum GuiChange {
     LineHeight(Option<u8>),
     LetterSpacing(i8),
     Keybar(KeybarSettings),
+    Shortcut(TerminalAction, Option<Shortcut>),
+    RemoteClipboard(bool),
 }
 
 impl Appearance {

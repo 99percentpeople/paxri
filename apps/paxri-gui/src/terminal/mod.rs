@@ -127,7 +127,7 @@ impl Terminal {
                             view.output(event, cx);
                         }
                         let reply = view.emulator.finish_batch_with_clipboard(|_target, text| {
-                            if view.focused {
+                            if view.focused && crate::theme::terminal_controls(cx).remote_clipboard {
                                 let item = ClipboardItem::new_string(text);
                                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                                 if _target == alacritty_terminal::term::ClipboardType::Selection {
@@ -335,35 +335,14 @@ impl Terminal {
     }
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
-        if let Some(zoom) = Zoom::from_key(key) {
-            TerminalZoom::apply(zoom, window, cx);
-            return;
-        }
-        let shortcut = if cfg!(target_os = "macos") {
-            key.modifiers.platform
-        } else {
-            key.modifiers.control && key.modifiers.shift
-        };
-        if shortcut && key.key.eq_ignore_ascii_case("v") {
-            self.paste(window, cx);
-        } else if key.key.eq_ignore_ascii_case("c")
-            && (shortcut
-                || (!cfg!(target_os = "macos")
-                    && key.modifiers == Modifiers::control()
-                    && self.emulator.selected_range().is_some()))
-        {
-            let text = self
-                .emulator
-                .selected_text()
-                .unwrap_or_else(|| self.emulator.visible_text());
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        } else if let Some(bytes) = keys::sequence(
-            key,
-            self.emulator.term.mode().contains(TermMode::APP_CURSOR),
-        ) {
-            self.write(bytes, window);
-        } else {
-            return;
+        let controls = crate::theme::terminal_controls(cx);
+        let action = keys::local_action(key, controls);
+        match keys::terminal_input(key, action, &self.emulator) {
+            Some(keys::TerminalInput::Copy(text)) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Some(keys::TerminalInput::Paste) => self.paste(window, cx),
+            Some(keys::TerminalInput::Zoom(zoom)) => return TerminalZoom::apply(zoom, window, cx),
+            Some(keys::TerminalInput::Send(bytes)) => self.write(bytes, window),
+            None => return,
         }
         cx.stop_propagation();
         window.prevent_default();

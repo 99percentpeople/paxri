@@ -17,6 +17,7 @@ use jni::{
     objects::{Global, JClass, JObject, JString},
 };
 use paxri_config::keybar::KeybarSettings;
+use paxri_config::shortcuts::{ALT, CTRL, META, SHIFT, TerminalAction, TerminalControls};
 use paxri_terminal::{Frame, Size as PtySize};
 use std::sync::{
     Arc, LazyLock, Mutex,
@@ -64,7 +65,7 @@ enum Update {
         selection: std::ops::Range<usize>,
     },
     HardwareText(u64, String),
-    Zoom(u64, theme::Zoom),
+    Shortcut(u64, Keystroke, Option<TerminalAction>),
     Key {
         id: u64,
         value: String,
@@ -175,6 +176,8 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_deviceNameChanged(
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
 }
 
+// Android dispatches hardware keys on the Activity thread, before GPUI or the IME.
+static HARDWARE_CONTROLS: LazyLock<Mutex<TerminalControls>> = LazyLock::new(Mutex::default);
 static BRIDGE: Mutex<Option<Sender<Update>>> = Mutex::new(None);
 static SYSTEM_UI_REM: Mutex<f32> = Mutex::new(16.);
 static EDGES: Mutex<[f32; 4]> = Mutex::new([0.; 4]);
@@ -312,14 +315,36 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_insetsChanged(
     post(Update::DisplayChanged);
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_zoomKey(
-    _env: EnvUnowned, _class: JClass, session: i64, direction: i32,
-) {
-    post(Update::Zoom(session as u64, match direction {
-        1 => theme::Zoom::In,
-        -1 => theme::Zoom::Out,
-        _ => theme::Zoom::Reset,
-    }));
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalShortcut(
+    mut env: EnvUnowned, activity: JObject, session: i64, modifiers: i32, key: JString, has_selection: bool,
+) -> bool {
+    env.with_env(|env| {
+        let name = key.to_string();
+        let bits = modifiers as u8;
+        let key = Keystroke {
+            modifiers: Modifiers {
+                control: bits & CTRL != 0, alt: bits & ALT != 0,
+                shift: bits & SHIFT != 0, platform: bits & META != 0, ..Default::default()
+            },
+            key: name.to_ascii_lowercase(),
+            key_char: (name.len() == 1).then_some(name),
+        };
+        let action = keys::local_action(&key, &HARDWARE_CONTROLS.lock().unwrap());
+        let local = match action {
+            Some(TerminalAction::Copy) => has_selection,
+            Some(_) => true,
+            None => false,
+        };
+        // Route PTY control bytes before the focused Android editor can consume them.
+        if !local && ((action.is_none() && !key.modifiers.control) || keys::sequence(&key, false).is_none()) {
+            return Ok(false);
+        }
+        if action == Some(TerminalAction::Paste) {
+            env.call_method(&activity, jni_str!("finishTerminalComposition"), jni_sig!("()V"), &[])?;
+        }
+        post(Update::Shortcut(session as u64, key, action));
+        Ok::<_, jni::errors::Error>(true)
+    }).resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
@@ -681,10 +706,12 @@ impl Mobile {
     fn bind_terminal_shortcuts(cx: &mut Context<Self>) {
         let mobile = cx.weak_entity();
         let subscription = cx.intercept_keystrokes(move |event, window, cx| {
-            if let Some(zoom) = theme::Zoom::from_key(&event.keystroke) {
+            let action = keys::local_action(&event.keystroke, theme::terminal_controls(cx));
+            if action.is_some() || event.keystroke.modifiers.control {
                 let _ = mobile.update(cx, |view, cx| {
-                    if matches!(view.page, Page::Terminal(_)) && !view.drawer.open {
-                        view.apply_zoom(zoom, true, cx);
+                    if let Page::Terminal(id) = view.page && !view.drawer.open && !view.page_menu.read(cx).is_open()
+                        && view.terminal_shortcut(id, &event.keystroke, action, cx)
+                    {
                         window.prevent_default();
                         cx.stop_propagation();
                     }
@@ -692,6 +719,26 @@ impl Mobile {
             }
         });
         cx.on_release(move |_, _| drop(subscription)).detach();
+    }
+
+    fn terminal_shortcut(&mut self, id: u64, key: &Keystroke, action: Option<TerminalAction>, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.sessions.get_mut(&id) else { return false };
+        match keys::terminal_input(key, action, &s.screen) {
+            Some(keys::TerminalInput::Copy(text)) => {
+                if let Err(error) = gpui_mobile::packages::clipboard::set_text(&text) {
+                    Toast::show(error, self.window, cx);
+                }
+            }
+            Some(keys::TerminalInput::Zoom(zoom)) => self.apply_zoom(zoom, true, cx),
+            Some(keys::TerminalInput::Paste) => self.handle_gesture(id, touch::Gesture::Paste, cx),
+            Some(keys::TerminalInput::Send(bytes)) if s.connected() => {
+                s.screen.term.selection = None;
+                s.write_input(bytes);
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
     }
 
     fn bind_input(
@@ -840,6 +887,7 @@ impl Mobile {
             return;
         }
         let page = match self.page {
+            Page::SettingsCategory(keybar::SECTION) => Page::SettingsCategory(paxri_ui::settings::catalog::TERMINAL_CONTROLS),
             Page::SettingsCategory(_) => Page::Settings,
             Page::ForwardEdit { ref scope, .. } => Page::Forwards(scope.clone()),
             Page::Forwards(Some(ref id)) => Page::Peer(id.clone()),
@@ -1189,9 +1237,9 @@ impl Mobile {
                     self.back(cx);
                 }
             }
-            Update::Zoom(id, zoom) => {
-                if self.page == Page::Terminal(id) && !self.drawer.open {
-                    self.apply_zoom(zoom, true, cx);
+            Update::Shortcut(id, key, action) => {
+                if self.page == Page::Terminal(id) && !self.drawer.open && !self.page_menu.read(cx).is_open() {
+                    self.terminal_shortcut(id, &key, action, cx);
                 }
             }
             Update::HardwareText(id, value) => {
@@ -1300,7 +1348,7 @@ impl Mobile {
                     s.screen.process(&bytes);
                     let visible = self.page == Page::Terminal(id) && *ACTIVITY_VISIBLE.borrow();
                     let reply = s.screen.finish_batch_with_clipboard(|_, text| {
-                        if !replay && visible
+                        if !replay && visible && theme::terminal_controls(cx).remote_clipboard
                             && let Err(error) = gpui_mobile::packages::clipboard::set_text(&text)
                         {
                             Toast::show(error, self.window, cx);
@@ -1437,6 +1485,7 @@ fn android_main(android: AndroidApp) {
                 Some(format!("Loading settings: {error:#}")),
             ),
         };
+        *HARDWARE_CONTROLS.lock().unwrap() = preferences.controls.clone();
         theme::install(preferences, cx);
         let activity = android.clone();
         Toast::set_native(move |message| {

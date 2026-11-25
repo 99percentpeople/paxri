@@ -31,6 +31,10 @@ pub fn current(cx: &App) -> GuiSettings {
     cx.global::<Preferences>().0.clone()
 }
 
+pub fn terminal_controls(cx: &App) -> &paxri_config::shortcuts::TerminalControls {
+    &cx.global::<Preferences>().0.controls
+}
+
 pub fn install(settings: GuiSettings, cx: &mut App) {
     cx.set_global(Preferences(settings));
 }
