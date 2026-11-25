@@ -109,21 +109,11 @@ impl Ui {
         name: SharedString,
         online: bool,
         detail: String,
-        counts: DeviceCounts,
     ) -> Button {
-        let sessions = count_label(counts.sessions);
-        let forwards = count_label(counts.forwards);
-        let label = format!("{name} · {} · {detail} · Sessions: {sessions} · Port forwarding: {forwards}", platform.label());
-        let counter = |icon: Icon, count| div().flex().items_center().gap_1().child(icon.draw(14.)).child(count);
-        let totals = div().flex().items_center().gap_2().text_xs()
-            .text_color(rgb(self.colors.muted_foreground))
-            .child(counter(Icon::Terminal, sessions))
-            .child(counter(Icon::Forward, forwards));
+        let label = format!("{name} · {} · {detail}", platform.label());
+        let item = self.device_item(platform, name, online, detail);
         #[cfg(target_os = "android")]
-        let item = self.device_item(platform, name, online, detail)
-            .trailing(totals.child(Icon::ChevronRight.draw(14.)));
-        #[cfg(not(target_os = "android"))]
-        let item = self.device_item(platform, name, online, detail).below_detail(totals);
+        let item = item.chevron(self);
         item.button(self, id, label.into())
     }
 

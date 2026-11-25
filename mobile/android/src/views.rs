@@ -291,7 +291,6 @@ impl Mobile {
                 peer.name.clone().into(),
                 self.presence.online(&id),
                 presence_detail(peer_state(self.presence.paths_for(&id), true), now, changed),
-                self.device_counts(&id),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate(Page::Peer(id.clone()), cx);
