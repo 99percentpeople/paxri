@@ -272,12 +272,11 @@ impl Terminal {
         }
         match self.touch.gesture {
             Gesture::Select | Gesture::Handle { .. } => {
-                if at.y < self.viewport.top() {
-                    self.emulator.scroll(Scroll::Delta(1));
-                }
-                if at.y >= self.viewport.bottom() {
-                    self.emulator.scroll(Scroll::Delta(-1));
-                }
+                self.emulator.scroll_for_edge(
+                    f32::from(at.y),
+                    f32::from(self.viewport.top()),
+                    f32::from(self.viewport.bottom()),
+                );
                 if let Gesture::Handle { leading, offset } = self.touch.gesture {
                     let (row, x) = self.cell_at(at + offset);
                     self.emulator.move_selection_handle(leading, row, x);

@@ -142,12 +142,77 @@ impl Ui {
             .tooltip(tooltip("End session".into()))
     }
 
+    pub fn device_identity_row(self, platform: DevicePlatform, id: &str) -> Div {
+        let short = paxri_config::peer_id::default_prefix(id);
+        div()
+            .flex()
+            .items_center()
+            .gap(SPACE_3)
+            .child(self.device_icon(platform))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(platform.label()))
+                    .child(
+                        single_line(self.muted(format!("Device ID · {short}")))
+                            .text_xs()
+                            .id("device-identity")
+                            .tooltip(tooltip(id.to_owned().into())),
+                    ),
+            )
+    }
+
+    pub fn device_detail_sections(
+        self,
+        connection: Div,
+        counts: DeviceCounts,
+        show_forwards: bool,
+        open_sessions: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        open_forwards: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Div {
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(SPACE_4)
+            .child(self.separator())
+            .child(connection)
+            .child(self.separator())
+            .child(
+                self.counted_navigation_row(
+                    "device-sessions",
+                    Icon::Terminal,
+                    "Sessions",
+                    counts.sessions,
+                )
+                .on_click(open_sessions),
+            )
+            .when(show_forwards, |page| {
+                page.child(self.separator()).child(
+                    self.counted_navigation_row(
+                        "device-forwards",
+                        Icon::Forward,
+                        "Port forwarding",
+                        counts.forwards,
+                    )
+                    .on_click(open_forwards),
+                )
+            })
+    }
+
     pub fn device_actions(
-        self, name: &str, state: &Entity<DropdownState>, cx: &App,
+        self,
+        id: impl Into<ElementId>,
+        name: &str,
         unpair: impl Fn(&mut Window, &mut App) + 'static,
-    ) -> Dropdown<Button> {
-        let menu = DropdownContent::new().item("unpair-device", Icon::Trash.label("Unpair device"), unpair);
-        let menu = self.actions_menu("device-actions", format!("Actions for {name}").into(), state, menu, cx);
+    ) -> ActionsMenu {
+        let menu =
+            DropdownContent::new().item("unpair-device", Icon::Trash.label("Unpair device"), unpair);
+        let menu = self.actions_menu(id, format!("Actions for {name}").into(), menu);
         #[cfg(target_os = "android")]
         let menu = menu.circular_trigger();
         menu
@@ -160,7 +225,7 @@ impl Ui {
         key: paxri_control::terminal::managed::Key,
         title: SharedString,
         location: directory::SessionLocation,
-        actions: Option<Dropdown<Button>>,
+        actions: Option<ActionsMenu>,
         open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Button {
         let id = SharedString::from(format!("show-terminal-{peer}-{}-{}", key.number, key.nonce));

@@ -1,39 +1,42 @@
-use super::{directory::DeviceOption, input::Input, *};
+use super::{
+    directory::{DeviceOption, ListFilters, contains_terms},
+    *,
+};
 use crate::theme::BUTTON_HEIGHT;
 use paxri_control::{Direction, ForwardStatus};
+use std::net::SocketAddr;
 
-pub struct ForwardFilters {
+pub const NARROW_WIDTH: Pixels = px(650.);
+
+#[derive(Default)]
+pub struct ForwardScope {
     pub device: Option<String>,
     pub direction: Option<Direction>,
-    state: Option<&'static str>,
-    pub search: Entity<Input>,
+    pub state: Option<&'static str>,
 }
 
+impl ForwardScope {
+    pub fn active_count(&self) -> usize {
+        usize::from(self.device.is_some())
+            + usize::from(self.direction.is_some())
+            + usize::from(self.state.is_some())
+    }
+}
+
+pub type ForwardFilters = ListFilters<ForwardScope>;
+
 impl ForwardFilters {
-    pub fn new<V: 'static>(cx: &mut Context<V>) -> Self {
-        let search = Input::search("Search device or port…", cx);
-        cx.observe(&search, |_, _, cx| cx.notify()).detach();
-        Self {
-            search,
-            device: None,
-            direction: None,
-            state: None,
-        }
+    pub fn for_forwards<V: 'static>(cx: &mut Context<V>) -> Self {
+        Self::new("Search device or port…", cx)
     }
 
-    pub fn reset(&mut self, device: Option<String>, cx: &mut App) {
-        self.search.update(cx, |input, cx| input.set_text("", cx));
-        self.device = device;
-        self.direction = None;
-        self.state = None;
-    }
-
-    pub fn query(&self, cx: &App) -> String {
-        self.search.read(cx).text().trim().to_lowercase()
+    pub fn for_device(&mut self, device: Option<String>, cx: &mut App) {
+        self.reset(cx);
+        self.scope.device = device;
     }
 
     pub fn has_selections(&self) -> bool {
-        self.device.is_some() || self.direction.is_some() || self.state.is_some()
+        self.scope.active_count() > 0
     }
 
     pub fn matches(
@@ -42,38 +45,40 @@ impl ForwardFilters {
         name: &str,
         rule: &ForwardStatus,
         display_name: &str,
-        terms: &[&str],
+        query: &str,
     ) -> bool {
         let state = if rule.enabled() && rule.error.is_some() {
             "Error"
         } else {
             rule.state().trim_end_matches('…')
         };
-        if self.device.as_ref().is_some_and(|peer| peer != device)
+        if self.scope.device.as_ref().is_some_and(|peer| peer != device)
             || self
+                .scope
                 .direction
                 .is_some_and(|direction| direction != rule.direction)
-            || self.state.is_some_and(|selected| selected != state)
+            || self.scope.state.is_some_and(|selected| selected != state)
         {
             return false;
         }
-        if terms.is_empty() {
+        if query.is_empty() {
             return true;
         }
         let direction = match rule.direction {
             Direction::Local => "forward",
             Direction::Remote => "reverse",
         };
-        let searchable = format!(
-            "{name} {display_name} {} {} {} {} {direction} {state} {}",
-            rule.peer,
-            rule.listen,
-            rule.bound.as_deref().unwrap_or(""),
-            rule.target,
-            rule.state()
+        contains_terms(
+            query,
+            format!(
+                "{name} {display_name} {} {} {} {} {direction} {state} {}",
+                rule.peer,
+                rule.listen,
+                rule.bound.as_deref().unwrap_or(""),
+                rule.target,
+                rule.state()
+            ),
         )
-        .to_lowercase();
-        terms.iter().all(|term| searchable.contains(*term))
     }
 
     pub fn toolbar<V: 'static>(
@@ -84,9 +89,9 @@ impl ForwardFilters {
     ) -> FilterToolbar {
         let mut devices = Select::new(
             "forward-device-filter",
-            Some(self.device.clone()),
+            Some(self.scope.device.clone()),
             cx.listener(move |v, peer: &Option<String>, _, cx| {
-                access(v).device = peer.clone();
+                access(v).scope.device = peer.clone();
                 cx.notify();
             }),
         )
@@ -97,9 +102,9 @@ impl ForwardFilters {
         }
         let directions = Select::new(
             "forward-direction-filter",
-            Some(self.direction),
+            Some(self.scope.direction),
             cx.listener(move |v, direction: &Option<Direction>, _, cx| {
-                access(v).direction = *direction;
+                access(v).scope.direction = *direction;
                 cx.notify();
             }),
         )
@@ -108,9 +113,9 @@ impl ForwardFilters {
         .option(Some(Direction::Remote), "Reverse");
         let mut states = Select::new(
             "forward-state-filter",
-            Some(self.state),
+            Some(self.scope.state),
             cx.listener(move |v, state: &Option<&'static str>, _, cx| {
-                access(v).state = *state;
+                access(v).scope.state = *state;
                 cx.notify();
             }),
         )
@@ -120,27 +125,60 @@ impl ForwardFilters {
         }
 
         let owner = cx.weak_entity();
-        let active = usize::from(self.device.is_some())
-            + usize::from(self.direction.is_some())
-            + usize::from(self.state.is_some());
         FilterToolbar::new(
             "forward-filters",
             "Filter forwarding rules",
             &self.search,
-            active,
+            self.scope.active_count(),
         )
         .group("Device", devices)
         .group("Direction", directions)
         .group("State", states)
         .clear(move |_, cx| {
             let _ = owner.update(cx, |v, cx| {
-                access(v).device = None;
-                access(v).direction = None;
-                access(v).state = None;
+                access(v).scope = ForwardScope::default();
                 cx.notify();
             });
         })
     }
+}
+
+pub fn endpoint_labels(direction: Direction) -> (&'static str, &'static str) {
+    match direction {
+        Direction::Local => ("Listen on this device", "Target on peer"),
+        Direction::Remote => ("Listen on peer", "Target on this device"),
+    }
+}
+
+pub fn direction_select(
+    id: impl Into<ElementId>,
+    direction: Direction,
+    change: impl Fn(&Direction, &mut Window, &mut App) + 'static,
+) -> Select<Direction> {
+    Select::new(id, direction, change)
+        .option(Direction::Local, "Forward")
+        .option(Direction::Remote, "Reverse")
+}
+
+pub fn device_select(
+    id: impl Into<ElementId>,
+    selected: impl Into<Option<String>>,
+    placeholder: impl Into<SharedString>,
+    options: &[DeviceOption],
+    change: impl Fn(&String, &mut Window, &mut App) + 'static,
+) -> Select<String> {
+    let mut devices = Select::new(id, selected, change).placeholder(placeholder);
+    for (id, name, platform) in options {
+        devices = devices.option_with_icon(id.clone(), name.clone(), Icon::device(*platform));
+    }
+    devices
+}
+
+pub fn parse_endpoints(listen: &str, target: &str) -> Result<(SocketAddr, String), String> {
+    Ok((
+        paxri_control::listen_address(listen.trim())?,
+        paxri_control::tcp_target(target.trim())?,
+    ))
 }
 
 fn columns() -> Div {
@@ -151,6 +189,12 @@ fn cell() -> Div {
 }
 
 impl Ui {
+    pub fn forwarding_table(self, list: ListView, narrow: bool, rows: Vec<Div>) -> ListView {
+        list.divided()
+            .when(!narrow, |list| list.child(self.forwarding_header()))
+            .children(rows)
+    }
+
     pub fn forwarding_header(self) -> Div {
         let mut header = columns();
         for label in ["Rule / Direction", "Device", "Listen", "Target", "State"] {
@@ -226,7 +270,6 @@ pub struct RuleMenu {
     id: SharedString,
     name: String,
     content: DropdownContent,
-    state: Option<Entity<DropdownState>>,
 }
 
 #[derive(Clone, Copy)]
@@ -262,22 +305,34 @@ impl RuleMenu {
             id: id.into(),
             name: name.to_owned(),
             content,
-            state: None,
         }
-    }
-    pub fn with_state(mut self, state: Entity<DropdownState>) -> Self {
-        self.state = Some(state);
-        self
     }
 }
 
 impl RenderOnce for RuleMenu {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let ui = Ui::new(window, cx);
-        let state = self
-            .state
-            .unwrap_or_else(|| DropdownState::local(self.id.clone().into(), window, cx));
         let label = SharedString::from(format!("Actions for {}", self.name));
-        ui.actions_menu(self.id, label, &state, self.content, cx)
+        Ui::new(window, cx).actions_menu(self.id, label, self.content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Direction, endpoint_labels, parse_endpoints};
+
+    #[test]
+    fn endpoint_labels_flip_with_direction_and_parse_defaults() {
+        assert_eq!(
+            endpoint_labels(Direction::Local),
+            ("Listen on this device", "Target on peer")
+        );
+        assert_eq!(
+            endpoint_labels(Direction::Remote),
+            ("Listen on peer", "Target on this device")
+        );
+        let (listen, target) = parse_endpoints(" 8080 ", " 3000 ").unwrap();
+        assert_eq!(listen.port(), 8080);
+        assert_eq!(target, "127.0.0.1:3000");
+        assert!(parse_endpoints("bad", "3000").is_err());
     }
 }

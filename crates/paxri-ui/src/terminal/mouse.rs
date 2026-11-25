@@ -84,7 +84,7 @@ impl TouchMouseDrag {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WheelTarget {
     #[default]
     History,

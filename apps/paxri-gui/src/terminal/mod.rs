@@ -10,10 +10,7 @@ pub(crate) use paxri_ui::terminal::title::TabTitle;
 use crate::components::{ScrollMetrics, ScrollSource, Scrollbar, Ui};
 use crate::theme::{SPACE_2, Zoom};
 use crate::theme::fonts::{CellSize, MonospaceFonts};
-use alacritty_terminal::{
-    grid::{Dimensions, Scroll},
-    term::TermMode,
-};
+use alacritty_terminal::{grid::Scroll, term::TermMode};
 use emulator::{Emulator, GridSize};
 use gpui::{prelude::*, *};
 use session::{Output, Session};
@@ -78,21 +75,12 @@ struct TerminalHistory(Entity<Terminal>);
 
 impl ScrollSource for TerminalHistory {
     fn metrics(&self, cx: &App) -> ScrollMetrics {
-        let grid = self.0.read(cx).emulator.term.grid();
-        ScrollMetrics::new(
-            grid.screen_lines() as f32,
-            grid.history_size() as f32,
-            (grid.history_size() - grid.display_offset()) as f32,
-        )
+        self.0.read(cx).emulator.scroll_metrics()
     }
 
     fn scroll_to(&self, offset: f32, cx: &mut App) {
         self.0.update(cx, |view, cx| {
-            let grid = view.emulator.term.grid();
-            let from_bottom = grid.history_size().saturating_sub(offset.round() as usize);
-            let delta = from_bottom as i32 - grid.display_offset() as i32;
-            if delta != 0 {
-                view.emulator.scroll(Scroll::Delta(delta));
+            if view.emulator.scroll_to_offset(offset) {
                 cx.notify();
             }
         });
@@ -230,12 +218,8 @@ impl Terminal {
     }
     fn cell_at(&self, position: Point<Pixels>) -> (usize, f32) {
         let local = position - self.viewport.origin;
-        let last = self.emulator.term.screen_lines() - 1;
-        let cell = self.emulator.font.cell;
-        let row = (f32::from(local.y) / cell.height)
-            .floor()
-            .clamp(0., last as f32) as usize;
-        (row, f32::from(local.x) / cell.width)
+        self.emulator
+            .grid_position(f32::from(local.x), f32::from(local.y))
     }
 
     fn start_selection(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
@@ -329,8 +313,8 @@ impl Terminal {
     }
     fn paste(&mut self, window: &Window, cx: &App) {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            let bracketed = self.emulator.term.mode().contains(TermMode::BRACKETED_PASTE);
-            self.write(keys::paste(&text, bracketed), window);
+            let bytes = self.emulator.paste_bytes(&text);
+            self.write(bytes, window);
         }
     }
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -354,16 +338,12 @@ impl Render for Terminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::new(window, cx);
         let appearance = crate::theme::current(cx).terminal;
-        self.emulator.font = cx.global::<MonospaceFonts>().resolve(&appearance).scaled(TerminalZoom::current(cx));
-        let palette = crate::theme::terminal_palette(appearance.scheme, ui.colors);
-        self.emulator.palette = palette;
-        let background = display::color(
-            alacritty_terminal::vte::ansi::Color::Named(
-                alacritty_terminal::vte::ansi::NamedColor::Background,
-            ),
-            palette,
-            self.emulator.term.colors(),
-        );
+        self.emulator.font = cx
+            .global::<MonospaceFonts>()
+            .resolve(&appearance)
+            .scaled(TerminalZoom::current(cx));
+        let background = self.emulator.sync_appearance(ui.colors, &appearance);
+        let palette = self.emulator.palette;
         self.observe_focus(window, cx);
         if self.hidden_pointer_at.is_some()
             && self.hidden_pointer_at != self.typing_pointer_position(window)
@@ -371,14 +351,9 @@ impl Render for Terminal {
             self.hidden_pointer_at = None;
         }
         let hide_pointer = self.hidden_pointer_at.is_some();
-        self.emulator
-            .set_default_cursor(cursor::default_style(&appearance));
-        let style = self.emulator.display_cursor_style();
-        let blink =
-            style.blinking && self.focused && self.marked.text.is_empty() && self.is_running();
-        let cursor_on = cursor::blink_visible(
-            blink,
-            cursor::CursorCell::visible(&self.emulator),
+        let cursor_shape = self.emulator.cursor_for_paint(
+            self.focused && self.is_running(),
+            !self.marked.text.is_empty(),
             window,
             cx,
         );
@@ -401,7 +376,7 @@ impl Render for Terminal {
                         &view.emulator,
                         bounds,
                         (!view.marked.text.is_empty()).then_some(&view.marked),
-                        cursor_on.then_some(style.shape),
+                        cursor_shape,
                         palette,
                         window,
                         cx,

@@ -52,6 +52,6 @@ impl Dashboard {
                 .on_click(cx.listener(|v, _, _, cx| v.manage(Action::Start, cx)))
                 .into_any_element()
         });
-        (state.render(*ui), start)
+        (state.render(ui), start)
     }
 }

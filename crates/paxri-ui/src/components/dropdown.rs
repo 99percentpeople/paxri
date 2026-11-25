@@ -9,9 +9,15 @@ use gpui::Anchor as Corner;
 
 type SelectAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// Tracks whichever dropdown popup is open so platform navigation and overlays stay in sync.
+#[derive(Default)]
+pub struct ActiveDropdown(Option<WeakEntity<DropdownState>>);
+impl Global for ActiveDropdown {}
+
 pub struct DropdownState {
     focus: FocusHandle,
     open: bool,
+    item_count: usize,
     highlighted: Option<usize>,
     parent_row: Option<usize>,
     scroll: ScrollHandle,
@@ -21,14 +27,34 @@ pub struct DropdownState {
 }
 
 impl DropdownState {
-    pub fn new<V: 'static>(window: &mut Window, cx: &mut Context<V>) -> Entity<Self> {
-        let state = cx.new(|cx| Self::init(window, cx));
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        state
-    }
-
     pub fn local(id: ElementId, window: &mut Window, cx: &mut App) -> Entity<Self> {
         window.use_keyed_state(id, cx, Self::init)
+    }
+
+    fn active(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<ActiveDropdown>()?
+            .0
+            .as_ref()?
+            .upgrade()
+            .filter(|menu| menu.read(cx).is_open())
+    }
+
+    pub fn has_open(cx: &App) -> bool {
+        Self::active(cx).is_some()
+    }
+
+    pub fn dismiss_active(cx: &mut App) {
+        if let Some(menu) = Self::active(cx) {
+            menu.update(cx, Self::dismiss);
+        }
+    }
+
+    pub fn back_active(cx: &mut App) -> bool {
+        let Some(menu) = Self::active(cx) else {
+            return false;
+        };
+        menu.update(cx, Self::back);
+        true
     }
 
     fn init(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -41,9 +67,21 @@ impl DropdownState {
             }
         })
         .detach();
+        let id = cx.entity_id();
+        cx.on_release(move |_, cx| {
+            if cx
+                .try_global::<ActiveDropdown>()
+                .and_then(|active| active.0.as_ref())
+                .is_some_and(|menu| menu.entity_id() == id)
+            {
+                cx.set_global(ActiveDropdown(None));
+            }
+        })
+        .detach();
         Self {
             focus,
             open: false,
+            item_count: 0,
             highlighted: None,
             parent_row: None,
             scroll: ScrollHandle::new(),
@@ -62,6 +100,14 @@ impl DropdownState {
             self.open = false;
             self.highlighted = None;
             self.parent_row = None;
+            let current = cx.entity_id();
+            if cx
+                .try_global::<ActiveDropdown>()
+                .and_then(|active| active.0.as_ref())
+                .is_some_and(|menu| menu.entity_id() == current)
+            {
+                cx.set_global(ActiveDropdown(None));
+            }
             cx.notify();
         }
     }
@@ -102,8 +148,18 @@ impl DropdownState {
     fn open(&mut self, selected: Option<usize>, count: usize, window: &Window, cx: &mut Context<Self>) {
         if self.open { return; }
         self.open = true;
+        self.item_count = count;
         self.opening_index = selected.unwrap_or(0);
         self.expansion = px(0.);
+        let current = cx.entity_id();
+        let previous = cx
+            .try_global::<ActiveDropdown>()
+            .and_then(|active| active.0.clone())
+            .filter(|menu| menu.entity_id() != current);
+        cx.set_global(ActiveDropdown(Some(cx.weak_entity())));
+        if let Some(previous) = previous {
+            let _ = previous.update(cx, Self::dismiss);
+        }
         if let Some(trigger) = self.trigger_bounds {
             let placement = self.field_placement(trigger, count, window);
             self.scroll.set_offset(point(px(0.), -placement.opening_scroll));
@@ -138,9 +194,11 @@ impl DropdownState {
 
     /// Native Android views above the GPUI surface must leave room for an open field menu.
     #[cfg(target_os = "android")]
-    pub fn field_popup_top(&self, count: usize, window: &Window) -> Option<Pixels> {
-        self.trigger_bounds.filter(|_| self.is_open())
-            .map(|trigger| self.field_placement(trigger, count, window).top)
+    pub fn active_field_popup_top(window: &Window, cx: &App) -> Option<Pixels> {
+        let menu = Self::active(cx)?;
+        let menu = menu.read(cx);
+        menu.trigger_bounds
+            .map(|trigger| menu.field_placement(trigger, menu.item_count, window).top)
     }
 
     fn field_placement(
@@ -598,30 +656,57 @@ pub struct Dropdown<T: InteractiveElement + IntoElement + 'static> {
     layout: DropdownLayout,
 }
 
+#[derive(IntoElement)]
+pub struct ActionsMenu {
+    id: ElementId,
+    label: SharedString,
+    content: DropdownContent,
+    circular: bool,
+}
+
+impl ActionsMenu {
+    pub fn circular_trigger(mut self) -> Self {
+        self.circular = true;
+        self
+    }
+}
+
+impl RenderOnce for ActionsMenu {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let ui = Ui::new(window, cx);
+        let state = DropdownState::local((self.id.clone(), "menu").into(), window, cx);
+        let open = state.read(cx).is_open();
+        let trigger = ui
+            .icon_button(ButtonVariant::Ghost, self.id, Icon::Ellipsis, self.label.clone())
+            .block_mouse_except_scroll()
+            .pressed(open);
+        let trigger = if self.circular {
+            trigger.circular()
+        } else {
+            trigger
+        };
+        #[cfg(target_os = "android")]
+        let trigger = trigger
+            .role(Role::Button)
+            .aria_label(self.label)
+            .aria_expanded(open);
+        Dropdown::new(&state, DropdownTrigger::new(trigger), self.content)
+    }
+}
+
 impl Ui {
     pub fn actions_menu(
         self,
         id: impl Into<ElementId>,
         label: SharedString,
-        state: &Entity<DropdownState>,
         content: DropdownContent,
-        cx: &App,
-    ) -> Dropdown<Button> {
-        let open = state.read(cx).is_open();
-        let trigger = self
-            .icon_button(ButtonVariant::Ghost, id, Icon::Ellipsis, label.clone())
-            .block_mouse_except_scroll()
-            .pressed(open);
-        #[cfg(target_os = "android")]
-        let trigger = trigger.role(Role::Button).aria_label(label).aria_expanded(open);
-        Dropdown::new(state, DropdownTrigger::new(trigger), content)
-    }
-}
-
-impl Dropdown<Button> {
-    pub fn circular_trigger(mut self) -> Self {
-        self.trigger.0 = self.trigger.0.circular();
-        self
+    ) -> ActionsMenu {
+        ActionsMenu {
+            id: id.into(),
+            label,
+            content,
+            circular: false,
+        }
     }
 }
 
@@ -674,6 +759,8 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
         let count = content.items.len();
         if count == 0 && state.read(cx).is_open() {
             state.update(cx, DropdownState::dismiss);
+        } else if state.read(cx).item_count != count {
+            state.update(cx, |menu, _| menu.item_count = count);
         }
         let selected = state
             .read(cx)

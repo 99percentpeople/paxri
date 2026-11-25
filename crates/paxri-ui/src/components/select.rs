@@ -15,7 +15,6 @@ pub struct Select<T: PartialEq + 'static> {
     value: Option<T>,
     options: Vec<OptionRow<T>>,
     placeholder: SharedString,
-    state: Option<Entity<DropdownState>>,
     change: Change<T>,
 }
 
@@ -29,15 +28,9 @@ impl<T: PartialEq + 'static> Select<T> {
             id: id.into(),
             value: value.into(),
             options: Vec::new(),
-            state: None,
             placeholder: "Select…".into(),
             change: Rc::new(change),
         }
-    }
-
-    pub fn with_optional_state(mut self, state: Option<&Entity<DropdownState>>) -> Self {
-        self.state = state.cloned();
-        self
     }
 
     pub fn option(self, value: T, label: impl Into<SharedString>) -> Self {
@@ -93,10 +86,7 @@ impl<T: PartialEq + 'static> Select<T> {
 
 impl<T: PartialEq + 'static> RenderOnce for Select<T> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = self
-            .state
-            .clone()
-            .unwrap_or_else(|| DropdownState::local(self.id.clone(), window, cx));
+        let state = DropdownState::local(self.id.clone(), window, cx);
         let ui = Ui::new(window, cx);
         let label = self.selected_label();
         let trigger = ui

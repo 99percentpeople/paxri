@@ -1,13 +1,16 @@
 use crate::{
     Dashboard, Input,
     components::{
-        ButtonVariant::Primary, Dialog, DialogContent, DialogMode, DialogSuccess, Select, Ui,
-        form_row, heading, row,
+        ButtonVariant::Primary, Dialog, DialogContent, DialogMode, DialogSuccess, Ui, form_row,
+        heading, row,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, Direction, Forward, PeerForward, Status};
-use paxri_ui::components::{Icon, ListState, ListView};
+use paxri_ui::components::{
+    Icon, ListState, ListView,
+    forwarding::{NARROW_WIDTH, device_select, direction_select, endpoint_labels, parse_endpoints},
+};
 
 struct RuleForm {
     dashboard: Entity<Dashboard>,
@@ -74,7 +77,7 @@ impl Dashboard {
         }
         let Some(peer) = rule
             .map(|r| &r.peer)
-            .or(self.forward_filters.device.as_ref())
+            .or(self.forward_filters.scope.device.as_ref())
             .or_else(|| status.peers.keys().next())
         else {
             return;
@@ -89,7 +92,7 @@ impl Dashboard {
             target: Input::new(rule.map_or("", |r| &r.target), "3000 or host:port", cx),
             direction: rule
                 .map(|r| r.direction)
-                .or(self.forward_filters.direction)
+                .or(self.forward_filters.scope.direction)
                 .unwrap_or_default(),
         };
         let focus = form.listen.read(cx).focus_handle(cx);
@@ -119,12 +122,11 @@ impl RuleForm {
         if self.dashboard.read(cx).saving {
             return;
         }
-        let listen = match paxri_control::listen_address(self.listen.read(cx).text().trim()) {
-            Ok(addr) => addr,
-            Err(error) => return Dialog::show_error(window, error, cx),
-        };
-        let target = match paxri_control::tcp_target(self.target.read(cx).text().trim()) {
-            Ok(addr) => addr,
+        let (listen, target) = match parse_endpoints(
+            self.listen.read(cx).text(),
+            self.target.read(cx).text(),
+        ) {
+            Ok(endpoints) => endpoints,
             Err(error) => return Dialog::show_error(window, error, cx),
         };
         let name = self.name.clone().unwrap_or_default();
@@ -164,33 +166,44 @@ impl RuleForm {
                 .map_or(owner.as_str(), |s| s.peer_display_name(owner));
             ui.labeled("Device", name.to_owned())
         } else {
-            let mut peers = Select::new(
+            let options: Vec<_> = dashboard
+                .status
+                .as_ref()
+                .map(|status| {
+                    status
+                        .peers
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                status.peer_display_name(name).to_owned(),
+                                status.peer_platform(name),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let peers = device_select(
                 "rule-device",
                 self.peer.clone(),
+                "Choose a paired device",
+                &options,
                 cx.listener(|v, peer: &String, _, cx| {
                     v.peer = peer.clone();
                     cx.notify();
                 }),
-            )
-            .placeholder("Choose a paired device");
-            if let Some(status) = &dashboard.status {
-                for name in status.peers.keys() {
-                    peers = peers.option(name.clone(), status.peer_display_name(name).to_owned());
-                }
-            }
+            );
             ui.labeled("Device", peers)
         };
-        let modes = Select::new(
+        let modes = direction_select(
             "forwarding-mode",
             self.direction,
             cx.listener(|v, mode: &Direction, _, cx| {
                 v.direction = *mode;
                 cx.notify();
             }),
-        )
-        .option(Direction::Local, "Forward")
-        .option(Direction::Remote, "Reverse");
-        let local = self.direction == Direction::Local;
+        );
+        let (listen_label, target_label) = endpoint_labels(self.direction);
         let body = div()
             .flex()
             .flex_col()
@@ -202,22 +215,8 @@ impl RuleForm {
             )
             .child(
                 form_row()
-                    .child(ui.labeled(
-                        if local {
-                            "Listen on this device"
-                        } else {
-                            "Listen on peer"
-                        },
-                        self.listen.clone(),
-                    ))
-                    .child(ui.labeled(
-                        if local {
-                            "Target on peer"
-                        } else {
-                            "Target on this device"
-                        },
-                        self.target.clone(),
-                    )),
+                    .child(ui.labeled(listen_label, self.listen.clone()))
+                    .child(ui.labeled(target_label, self.target.clone())),
             );
         DialogContent::new(body, "Cancel").action(
             ui.button(
@@ -239,8 +238,7 @@ impl Dashboard {
         let page = super::overview();
         let filters = &self.forward_filters;
         let query = filters.query(cx);
-        let terms: Vec<_> = query.split_whitespace().collect();
-        let active = filters.has_selections() || !terms.is_empty();
+        let active = filters.has_selections() || !query.is_empty();
         let own = s.forwards.iter().map(|(name, f)| (None, name, f));
         let shared = s
             .peer_forwards
@@ -256,10 +254,10 @@ impl Dashboard {
         let rows: Vec<_> = own
             .chain(shared)
             .filter(|(_, name, f)| {
-                filters.matches(&f.peer, name, f, s.peer_display_name(&f.peer), &terms)
+                filters.matches(&f.peer, name, f, s.peer_display_name(&f.peer), &query)
             })
             .collect();
-        let narrow = width < px(650.);
+        let narrow = width < NARROW_WIDTH;
         let devices: Vec<_> = s
             .peers
             .keys()
@@ -294,7 +292,7 @@ impl Dashboard {
                 if s.peers.contains_key(peer) && !s.peer_supports_forward_rules(peer) {
                     continue;
                 }
-                if filters.device.as_ref().is_none_or(|p| p == peer) || peer == "Gateway" {
+                if filters.scope.device.as_ref().is_none_or(|p| p == peer) || peer == "Gateway" {
                     failures.push(s.peer_display_name(peer));
                     if !rows.is_empty() {
                         table = table.child(
@@ -323,22 +321,24 @@ impl Dashboard {
             } else {
                 ListState::empty(Icon::Forward, "No forwarding rules")
             };
-            return page.child(table.child(state.render(*ui)));
+            return page.child(table.child(state.render(ui)));
         }
-        let mut list = ListView::new().divided().when(!narrow, |list| list.child(ui.forwarding_header()));
-        for (owner, name, rule) in rows {
-            let owner = owner.map(String::as_str);
-            let display_name = s.peer_display_name(&rule.peer);
-            let actions = self.port_actions(name, owner, rule, display_name, cx);
-            list = list.child(ui.forwarding_row(
-                format!("{owner:?}/{name}"),
-                name,
-                rule,
-                display_name,
-                narrow,
-                actions,
-            ));
-        }
-        page.child(table.child(list))
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|(owner, name, rule)| {
+                let owner = owner.map(String::as_str);
+                let display_name = s.peer_display_name(&rule.peer);
+                let actions = self.port_actions(name, owner, rule, display_name, cx);
+                ui.forwarding_row(
+                    format!("{owner:?}/{name}"),
+                    name,
+                    rule,
+                    display_name,
+                    narrow,
+                    actions,
+                )
+            })
+            .collect();
+        page.child(table.child(ui.forwarding_table(ListView::new(), narrow, rows)))
     }
 }

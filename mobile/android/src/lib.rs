@@ -1,36 +1,33 @@
+mod bridge;
 mod client;
 mod fonts;
 mod forwards;
 mod keybar;
 mod navigation;
-mod settings;
 mod sessions;
+mod settings;
 mod touch;
 mod views;
 
+use alacritty_terminal::term::TermMode;
 use android_activity::AndroidApp;
 use anyhow::Result;
 use async_channel::Sender;
-use gpui::{prelude::*, *};
-use jni::{
-    EnvUnowned, jni_sig, jni_str,
-    objects::{Global, JClass, JObject, JString},
-};
-use paxri_config::keybar::KeybarSettings;
-use paxri_config::shortcuts::{ALT, CTRL, META, SHIFT, TerminalAction, TerminalControls};
-use paxri_terminal::{Frame, Size as PtySize};
-use std::sync::{
-    Arc, LazyLock, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use tokio::{runtime::Handle, sync::{mpsc, oneshot}, task::JoinHandle};
-
-use alacritty_terminal::{grid::{Dimensions, Scroll}, term::TermMode};
+use bridge::*;
 use client::{Client, Peers, Presence};
+use gpui::{prelude::*, *};
 use navigation::Drawer;
-use paxri_ui::connections::ConnectionHistory;
+use paxri_config::keybar::KeybarSettings;
+use paxri_config::shortcuts::{TerminalAction, TerminalControls};
+use paxri_terminal::managed::{Key as SessionKey, Request as TerminalRequest};
+use paxri_terminal::{Frame, Size as PtySize};
 use paxri_ui::{
-    components::{Toast, Ui},
+    components::{
+        ActiveDropdown, DropdownState, Toast, Ui,
+        directory::{DeviceFilters, SessionFilters},
+        forwarding::ForwardFilters,
+    },
+    connections::ConnectionHistory,
     terminal::{
         cursor::Preedit,
         emulator::{Emulator, GridSize},
@@ -42,10 +39,15 @@ use paxri_ui::{
         fonts::{CellSize, TerminalFont},
     },
 };
+use sessions::{AttachmentId, Session, SessionState};
 use std::collections::{BTreeMap, BTreeSet};
-use paxri_ui::components::directory::{DeviceFilters, SessionFilters};
+use std::sync::{Arc, atomic::Ordering};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use views::initial_size;
-use paxri_terminal::managed::{Key as SessionKey, Request as TerminalRequest};
 
 struct PendingPairing {
     peer_id: String,
@@ -96,529 +98,6 @@ enum Update {
     SessionGone(AttachmentId),
 }
 
-static ACTIVITY_VISIBLE: LazyLock<tokio::sync::watch::Sender<bool>> =
-    LazyLock::new(|| tokio::sync::watch::channel(false).0);
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_activityVisibilityChanged(
-    _env: EnvUnowned,
-    _class: JClass,
-    visible: bool,
-) {
-    let changed = ACTIVITY_VISIBLE.send_if_modified(|old| {
-        let changed = *old != visible;
-        *old = visible;
-        changed
-    });
-    if changed && visible {
-        post(Update::Resumed);
-    }
-}
-
-#[derive(Clone, PartialEq)]
-struct DeviceName {
-    custom: String,
-    system: String,
-}
-
-impl DeviceName {
-    fn effective(&self) -> String {
-        if self.custom.is_empty() {
-            &self.system
-        } else {
-            &self.custom
-        }
-        .to_owned()
-    }
-}
-
-static DEVICE_NAME: LazyLock<tokio::sync::watch::Sender<DeviceName>> = LazyLock::new(|| {
-    tokio::sync::watch::channel(DeviceName {
-        custom: String::new(),
-        system: "Android".into(),
-    })
-    .0
-});
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_deviceNameChanged(
-    mut env: EnvUnowned,
-    _class: JClass,
-    name: JString,
-    model: JString,
-) {
-    env.with_env(|_| {
-        let clean = |value: String| {
-            let mut text: String = value.chars().filter(|c| !c.is_control()).collect();
-            text.truncate(text.floor_char_boundary(256));
-            text.trim().to_owned()
-        };
-        let system = clean(model.to_string());
-        let name = DeviceName {
-            custom: clean(name.to_string()),
-            system: if system.is_empty() {
-                "Android".into()
-            } else {
-                system
-            },
-        };
-        if DEVICE_NAME.send_if_modified(|current| {
-            if *current == name {
-                return false;
-            }
-            *current = name;
-            true
-        }) {
-            post(Update::DeviceNameChanged);
-        }
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-
-// Android dispatches hardware keys on the Activity thread, before GPUI or the IME.
-static HARDWARE_CONTROLS: LazyLock<Mutex<TerminalControls>> = LazyLock::new(Mutex::default);
-static BRIDGE: Mutex<Option<Sender<Update>>> = Mutex::new(None);
-static SYSTEM_UI_REM: Mutex<f32> = Mutex::new(16.);
-static EDGES: Mutex<[f32; 4]> = Mutex::new([0.; 4]);
-static CAN_GO_BACK: AtomicBool = AtomicBool::new(false);
-
-fn post(event: Update) {
-    if let Some(tx) = BRIDGE.lock().unwrap().as_ref() {
-        let _ = tx.try_send(event);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_initVerifier(
-    mut env: EnvUnowned,
-    _class: JClass,
-    app: JObject,
-) {
-    env.with_env(|env| rustls_platform_verifier::android::init_with_env(env, app))
-        .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PairingScannerActivity_isInvitation(
-    mut env: EnvUnowned,
-    _class: JClass,
-    code: JString,
-) -> bool {
-    env.with_env(|_| {
-        let valid =
-            paxri_native::gateway::pairing::Invitation::parse(&code.to_string()).is_ok();
-        Ok::<_, jni::errors::Error>(valid)
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_renameSession(
-    mut env: EnvUnowned,
-    _class: JClass,
-    peer: JString,
-    number: i64,
-    nonce: i64,
-    name: JString,
-) {
-    env.with_env(|_| {
-        post(Update::RenameSession(
-            peer.to_string(),
-            SessionKey {
-                number: number as usize,
-                nonce: nonce as u64,
-            },
-            name.to_string(),
-        ));
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_unpairDevice(
-    mut env: EnvUnowned,
-    _class: JClass,
-    id: JString,
-    generation: JString,
-) {
-    env.with_env(|_| {
-        let generation = generation.to_string();
-        post(Update::Unpair { id: id.to_string(), generation: (!generation.is_empty()).then_some(generation) });
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_removeForward(
-    mut env: EnvUnowned,
-    _class: JClass,
-    owner: JString,
-    name: JString,
-) {
-    env.with_env(|_| {
-        post(Update::RemoveForward { owner: owner.to_string(), name: name.to_string() });
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_submitCode(
-    mut env: EnvUnowned,
-    _class: JClass,
-    code: JString,
-) {
-    env.with_env(|_| {
-        post(Update::PairCode(code.to_string()));
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_composingTextChanged(
-    mut env: EnvUnowned,
-    _class: JClass,
-    id: i64,
-    text: JString,
-    start: i32,
-    end: i32,
-) {
-    env.with_env(|_| {
-        post(Update::Composing {
-            id: id as u64,
-            text: text.to_string(),
-            selection: start.max(0) as usize..end.max(0) as usize,
-        });
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_systemTextSizeChanged(
-    _env: EnvUnowned, _class: JClass, size: f32,
-) {
-    if size.is_finite() && size > 0. {
-        *SYSTEM_UI_REM.lock().unwrap() = size;
-        post(Update::DisplayChanged);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_insetsChanged(
-    _env: EnvUnowned,
-    _class: JClass,
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-) {
-    *EDGES.lock().unwrap() = [left, top, right, bottom];
-    post(Update::DisplayChanged);
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalShortcut(
-    mut env: EnvUnowned, activity: JObject, session: i64, modifiers: i32, key: JString, has_selection: bool,
-) -> bool {
-    env.with_env(|env| {
-        let name = key.to_string();
-        let bits = modifiers as u8;
-        let key = Keystroke {
-            modifiers: Modifiers {
-                control: bits & CTRL != 0, alt: bits & ALT != 0,
-                shift: bits & SHIFT != 0, platform: bits & META != 0, ..Default::default()
-            },
-            key: name.to_ascii_lowercase(),
-            key_char: (name.len() == 1).then_some(name),
-        };
-        let action = keys::local_action(&key, &HARDWARE_CONTROLS.lock().unwrap());
-        let local = match action {
-            Some(TerminalAction::Copy) => has_selection,
-            Some(_) => true,
-            None => false,
-        };
-        // Route PTY control bytes before the focused Android editor can consume them.
-        if !local && ((action.is_none() && !key.modifiers.control) || keys::sequence(&key, false).is_none()) {
-            return Ok(false);
-        }
-        if action == Some(TerminalAction::Paste) {
-            env.call_method(&activity, jni_str!("finishTerminalComposition"), jni_sig!("()V"), &[])?;
-        }
-        post(Update::Shortcut(session as u64, key, action));
-        Ok::<_, jni::errors::Error>(true)
-    }).resolve::<jni::errors::ThrowRuntimeExAndDefault>()
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_goBack(
-    _env: EnvUnowned,
-    _class: JClass,
-) -> bool {
-    let open = CAN_GO_BACK.load(Ordering::Acquire);
-    if open {
-        post(Update::Close);
-    }
-    open
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_org_paxri_android_PaxriActivity_terminalKey(
-    mut env: EnvUnowned,
-    _class: JClass,
-    session: i64,
-    text: JString,
-    named: bool,
-    first: i32,
-    held: i32,
-) {
-    let modifiers = |bits: i32| Modifiers {
-        control: bits & 1 != 0,
-        alt: bits & 2 != 0,
-        shift: bits & 4 != 0,
-        ..Default::default()
-    };
-    env.with_env(|_| {
-        post(Update::Key {
-            id: session as u64,
-            value: text.to_string(),
-            named,
-            first: modifiers(first),
-            held: modifiers(held),
-        });
-        Ok::<_, jni::errors::Error>(())
-    })
-    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
-}
-
-#[derive(Clone, Copy)]
-enum ActivityAction<'a> {
-    Toast(&'a str),
-    RenameSession(&'a str, SessionKey, &'a str),
-    ConfirmRemoveForward { owner: &'a str, name: &'a str, route: &'a str },
-    ConfirmUnpair { id: &'a str, generation: &'a str, name: &'a str },
-    SaveDeviceName(&'a str),
-    SaveZoom(f32),
-    Pair,
-    Scan,
-    PairingReady,
-    DeviceConnections { paired: bool, connected: bool },
-    HardwareText(u64, &'a str),
-    BackEnabled(bool),
-    Appearance(bool, &'a theme::Palette),
-    TouchArea(u64, [i32; 5], &'a KeybarSettings, bool),
-    SelectionHandles(u64, [i32; 5], bool),
-    StopFling(u64),
-    ShowTerminalKeyboard(u64),
-}
-
-fn load_terminal_zoom(app: &AndroidApp) -> f32 {
-    gpui_mobile::android::jni::with_env(|env| {
-        let raw = app.activity_as_ptr().cast();
-        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
-        env.call_method(activity, jni_str!("terminalZoom"), jni_sig!("()F"), &[])
-            .and_then(|value| value.f()).map_err(|e| e.to_string())
-    }).unwrap_or(1.)
-}
-
-fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), String> {
-    gpui_mobile::android::jni::with_env(|env| {
-        let raw = app.activity_as_ptr().cast();
-        // NativeActivity owns this global reference for the lifetime of AndroidApp.
-        let activity =
-            unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
-        match action {
-            ActivityAction::DeviceConnections { paired, connected } => env.call_method(
-                activity, jni_str!("setDeviceConnections"), jni_sig!("(ZZ)V"),
-                &[paired.into(), connected.into()],
-            ),
-            ActivityAction::Toast(message) => {
-                let text = JString::from_str(env, message).map_err(|e| e.to_string())?;
-                env.call_method(activity, jni_str!("showToast"), jni_sig!("(Ljava/lang/String;)V"), &[(&text).into()])
-            }
-            ActivityAction::RenameSession(peer, key, title) => {
-                let peer = JString::from_str(env, peer).map_err(|e| e.to_string())?;
-                let title = JString::from_str(env, title).map_err(|e| e.to_string())?;
-                env.call_method(activity, jni_str!("requestSessionName"), jni_sig!("(Ljava/lang/String;JJLjava/lang/String;)V"),
-                    &[(&peer).into(), (key.number as i64).into(), (key.nonce as i64).into(), (&title).into()])
-            }
-            ActivityAction::ConfirmRemoveForward { owner, name, route } => {
-                let owner = JString::from_str(env, owner).map_err(|e| e.to_string())?;
-                let name = JString::from_str(env, name).map_err(|e| e.to_string())?;
-                let route = JString::from_str(env, route).map_err(|e| e.to_string())?;
-                env.call_method(activity, jni_str!("confirmRemoveForward"),
-                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
-                    &[(&owner).into(), (&name).into(), (&route).into()])
-            }
-            ActivityAction::ConfirmUnpair { id, generation, name } => {
-                let id = JString::from_str(env, id).map_err(|e| e.to_string())?;
-                let generation = JString::from_str(env, generation).map_err(|e| e.to_string())?;
-                let name = JString::from_str(env, name).map_err(|e| e.to_string())?;
-                env.call_method(activity, jni_str!("confirmUnpair"),
-                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
-                    &[(&id).into(), (&generation).into(), (&name).into()])
-            }
-            ActivityAction::SaveZoom(scale) => env.call_method(
-                activity, jni_str!("saveTerminalZoom"), jni_sig!("(F)V"), &[scale.into()],
-            ),
-            ActivityAction::SaveDeviceName(name) => {
-                let value = JString::from_str(env, name).map_err(|e| e.to_string())?;
-                env.call_method(
-                    activity,
-                    jni_str!("saveDeviceName"),
-                    jni_sig!("(Ljava/lang/String;)V"),
-                    &[(&value).into()],
-                )
-            }
-            ActivityAction::HardwareText(id, key) => {
-                let text = JString::from_str(env, key).map_err(|e| e.to_string())?;
-                env.call_method(
-                    activity,
-                    jni_str!("terminalHardwareText"),
-                    jni_sig!("(JLjava/lang/String;)V"),
-                    &[(id as i64).into(), (&text).into()],
-                )
-            }
-            ActivityAction::BackEnabled(enabled) => env.call_method(
-                activity,
-                jni_str!("setBackEnabled"),
-                jni_sig!("(Z)V"),
-                &[enabled.into()],
-            ),
-            ActivityAction::Appearance(dark_icons, colors) => {
-                let argb = |rgb: u32| ((0xff000000 | rgb) as i32).into();
-                env.call_method(activity, jni_str!("setChromeAppearance"), jni_sig!("(ZIIIII)V"),
-                    &[dark_icons.into(), argb(colors.border), argb(colors.secondary.background),
-                      argb(colors.input_border), argb(colors.secondary.foreground), argb(colors.terminal.ansi[4])])
-            }
-            ActivityAction::SelectionHandles(id, [x1,y1,x2,y2,h], connected) => env.call_method(
-                activity, jni_str!("setSelectionHandles"), jni_sig!("(JIIIIIZ)V"),
-                &[(id as i64).into(), x1.into(), y1.into(), x2.into(), y2.into(), h.into(), connected.into()]),
-            ActivityAction::StopFling(id) => env.call_method(
-                activity,
-                jni_str!("stopTerminalFling"),
-                jni_sig!("(J)V"),
-                &[(id as i64).into()],
-            ),
-            ActivityAction::ShowTerminalKeyboard(id) => env.call_method(
-                activity,
-                jni_str!("showTerminalKeyboard"),
-                jni_sig!("(J)V"),
-                &[(id as i64).into()],
-            ),
-            ActivityAction::TouchArea(id, [x, y, width, height, toolbar], keys, touchable) => {
-                let rows: Vec<Vec<_>> = keys.rows.iter().map(|row| row.iter().map(|key|
-                    (key.as_str(), paxri_config::keybar::label(key))).collect()).collect();
-                let layout = serde_json::json!({
-                    "rows": rows, "row_height": keys.row_height, "haptics": keys.haptics,
-                }).to_string();
-                let layout = JString::from_str(env, layout).map_err(|e| e.to_string())?;
-                env.call_method(activity, jni_str!("setTerminalTouchArea"),
-                    jni_sig!("(JIIIIILjava/lang/String;Z)V"),
-                    &[(id as i64).into(), x.into(), y.into(), width.into(), height.into(),
-                      toolbar.into(), (&layout).into(), touchable.into()])
-            }
-            ActivityAction::Pair => env.call_method(
-                activity,
-                jni_str!("requestPairingCode"),
-                jni_sig!("()V"),
-                &[],
-            ),
-            ActivityAction::Scan => {
-                env.call_method(activity, jni_str!("scanPairingCode"), jni_sig!("()V"), &[])
-            }
-            ActivityAction::PairingReady => env.call_method(
-                activity,
-                jni_str!("pairingClientReady"),
-                jni_sig!("()V"),
-                &[],
-            ),
-        }
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-    })
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct AttachmentId {
-    session: u64,
-    generation: u64,
-}
-
-struct Session {
-    attachment: AttachmentId,
-    key: SessionKey,
-    peer: String,
-    name: SharedString,
-    state: SessionState,
-    screen: Emulator,
-    wheel: paxri_ui::terminal::mouse::Wheel,
-    touch_mouse: paxri_ui::terminal::mouse::TouchMouseDrag,
-    composing: Preedit,
-    title: Entity<TabTitle>,
-    input: mpsc::UnboundedSender<Frame>,
-    job: Option<JoinHandle<()>>,
-    retry_at: std::time::Instant,
-}
-
-enum SessionState {
-    Connecting,
-    Connected,
-    Reconnecting,
-    Stopping,
-    Ended(String),
-}
-
-impl Session {
-    fn write_input(&mut self, bytes: Vec<u8>) {
-        self.screen.input_started();
-        self.screen.scroll(Scroll::Bottom);
-        let _ = self.input.send(Frame::Data(bytes));
-    }
-
-    fn grid_size(&self) -> GridSize {
-        GridSize {
-            rows: self.screen.term.screen_lines() as u16,
-            cols: self.screen.term.columns() as u16,
-        }
-    }
-
-    fn connected(&self) -> bool {
-        matches!(self.state, SessionState::Connected)
-    }
-
-    fn detach(&mut self) {
-        if let Some(job) = self.job.take() {
-            job.abort();
-        }
-        // A result or replay from the old stream may already be in the UI queue.
-        self.attachment.generation += 1;
-        self.composing.clear();
-        self.retry_at = std::time::Instant::now();
-        if !matches!(self.state, SessionState::Stopping) {
-            self.state = SessionState::Reconnecting;
-        }
-    }
-
-    fn labels(&self, online: bool, cx: &App) -> (SharedString, String) {
-        let number = self.key.number;
-        let subtitle = match &self.state {
-            SessionState::Connected => format!("Session {number}"),
-            SessionState::Connecting => format!("Session {number} · Connecting…"),
-            SessionState::Reconnecting if !online => format!("Session {number} · Device offline"),
-            SessionState::Reconnecting => format!("Session {number} · Reconnecting…"),
-            SessionState::Stopping if !online => format!("Session {number} · Device offline · Stop pending"),
-            SessionState::Stopping => format!("Session {number} · Stopping…"),
-            SessionState::Ended(reason) => format!("Session {number} · {reason}"),
-        };
-        (self.title.read(cx).label(&self.name), subtitle)
-    }
-}
-impl Drop for Session {
-    fn drop(&mut self) {
-        if let Some(job) = self.job.take() {
-            job.abort();
-        }
-    }
-}
-
 #[derive(Clone, PartialEq)]
 enum Page {
     Devices,
@@ -654,15 +133,13 @@ struct Mobile {
     rule_form: forwards::RuleForm,
     sessions: BTreeMap<u64, Session>,
     session_names: paxri_ui::terminal::title::SessionTitles,
-    session_menus: Vec<Entity<paxri_ui::components::DropdownState>>,
     ending_hosted: BTreeSet<(String, SessionKey)>,
     last_session_number: BTreeMap<String, usize>,
     hosted: BTreeMap<String, Vec<SessionKey>>,
     // Each in-flight list tracks sessions that ended after the request started.
     listing_peers: BTreeMap<String, Vec<SessionKey>>,
     session_list_errors: BTreeSet<String>,
-    page_menu: Entity<paxri_ui::components::DropdownState>,
-    forward_filters: paxri_ui::components::forwarding::ForwardFilters,
+    forward_filters: ForwardFilters,
     device_filters: DeviceFilters,
     session_filters: SessionFilters,
     terminal_return: Page,
@@ -671,9 +148,7 @@ struct Mobile {
     name_input: Entity<paxri_ui::components::input::Input>,
     keybar: Arc<KeybarSettings>,
     key_editor: Option<keybar::Editor>,
-    keybar_menu: Entity<paxri_ui::components::DropdownState>,
     terminal_settings: paxri_ui::settings::terminal::TerminalSettings,
-    terminal_menus: [Entity<paxri_ui::components::DropdownState>; 3],
     settings_scroll: ScrollHandle,
     bottom_inset: f32,
     dark_system_bar_icons: Option<bool>,
@@ -691,7 +166,8 @@ impl Mobile {
             self.update_session_fonts();
             cx.notify();
         }
-        if save && let Err(error) = activity_action(&self.android, ActivityAction::SaveZoom(scale)) {
+        if save && let Err(error) = activity_action(&self.android, ActivityAction::SaveZoom(scale))
+        {
             log::warn!("Saving terminal zoom: {error}");
         }
     }
@@ -709,7 +185,9 @@ impl Mobile {
             let action = keys::local_action(&event.keystroke, theme::terminal_controls(cx));
             if action.is_some() || event.keystroke.modifiers.control {
                 let _ = mobile.update(cx, |view, cx| {
-                    if let Page::Terminal(id) = view.page && !view.drawer.open && !view.page_menu.read(cx).is_open()
+                    if let Page::Terminal(id) = view.page
+                        && !view.drawer.open
+                        && !DropdownState::has_open(cx)
                         && view.terminal_shortcut(id, &event.keystroke, action, cx)
                     {
                         window.prevent_default();
@@ -721,8 +199,16 @@ impl Mobile {
         cx.on_release(move |_, _| drop(subscription)).detach();
     }
 
-    fn terminal_shortcut(&mut self, id: u64, key: &Keystroke, action: Option<TerminalAction>, cx: &mut Context<Self>) -> bool {
-        let Some(s) = self.sessions.get_mut(&id) else { return false };
+    fn terminal_shortcut(
+        &mut self,
+        id: u64,
+        key: &Keystroke,
+        action: Option<TerminalAction>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(s) = self.sessions.get_mut(&id) else {
+            return false;
+        };
         match keys::terminal_input(key, action, &s.screen) {
             Some(keys::TerminalInput::Copy(text)) => {
                 if let Err(error) = gpui_mobile::packages::clipboard::set_text(&text) {
@@ -789,7 +275,7 @@ impl Mobile {
         if let Page::Forwards(scope) = &page
             && !matches!(self.page, Page::ForwardEdit { .. })
         {
-            self.forward_filters.reset(scope.clone(), cx);
+            self.forward_filters.for_device(scope.clone(), cx);
         }
         if self.page != page
             && let Some(input) = self.editing_input.take()
@@ -818,7 +304,9 @@ impl Mobile {
             gpui_mobile::hide_keyboard();
             if let Some(session) = self.sessions.get_mut(&id) {
                 let release = session.touch_mouse.end(*session.screen.term.mode());
-                if !release.is_empty() { let _ = session.input.send(Frame::Data(release)); }
+                if !release.is_empty() {
+                    let _ = session.input.send(Frame::Data(release));
+                }
                 session.composing.clear();
                 session.screen.term.selection = None;
             }
@@ -837,12 +325,11 @@ impl Mobile {
             self.terminal_return = self.page.clone();
         }
         if self.page != page {
-            self.session_menus.clear();
             self.keyboard_on_entry = match page {
                 Page::Terminal(id) => Some(id),
                 _ => None,
             };
-            self.page_menu.update(cx, |menu, cx| menu.dismiss(cx));
+            DropdownState::dismiss_active(cx);
             self.settings_scroll.set_offset(Point::default());
         }
         self.page = page;
@@ -872,7 +359,7 @@ impl Mobile {
     }
 
     fn sync_back(&self, cx: &App) {
-        let enabled = self.drawer.open || self.page != Page::Devices || self.page_menu.read(cx).is_open();
+        let enabled = self.drawer.open || self.page != Page::Devices || DropdownState::has_open(cx);
         if CAN_GO_BACK.swap(enabled, Ordering::AcqRel) != enabled
             && let Err(error) = activity_action(&self.android, ActivityAction::BackEnabled(enabled))
         {
@@ -887,7 +374,9 @@ impl Mobile {
             return;
         }
         let page = match self.page {
-            Page::SettingsCategory(keybar::SECTION) => Page::SettingsCategory(paxri_ui::settings::catalog::TERMINAL_CONTROLS),
+            Page::SettingsCategory(keybar::SECTION) => {
+                Page::SettingsCategory(paxri_ui::settings::catalog::TERMINAL_CONTROLS)
+            }
             Page::SettingsCategory(_) => Page::Settings,
             Page::ForwardEdit { ref scope, .. } => Page::Forwards(scope.clone()),
             Page::Forwards(Some(ref id)) => Page::Peer(id.clone()),
@@ -898,192 +387,15 @@ impl Mobile {
         self.navigate(page, cx);
     }
 
-    fn assign_terminal_defaults(&mut self, cx: &mut App) {
-        let titles = self
-            .sessions
-            .values()
-            .map(|s| (s.name.clone(), s.title.clone()))
-            .collect::<Vec<_>>();
-        let open: BTreeSet<_> = self.sessions.values().map(|s| (s.peer.as_str(), s.key)).collect();
-        let titles_open = &open;
-        let reserved = self.hosted.iter().flat_map(|(peer, keys)| {
-            self.session_names.entries(peer).iter().filter_map(move |(key, title)| {
-                (keys.contains(key) && !titles_open.contains(&(peer.as_str(), *key)))
-                    .then(|| title.label(&SharedString::from(peer.clone())))
-            })
-        }).collect();
-        TabTitle::assign_with_reserved(&titles, reserved, cx);
-        for s in self.sessions.values() {
-            if !matches!(s.state, SessionState::Ended(_))
-                && let Err(e) = self.session_names.set(&s.peer, s.key, s.title.read(cx))
-            {
-                log::warn!("Saving session title: {e}");
-            }
-        }
-    }
-
-    fn refresh_sessions(&mut self) {
-        let Some(client) = &self.client else { return };
-        for (peer, saved) in &self.peers {
-            match &self.page {
-                Page::Devices | Page::Sessions(_) => {}
-                Page::Peer(selected) if selected == peer => {}
-                _ => continue,
-            }
-            if !self.presence.online(peer) || !saved.capabilities.is_some_and(|c| c.managed_terminals)
-                || self.listing_peers.contains_key(peer) { continue; }
-            self.listing_peers.insert(peer.clone(), Vec::new());
-            let peer = peer.clone();
-            let client = client.clone();
-            let updates = self.updates.clone();
-            self.rt.spawn(async move {
-                let keys = tokio::time::timeout(std::time::Duration::from_secs(2), client.manage_terminal(&peer, TerminalRequest::List))
-                    .await.ok().and_then(Result::ok);
-                let _ = updates.send(Update::Hosted(peer, keys)).await;
-            });
-        }
-    }
-
-    fn end_session(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.get_mut(&id) else { return; };
-        match session.state {
-            SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => {
-                session.state = SessionState::Stopping;
-                let _ = session.input.send(Frame::Exit(0));
-                self.retry_sessions();
-            }
-            SessionState::Stopping => return,
-            SessionState::Ended(_) => self.dismiss_session(id, cx),
-        }
-        cx.notify();
-    }
-
-    fn remove_hosted(&mut self, peer: &str, key: SessionKey) {
-        if let Err(e) = self.session_names.retain(peer, |k| k != key) {
-            log::warn!("Removing session title: {e}");
-        }
-        if let Some(keys) = self.hosted.get_mut(peer) {
-            keys.retain(|k| *k != key);
-        }
-        if let Some(ended) = self.listing_peers.get_mut(peer) {
-            ended.push(key);
-        }
-    }
-
-    fn retry_sessions(&mut self) {
-        let Some(client) = &self.client else { return };
-        if !*ACTIVITY_VISIBLE.borrow() { return; }
-        let now = std::time::Instant::now();
-        for session in self.sessions.values_mut() {
-            if session.job.is_some() || session.retry_at > now || !self.presence.online(&session.peer) {
-                continue;
-            }
-            let action = match session.state {
-                SessionState::Reconnecting => {
-                    let grid = session.grid_size();
-                    TerminalRequest::Attach(session.key, PtySize { rows: grid.rows, cols: grid.cols })
-                }
-                SessionState::Stopping => TerminalRequest::End(session.key),
-                _ => continue,
-            };
-            let (input, job) = client.clone().spawn_terminal(
-                &self.rt, session.peer.clone(), action, self.updates.clone(), session.attachment,
-            );
-            session.input = input;
-            session.job = Some(job);
-        }
-    }
-
-    fn dismiss_session(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.sessions.remove(&id).is_some() && self.page == Page::Terminal(id)
-        {
-            self.navigate(self.terminal_return.clone(), cx);
-        }
-    }
-
-    fn open(&mut self, peer: String, saved_key: Option<SessionKey>, window: &Window, cx: &mut Context<Self>) {
-        if let Some(key) = saved_key
-            && let Some(existing) = self.sessions.values().find(|s| {
-                s.peer == peer && s.key == key && !matches!(s.state, SessionState::Ended(_))
-            })
-        {
-            self.navigate(Page::Terminal(existing.attachment.session), cx);
-            cx.notify();
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let Some(saved) = self.peers.get(&peer) else {
-            return;
-        };
-        if !saved.supports_shell() || !self.presence.online(&peer) {
-            return;
-        }
-        let name = saved.name.clone().into();
-        let number = self.last_session_number.entry(peer.clone()).or_default();
-        let key = match saved_key {
-            Some(key) => key,
-            None => {
-                let highest = self.hosted.get(&peer).into_iter().flatten().map(|k| k.number).max().unwrap_or(0);
-                *number = (*number).max(highest).saturating_add(1);
-                match SessionKey::new(*number) {
-                    Ok(key) => key,
-                    Err(e) => { Toast::show(e.to_string(), self.window, cx); return; }
-                }
-            }
-        };
-        self.sessions.retain(|_, s| s.peer != peer || s.key != key || !matches!(s.state, SessionState::Ended(_)));
-        self.generation += 1;
-        let id = self.generation;
-        let font = self.font.clone().scaled(self.terminal_zoom);
-        let grid = initial_size(window, font.cell, &self.keybar);
-        let size = PtySize {
-            cols: grid.cols,
-            rows: grid.rows,
-        };
-        let action = if saved_key.is_some() { TerminalRequest::Attach(key, size) } else { TerminalRequest::Create(key, size) };
-        let attachment = AttachmentId { session: id, generation: 0 };
-        let (input, job) = client.spawn_terminal(&self.rt, peer.clone(), action, self.updates.clone(), attachment);
-        let title = self.session_names.get(&peer, key).cloned().unwrap_or_default();
-        self.sessions.insert(
-            id,
-            Session {
-                attachment,
-                key,
-                peer,
-                name,
-                state: SessionState::Connecting,
-                screen: Emulator::with_palette(
-                    grid,
-                    &Ui::new(window, cx).colors.terminal,
-                    font,
-                ),
-                wheel: Default::default(),
-                touch_mouse: Default::default(),
-                composing: Preedit::default(),
-                title: cx.new(|_| title),
-                input,
-                job: Some(job),
-                retry_at: std::time::Instant::now(),
-            },
-        );
-        self.assign_terminal_defaults(cx);
-        self.navigate(Page::Terminal(id), cx);
-        cx.notify();
-    }
-    fn start_input(s: &Session) {
-        let id = s.attachment.session;
-        gpui_mobile::set_text_input_callback(Some(Box::new(move |text| {
-            if text.is_empty() {
-                return;
-            }
-            post(Update::HardwareText(id, text.to_owned()));
-        })));
-    }
     fn update(&mut self, event: Update, cx: &mut Context<Self>) {
-        if let Update::Connected(id) | Update::Output(id, ..) | Update::End(id, _) | Update::SessionGone(id) = &event
-            && !self.sessions.get(&id.session).is_some_and(|s| s.attachment == *id)
+        if let Update::Connected(id)
+        | Update::Output(id, ..)
+        | Update::End(id, _)
+        | Update::SessionGone(id) = &event
+            && !self
+                .sessions
+                .get(&id.session)
+                .is_some_and(|s| s.attachment == *id)
         {
             return;
         }
@@ -1107,7 +419,9 @@ impl Mobile {
                 Toast::show(error, self.window, cx);
             }
             Update::Unpair { id, generation } => {
-                let Some(client) = self.client.clone() else { return };
+                let Some(client) = self.client.clone() else {
+                    return;
+                };
                 let updates = self.updates.clone();
                 self.rt.spawn(async move {
                     let event = match client.unpair(&id, generation.as_deref()).await {
@@ -1158,7 +472,9 @@ impl Mobile {
             }
             Update::Devices(peers) => {
                 let revoked = match &mut self.page {
-                    Page::Peer(id) | Page::Sessions(Some(id)) | Page::Forwards(Some(id)) => !peers.contains_key(id),
+                    Page::Peer(id) | Page::Sessions(Some(id)) | Page::Forwards(Some(id)) => {
+                        !peers.contains_key(id)
+                    }
                     Page::ForwardEdit { owner, scope } => {
                         if scope.as_ref().is_some_and(|id| !peers.contains_key(id)) {
                             *scope = None;
@@ -1177,7 +493,8 @@ impl Mobile {
                     | Page::PairingMenu
                     | Page::Settings
                     | Page::SettingsCategory(_)
-                    | Page::Sessions(None) | Page::Forwards(None) => false,
+                    | Page::Sessions(None)
+                    | Page::Forwards(None) => false,
                 };
                 if revoked {
                     self.navigate(Page::Devices, cx);
@@ -1187,17 +504,33 @@ impl Mobile {
                 }
                 self.sessions.retain(|_, s| peers.contains_key(&s.peer));
                 for removed in self.peers.keys().filter(|p| !peers.contains_key(*p)) {
-                    if let Err(e) = self.session_names.retain(removed, |_| false) { log::warn!("Removing session titles: {e}"); }
+                    if let Err(e) = self.session_names.retain(removed, |_| false) {
+                        log::warn!("Removing session titles: {e}");
+                    }
                 }
                 self.hosted.retain(|peer, _| peers.contains_key(peer));
-                self.session_list_errors.retain(|peer| peers.contains_key(peer));
-                if self.forward_filters.device.as_ref().is_some_and(|id| !peers.contains_key(id)) {
-                    self.forward_filters.device = None;
+                self.session_list_errors
+                    .retain(|peer| peers.contains_key(peer));
+                if self
+                    .forward_filters
+                    .scope
+                    .device
+                    .as_ref()
+                    .is_some_and(|id| !peers.contains_key(id))
+                {
+                    self.forward_filters.scope.device = None;
                 }
-                if self.session_filters.scope.device.as_ref().is_some_and(|id| !peers.contains_key(id)) {
+                if self
+                    .session_filters
+                    .scope
+                    .device
+                    .as_ref()
+                    .is_some_and(|id| !peers.contains_key(id))
+                {
                     self.session_filters.scope.device = None;
                 }
-                if matches!(&self.terminal_return, Page::Sessions(Some(id)) | Page::Peer(id) if !peers.contains_key(id)) {
+                if matches!(&self.terminal_return, Page::Sessions(Some(id)) | Page::Peer(id) if !peers.contains_key(id))
+                {
                     self.terminal_return = Page::Sessions(None);
                 }
                 self.last_session_number
@@ -1211,7 +544,11 @@ impl Mobile {
                     .update(cx, |input, cx| input.set_placeholder(&names.system, cx));
             }
             Update::Gesture(id, gesture) => self.handle_gesture(id, gesture, cx),
-            Update::Composing { id, text, selection } => {
+            Update::Composing {
+                id,
+                text,
+                selection,
+            } => {
                 if self.page == Page::Terminal(id)
                     && let Some(s) = self.sessions.get_mut(&id).filter(|s| s.connected())
                 {
@@ -1219,26 +556,15 @@ impl Mobile {
                 }
             }
             Update::Close => {
-                if let Some(menu) = self
-                    .terminal_menus
-                    .iter()
-                    .chain(self.forwards.menus.iter())
-                    .chain(self.session_menus.iter())
-                    .chain([
-                        &self.page_menu,
-                        &self.keybar_menu,
-                        &self.rule_form.device_menu,
-                        &self.rule_form.direction_menu,
-                    ])
-                    .find(|menu| menu.read(cx).is_open())
-                {
-                    menu.update(cx, |menu, cx| menu.back(cx));
-                } else {
+                if !DropdownState::back_active(cx) {
                     self.back(cx);
                 }
             }
             Update::Shortcut(id, key, action) => {
-                if self.page == Page::Terminal(id) && !self.drawer.open && !self.page_menu.read(cx).is_open() {
+                if self.page == Page::Terminal(id)
+                    && !self.drawer.open
+                    && !DropdownState::has_open(cx)
+                {
                     self.terminal_shortcut(id, &key, action, cx);
                 }
             }
@@ -1260,11 +586,24 @@ impl Mobile {
                 {
                     let bytes = if named {
                         if value == "Space" || value.chars().count() == 1 {
-                            keys::committed_text(if value == "Space" { " " } else { &value }, first, held)
+                            keys::committed_text(
+                                if value == "Space" { " " } else { &value },
+                                first,
+                                held,
+                            )
                         } else {
-                            let name = if value == "Esc" { "escape".into() } else { value.to_ascii_lowercase() };
-                            let Some(bytes) = keys::named_key(&name, first, s.screen.term.mode().contains(TermMode::APP_CURSOR))
-                            else { return };
+                            let name = if value == "Esc" {
+                                "escape".into()
+                            } else {
+                                value.to_ascii_lowercase()
+                            };
+                            let Some(bytes) = keys::named_key(
+                                &name,
+                                first,
+                                s.screen.term.mode().contains(TermMode::APP_CURSOR),
+                            ) else {
+                                return;
+                            };
                             bytes
                         }
                     } else {
@@ -1324,13 +663,16 @@ impl Mobile {
                 }
                 if let Some(mut keys) = keys {
                     keys.retain(|k| !ended.contains(k));
-                    if let Err(e) = self.session_names.retain(
-                        &peer,
-                        |k| {
-                            keys.contains(&k)
-                                || self.sessions.values().any(|s| s.peer == peer && s.key == k && !matches!(s.state, SessionState::Ended(_)))
-                        },
-                    ) { log::warn!("Cleaning up session titles: {e}"); }
+                    if let Err(e) = self.session_names.retain(&peer, |k| {
+                        keys.contains(&k)
+                            || self.sessions.values().any(|s| {
+                                s.peer == peer
+                                    && s.key == k
+                                    && !matches!(s.state, SessionState::Ended(_))
+                            })
+                    }) {
+                        log::warn!("Cleaning up session titles: {e}");
+                    }
                     let recovered = self.session_list_errors.remove(&peer);
                     if !recovered && self.hosted.get(&peer) == Some(&keys) {
                         return;
@@ -1343,12 +685,18 @@ impl Mobile {
             Update::Output(AttachmentId { session: id, .. }, bytes, replay) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     if replay {
-                        s.screen = Emulator::with_palette(s.grid_size(), s.screen.palette, s.screen.font.clone());
+                        s.screen = Emulator::with_palette(
+                            s.grid_size(),
+                            s.screen.palette,
+                            s.screen.font.clone(),
+                        );
                     }
                     s.screen.process(&bytes);
                     let visible = self.page == Page::Terminal(id) && *ACTIVITY_VISIBLE.borrow();
                     let reply = s.screen.finish_batch_with_clipboard(|_, text| {
-                        if !replay && visible && theme::terminal_controls(cx).remote_clipboard
+                        if !replay
+                            && visible
+                            && theme::terminal_controls(cx).remote_clipboard
                             && let Err(error) = gpui_mobile::packages::clipboard::set_text(&text)
                         {
                             Toast::show(error, self.window, cx);
@@ -1369,7 +717,10 @@ impl Mobile {
             Update::RemoveForward { owner, name } => self.remove_forward(&owner, name, cx),
             Update::ForwardChanged(owner, result) => {
                 self.rule_form.saving = false;
-                if let Page::ForwardEdit { owner: Some(peer), scope } = &self.page
+                if let Page::ForwardEdit {
+                    owner: Some(peer),
+                    scope,
+                } = &self.page
                     && peer == &owner
                 {
                     match result {
@@ -1377,7 +728,9 @@ impl Mobile {
                         Err(error) => Toast::show(error, self.window, cx),
                     }
                 } else {
-                    if let Err(error) = result { Toast::show(error, self.window, cx); }
+                    if let Err(error) = result {
+                        Toast::show(error, self.window, cx);
+                    }
                     // A list opened while the save was pending may still contain its previous rules.
                     self.forwards.invalidate(&owner);
                     self.sync_forwards(true);
@@ -1397,7 +750,8 @@ impl Mobile {
                         .map(|(id, paths)| (id.as_str(), paths.as_slice())),
                 );
                 for s in self.sessions.values_mut() {
-                    if self.presence.online(&s.peer) && !snapshot.online(&s.peer)
+                    if self.presence.online(&s.peer)
+                        && !snapshot.online(&s.peer)
                         && !matches!(s.state, SessionState::Ended(_))
                     {
                         s.detach();
@@ -1411,7 +765,9 @@ impl Mobile {
                 }
             }
             Update::SessionGone(AttachmentId { session: id, .. }) => {
-                let Some(s) = self.sessions.get(&id) else { return; };
+                let Some(s) = self.sessions.get(&id) else {
+                    return;
+                };
                 if self.page == Page::Terminal(id) && !matches!(s.state, SessionState::Stopping) {
                     Toast::show("Session has ended on the gateway", self.window, cx);
                 }
@@ -1419,13 +775,18 @@ impl Mobile {
                 self.dismiss_session(id, cx);
             }
             Update::End(AttachmentId { session: id, .. }, result) => {
-                let Some(s) = self.sessions.get_mut(&id) else { return; };
+                let Some(s) = self.sessions.get_mut(&id) else {
+                    return;
+                };
                 s.job = None;
                 if result.is_ok() && matches!(s.state, SessionState::Stopping) {
                     let (peer, key) = (s.peer.clone(), s.key);
                     self.remove_hosted(&peer, key);
                     self.dismiss_session(id, cx);
-                } else if result.as_ref().is_err_and(|e| !e.is::<paxri_terminal::managed::Rejected>()) {
+                } else if result
+                    .as_ref()
+                    .is_err_and(|e| !e.is::<paxri_terminal::managed::Rejected>())
+                {
                     if !matches!(s.state, SessionState::Stopping) {
                         s.state = SessionState::Reconnecting;
                     }
@@ -1488,9 +849,10 @@ fn android_main(android: AndroidApp) {
         *HARDWARE_CONTROLS.lock().unwrap() = preferences.controls.clone();
         theme::install(preferences, cx);
         let activity = android.clone();
-        Toast::set_native(move |message| {
-            activity_action(&activity, ActivityAction::Toast(message)).is_ok()
-        }, cx);
+        Toast::set_native(
+            move |message| activity_action(&activity, ActivityAction::Toast(message)).is_ok(),
+            cx,
+        );
         let (tx, rx) = async_channel::bounded(128);
         let disk = android.internal_data_path();
         let events = tx.clone();
@@ -1499,10 +861,14 @@ fn android_main(android: AndroidApp) {
             let result = async {
                 let dir = disk.ok_or_else(|| anyhow::anyhow!("App storage unavailable"))?;
                 Client::start(&dir, events.clone(), move |paired, connected| {
-                    if let Err(error) = activity_action(&network_activity, ActivityAction::DeviceConnections { paired, connected }) {
+                    if let Err(error) = activity_action(
+                        &network_activity,
+                        ActivityAction::DeviceConnections { paired, connected },
+                    ) {
                         log::warn!("Updating background connection service: {error}");
                     }
-                }).await
+                })
+                .await
             }
             .await;
             let event = match result {
@@ -1536,22 +902,28 @@ fn android_main(android: AndroidApp) {
                 // Cancel the receiver on its owner thread before network shutdown
                 // can wake it from a Tokio worker after the window has gone.
                 cx.on_release(move |_, _| drop(event_task)).detach();
+                cx.observe_global::<ActiveDropdown>(|this: &mut Mobile, cx| {
+                    this.sync_back(cx);
+                    cx.notify();
+                })
+                .detach();
                 Mobile::bind_terminal_shortcuts(cx);
                 let ui_font = fonts::init(cx);
                 let font = cx
                     .global::<theme::fonts::MonospaceFonts>()
                     .resolve(&theme::current(cx).terminal);
-                let terminal_settings =
-                    paxri_ui::settings::terminal::TerminalSettings::new(|view: &mut Mobile, change, cx| { view.change_gui(change, cx); }, cx);
+                let terminal_settings = paxri_ui::settings::terminal::TerminalSettings::new(
+                    |view: &mut Mobile, change, cx| {
+                        view.change_gui(change, cx);
+                    },
+                    cx,
+                );
                 let names = DEVICE_NAME.borrow().clone();
                 let name_input = paxri_ui::components::input::Input::setting(&names.system, cx);
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
                 use gpui_mobile::KeyboardType;
-                let page_menu = paxri_ui::components::DropdownState::new(window, cx);
-                cx.observe(&page_menu, |this: &mut Mobile, _, cx| this.sync_back(cx))
-                    .detach();
                 let device_filters = DeviceFilters::new("Search devices…", cx);
-                let forward_filters = paxri_ui::components::forwarding::ForwardFilters::new(cx);
+                let forward_filters = ForwardFilters::for_forwards(cx);
                 let session_filters = SessionFilters::new("Search sessions…", cx);
                 let mut inputs = vec![
                     (name_input.clone(), KeyboardType::Default),
@@ -1559,7 +931,7 @@ fn android_main(android: AndroidApp) {
                     (device_filters.search.clone(), KeyboardType::Default),
                     (session_filters.search.clone(), KeyboardType::Default),
                 ];
-                let rule_form = forwards::RuleForm::new(window, cx);
+                let rule_form = forwards::RuleForm::new(cx);
                 inputs.extend(
                     rule_form
                         .inputs
@@ -1580,9 +952,10 @@ fn android_main(android: AndroidApp) {
                     name_input,
                     terminal_zoom: load_terminal_zoom(&android),
                     session_names: paxri_ui::terminal::title::SessionTitles::open(
-                        android.internal_data_path().map(|dir| dir.join("session-titles.json")),
+                        android
+                            .internal_data_path()
+                            .map(|dir| dir.join("session-titles.json")),
                     ),
-                    session_menus: Vec::new(),
                     ending_hosted: BTreeSet::new(),
                     android,
                     window: window.window_handle(),
@@ -1602,7 +975,6 @@ fn android_main(android: AndroidApp) {
                     hosted: BTreeMap::new(),
                     listing_peers: BTreeMap::new(),
                     session_list_errors: BTreeSet::new(),
-                    page_menu,
                     device_filters,
                     forward_filters,
                     session_filters,
@@ -1617,11 +989,7 @@ fn android_main(android: AndroidApp) {
                     editing_input: None,
                     keybar: theme::current(cx).keybar.unwrap_or_default(),
                     key_editor: None,
-                    keybar_menu: paxri_ui::components::DropdownState::new(window, cx),
                     terminal_settings,
-                    terminal_menus: std::array::from_fn(|_| {
-                        paxri_ui::components::DropdownState::new(window, cx)
-                    }),
                     generation: 0,
                     starting_network: true,
                     pairing: None,
@@ -1634,7 +1002,10 @@ fn android_main(android: AndroidApp) {
     // Android may have started the replacement window before destroying this one.
     {
         let mut bridge = BRIDGE.lock().unwrap();
-        if bridge.as_ref().is_some_and(|active| active.same_channel(&controls)) {
+        if bridge
+            .as_ref()
+            .is_some_and(|active| active.same_channel(&controls))
+        {
             bridge.take();
             CAN_GO_BACK.store(false, Ordering::Release);
         }

@@ -269,10 +269,7 @@ impl Mobile {
                 let scale = window.scale_factor();
                 view.update(cx, |view, cx| {
                     if view.page == Page::SettingsCategory(SECTION) {
-                        let visible_height = view
-                            .keybar_menu
-                            .read(cx)
-                            .field_popup_top(HAPTICS.len(), window)
+                        let visible_height = paxri_ui::components::DropdownState::active_field_popup_top(window, cx)
                             .map_or(bounds.size.height, |top| {
                                 (top - bounds.origin.y).clamp(px(0.), bounds.size.height)
                             });
@@ -358,8 +355,7 @@ impl Mobile {
                     cx.notify();
                 }
             }),
-        )
-        .with_optional_state(Some(&self.keybar_menu));
+        );
         for (mode, label) in HAPTICS {
             feedback = feedback.option(mode, label);
         }

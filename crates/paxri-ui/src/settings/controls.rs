@@ -116,6 +116,41 @@ pub fn setting_field(control: impl IntoElement) -> Div {
     div().w(px(224.)).max_w_full().min_w_0().child(control)
 }
 
+impl Ui {
+    pub fn setting_choice<T: Clone + PartialEq + 'static, L: Into<SharedString>>(
+        self,
+        id: &'static str,
+        selected: T,
+        values: impl IntoIterator<Item = T>,
+        label: impl Fn(T) -> L,
+        change: impl Fn(&T, &mut Window, &mut App) + 'static,
+    ) -> Div {
+        let mut select = Select::new(id, selected, change);
+        for value in values {
+            let name = label(value.clone());
+            select = select.option(value, name);
+        }
+        setting_field(select)
+    }
+
+    pub fn setting_toggle(
+        self,
+        id: &'static str,
+        enabled: bool,
+        editable: bool,
+        change: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Div {
+        if editable {
+            div()
+                .flex()
+                .child(self.switch(id, enabled).on_click(change))
+        } else {
+            self.muted(if enabled { "On" } else { "Off" })
+                .whitespace_nowrap()
+        }
+    }
+}
+
 pub fn category_button(
     ui: Ui,
     item: Option<super::SettingsSection>,

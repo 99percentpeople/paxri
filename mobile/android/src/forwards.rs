@@ -2,8 +2,11 @@ use super::*;
 use paxri_control::{Direction, PeerForward, forwarding::Rules};
 use paxri_ui::components::{
     ButtonVariant::Ghost,
-    DropdownState, Icon, ListState, ListView, Select,
-    forwarding::{RuleAction, RuleMenu},
+    Icon, ListState, ListView,
+    forwarding::{
+        NARROW_WIDTH, RuleAction, RuleMenu, device_select, direction_select, endpoint_labels,
+        parse_endpoints,
+    },
     input::Input,
 };
 use paxri_ui::settings::{SettingsGroup, SettingsSection, SettingsTable};
@@ -28,7 +31,6 @@ impl Drop for Entry {
 pub(super) struct ForwardList {
     entries: BTreeMap<String, Entry>,
     next_request: u64,
-    pub(super) menus: Vec<Entity<DropdownState>>,
 }
 
 impl ForwardList {
@@ -86,9 +88,6 @@ impl Mobile {
     }
 
     pub(super) fn sync_forwards(&mut self, refresh: bool) {
-        if !matches!(self.page, Page::Forwards(_)) {
-            self.forwards.menus.clear();
-        }
         if !matches!(self.page, Page::Devices | Page::Peer(_) | Page::Forwards(_)) {
             self.forwards.entries.clear();
             return;
@@ -129,15 +128,9 @@ impl Mobile {
         }
     }
 
-    pub(super) fn forward_list(
-        &mut self,
-        ui: Ui,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    pub(super) fn forward_list(&self, ui: Ui, window: &Window, cx: &Context<Self>) -> Div {
         let filters = &self.forward_filters;
         let query = filters.query(cx);
-        let terms: Vec<_> = query.split_whitespace().collect();
         let mut options: Vec<_> = self
             .peers
             .iter()
@@ -145,15 +138,15 @@ impl Mobile {
             .collect();
         options.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
         let mut body = ListView::scrollable("forward-list")
-            .with_floating_action(self.can_add_rule(filters.device.as_deref()));
-        let narrow = window.viewport_size().width < px(650.);
-        self.forwards.menus.clear();
+            .with_floating_action(self.can_add_rule(filters.scope.device.as_deref()));
+        let narrow = window.viewport_size().width < NARROW_WIDTH;
         let mut count = 0;
         let mut pending = false;
         let mut failures = Vec::new();
         let mut rows = Vec::new();
         for (id, name, _) in &options {
             if filters
+                .scope
                 .device
                 .as_ref()
                 .is_some_and(|selected| selected != id)
@@ -168,7 +161,7 @@ impl Mobile {
                 if let Some(rules) = &entry.rules {
                     count += rules.len();
                     for (key, rule) in rules {
-                        if !filters.matches(id, key, rule, name, &terms) {
+                        if !filters.matches(id, key, rule, name, &query) {
                             continue;
                         }
                         let owner = id.clone();
@@ -176,12 +169,6 @@ impl Mobile {
                         let route = rule.route_for(name);
                         let view = cx.weak_entity();
                         let menu_id = format!("rule-actions-{id}/{key}");
-                        let state = DropdownState::local(
-                            SharedString::from(menu_id.clone()).into(),
-                            window,
-                            cx,
-                        );
-                        self.forwards.menus.push(state.clone());
                         let menu =
                             RuleMenu::new(menu_id, key, rule.enabled(), move |action, _, cx| {
                                 let _ = view.update(cx, |v, cx| match action {
@@ -209,8 +196,7 @@ impl Mobile {
                                         }
                                     }
                                 });
-                            })
-                            .with_state(state);
+                            });
                         rows.push(ui.forwarding_row(
                             format!("{id}/{key}"),
                             key,
@@ -225,6 +211,7 @@ impl Mobile {
         }
         if rows.is_empty() {
             let selected = filters
+                .scope
                 .device
                 .as_ref()
                 .and_then(|id| self.peers.get(id).map(|p| (id, p)));
@@ -252,7 +239,7 @@ impl Mobile {
                     .detail("Connect a device that shares forwarding rules.")
             } else if count > 0 {
                 ListState::filtered("No matching rules")
-            } else if !self.can_add_rule(filters.device.as_deref()) {
+            } else if !self.can_add_rule(filters.scope.device.as_deref()) {
                 ListState::empty(Icon::Forward, "No forwarding rules")
                     .detail("Update the gateway to create forwarding rules.")
             } else {
@@ -263,11 +250,7 @@ impl Mobile {
             for error in failures {
                 body = body.child(ui.muted(error));
             }
-            body = body.divided();
-            if !narrow {
-                body = body.child(ui.forwarding_header());
-            }
-            body = body.children(rows);
+            body = ui.forwarding_table(body, narrow, rows);
         }
         div()
             .min_h_0()
@@ -277,31 +260,23 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .child(
-                filters
-                    .toolbar(&options, |v| &mut v.forward_filters, cx)
-                    .with_state(&self.page_menu),
-            )
+            .child(filters.toolbar(&options, |v| &mut v.forward_filters, cx))
             .child(body)
     }
 }
 
 pub(super) struct RuleForm {
     pub inputs: [Entity<Input>; 3],
-    pub device_menu: Entity<DropdownState>,
-    pub direction_menu: Entity<DropdownState>,
     pub existing: Option<String>,
     direction: Direction,
     pub saving: bool,
 }
 
 impl RuleForm {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<Mobile>) -> Self {
+    pub(super) fn new(cx: &mut Context<Mobile>) -> Self {
         Self {
             inputs: ["e.g. web", "8080 or IP:port", "3000 or host:port"]
                 .map(|placeholder| Input::setting(placeholder, cx)),
-            device_menu: DropdownState::new(window, cx),
-            direction_menu: DropdownState::new(window, cx),
             existing: None,
             direction: Direction::Local,
             saving: false,
@@ -310,8 +285,7 @@ impl RuleForm {
 
     fn save_action(&self, cx: &App) -> Result<PeerForward, String> {
         let [name, listen, target] = &self.inputs;
-        let listen = paxri_control::listen_address(listen.read(cx).text().trim())?;
-        let target = paxri_control::tcp_target(target.read(cx).text().trim())?;
+        let (listen, target) = parse_endpoints(listen.read(cx).text(), target.read(cx).text())?;
         let direction = self.direction;
         if let Some(name) = &self.existing {
             Ok(PeerForward::Edit {
@@ -359,10 +333,10 @@ impl Mobile {
                 (Some(owner.to_owned()), Some(name), Some(rule))
             }
             None => {
-                if !self.can_add_rule(self.forward_filters.device.as_deref()) {
+                if !self.can_add_rule(self.forward_filters.scope.device.as_deref()) {
                     return;
                 }
-                let owner = self.forward_filters.device.clone().or_else(|| {
+                let owner = self.forward_filters.scope.device.clone().or_else(|| {
                     let mut devices = self.rule_devices();
                     let (id, _) = devices.next()?;
                     devices.next().is_none().then(|| id.clone())
@@ -372,7 +346,7 @@ impl Mobile {
         };
         self.rule_form.existing = name.map(str::to_owned);
         self.rule_form.direction = rule
-            .map_or(self.forward_filters.direction.unwrap_or_default(), |r| {
+            .map_or(self.forward_filters.scope.direction.unwrap_or_default(), |r| {
                 r.direction
             });
         let values = [
@@ -502,28 +476,26 @@ impl Mobile {
                     .unwrap_or_default(),
             );
         } else {
-            let mut devices = Select::new(
+            let options: Vec<_> = self
+                .rule_devices()
+                .map(|(id, peer)| (id.clone(), peer.name.clone(), peer.platform))
+                .collect();
+            let placeholder = match owner.and_then(|id| self.peers.get(id)) {
+                Some(peer) => format!("{} (unavailable)", peer.name),
+                None => "Choose a paired device".to_owned(),
+            };
+            let devices = device_select(
                 "rule-device",
                 owner.map(str::to_owned),
+                placeholder,
+                &options,
                 cx.listener(|this, id: &String, _, cx| {
                     if let Page::ForwardEdit { owner, .. } = &mut this.page {
                         *owner = Some(id.clone());
                         cx.notify();
                     }
                 }),
-            )
-            .with_optional_state(Some(&form.device_menu))
-            .placeholder(match owner.and_then(|id| self.peers.get(id)) {
-                Some(peer) => format!("{} (unavailable)", peer.name),
-                None => "Choose a paired device".to_owned(),
-            });
-            for (id, peer) in self.rule_devices() {
-                devices = devices.option_with_icon(
-                    id.clone(),
-                    peer.name.clone(),
-                    Icon::device(peer.platform),
-                );
-            }
+            );
             fields.field("Device", devices);
         }
         if let Some(key) = &form.existing {
@@ -531,34 +503,18 @@ impl Mobile {
         } else {
             fields.field("Rule name", name.clone());
         }
-        let direction = Select::new(
+        let direction = direction_select(
             "forward-direction",
             form.direction,
             cx.listener(|this, direction: &Direction, _, cx| {
                 this.rule_form.direction = *direction;
                 cx.notify();
             }),
-        )
-        .with_optional_state(Some(&form.direction_menu))
-        .option(Direction::Local, "Forward")
-        .option(Direction::Remote, "Reverse");
+        );
+        let (listen_label, target_label) = endpoint_labels(form.direction);
         fields.field("Direction", direction);
-        fields.field(
-            if form.direction == Direction::Local {
-                "Listen on this device"
-            } else {
-                "Listen on peer"
-            },
-            listen.clone(),
-        );
-        fields.field(
-            if form.direction == Direction::Local {
-                "Target on peer"
-            } else {
-                "Target on this device"
-            },
-            target.clone(),
-        );
+        fields.field(listen_label, listen.clone());
+        fields.field(target_label, target.clone());
         let page = self
             .settings_body("forward-edit-page")
             .child(fields.render_rows(ui));

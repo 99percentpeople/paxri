@@ -32,24 +32,8 @@ pub(crate) fn copy_with_feedback(text: String, message: &'static str, window: &m
 }
 
 pub use paxri_ui::components::{
-    Button, ButtonVariant, Icon, ListItem, Select, actions, form_row, heading, row,
-    tooltip,
+    Button, ButtonVariant, Icon, ListItem, Select, Ui, actions, form_row, heading, row, tooltip,
 };
-
-#[derive(Clone, Copy)]
-pub struct Ui(paxri_ui::components::Ui);
-
-impl Ui {
-    pub fn new(window: &Window, cx: &App) -> Self {
-        Self(paxri_ui::components::Ui::new(window, cx))
-    }
-}
-impl std::ops::Deref for Ui {
-    type Target = paxri_ui::components::Ui;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 pub(crate) fn observe_window_focus<V: 'static>(
     window: &mut Window,

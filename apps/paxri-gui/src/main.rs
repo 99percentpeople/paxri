@@ -369,8 +369,8 @@ impl Dashboard {
                         });
                         view.connection_history.record(paths);
                         view.watch_presence(&status, cx);
-                        if let Some(peer) = saved_peer && view.forward_filters.device.is_some() {
-                            view.forward_filters.device = Some(peer);
+                        if let Some(peer) = saved_peer && view.forward_filters.scope.device.is_some() {
+                            view.forward_filters.scope.device = Some(peer);
                         }
                         if let Some(old) = &view.status {
                             view.terminal_sessions.retain(|name, _| status.peers.get(name.as_ref()).is_some_and(|id| Some(id) == old.peers.get(name.as_ref())));
@@ -470,7 +470,7 @@ impl Dashboard {
             ),
             home_scroll: ScrollHandle::new(),
             devices_pane: None,
-            forward_filters: pages::ForwardFilters::new(cx),
+            forward_filters: pages::ForwardFilters::for_forwards(cx),
             settings_editor: pages::SettingsEditor::new(cx),
             name_field: TextSetting::new("", Self::commit_device_name, cx),
             relay_field: TextSetting::new("Automatic public relay", Self::commit_relay_url, cx),

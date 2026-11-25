@@ -2,7 +2,10 @@
 use super::*;
 use crate::components::{
     Icon, Ui,
-    dock::{DockDrag, DockLayout, DockPanel, DockPlacement, DockSettings, DockState, DockTabs},
+    dock::{
+        DockDrag, DockLayout, DockPanel, DockPlacement, DockSettings, DockState, DockTabs,
+        tab as dock_tab, tab_close, tab_close_button,
+    },
     observe_window_focus, tooltip,
 };
 
@@ -90,7 +93,8 @@ impl Page {
         close: impl IntoElement,
         label: impl IntoElement,
     ) -> Div {
-        ui.tab(
+        dock_tab(
+            ui,
             settings,
             self.icon(),
             label,
@@ -484,8 +488,10 @@ impl Workspace {
             let closing = page.clone();
             let pressed = page.clone();
             let workspace = cx.weak_entity();
-            let close =
-                ui.tab_close_button(cx.listener(move |v, _, w, cx| v.close_tab(&closing, w, cx)));
+            let close = tab_close_button(
+                ui,
+                cx.listener(move |v, _, w, cx| v.close_tab(&closing, w, cx)),
+            );
             let tab = page
                 .tab(ui, settings, self.active == *page, close, label)
                 .id(page.element_id())
@@ -550,7 +556,7 @@ impl Workspace {
     fn active_panel(&self, ui: Ui, window: &mut Window, cx: &mut Context<Self>) -> DockPanel {
         let width = self.dock.read(cx).settings().page_width(window.viewport_size().width);
         match &self.active {
-            Page::Home => self.dashboard.update(cx, |d, cx| d.home(ui, width, window, cx)),
+            Page::Home => self.dashboard.update(cx, |d, cx| d.home(ui, width, cx)),
             Page::Settings => self.dashboard.update(cx, |d, cx| d.settings(ui, width, cx)),
             // A new Win32 window is still cloaked while its client size is
             // being set. Laying out the PTY here would resize the live session.
@@ -609,7 +615,7 @@ impl Render for Workspace {
                         ui,
                         self.dock.read(cx).settings(),
                         true,
-                        ui.tab_close(),
+                        tab_close(ui),
                         drag.page.label(cx),
                     ),
                 )

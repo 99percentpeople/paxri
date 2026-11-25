@@ -14,7 +14,7 @@ impl Dashboard {
         let view = cx.entity().downgrade();
         self.settings_editor
             .terminal
-            .group(*ui, cx, None, move |change, _, cx: &mut App| {
+            .group(ui, cx, move |change, _, cx: &mut App| {
                 let _ = view.update(cx, |view, cx| view.change_terminal_setting(change, cx));
             })
     }

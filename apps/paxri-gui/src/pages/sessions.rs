@@ -6,7 +6,7 @@ use crate::{
 use gpui::{prelude::*, *};
 use paxri_control::{Status, terminal::managed::Request};
 use paxri_ui::components::directory::{DeviceOption, SessionLocation, session_list_notice};
-use paxri_ui::components::{DropdownContent, DropdownState, ListView};
+use paxri_ui::components::{DropdownContent, ListView};
 use std::time::Duration;
 
 impl Dashboard {
@@ -99,7 +99,6 @@ impl Dashboard {
         &self,
         status: &Status,
         ui: Ui,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Div, Option<AnyElement>) {
         let filters = &self.session_filters;
@@ -153,19 +152,12 @@ impl Dashboard {
                         "session-actions-{alias}-{}-{}",
                         key.number, key.nonce
                     ));
-                    let menu = DropdownState::local(id.clone().into(), window, cx);
                     let view = cx.weak_entity();
                     let peer = peer.clone();
                     let content = DropdownContent::new().end_session(move |w, cx| {
                         let _ = view.update(cx, |v, cx| v.end_listed_session(&peer, key, w, cx));
                     });
-                    ui.actions_menu(
-                        id,
-                        format!("Actions for {title}").into(),
-                        &menu,
-                        content,
-                        cx,
-                    )
+                    ui.actions_menu(id, format!("Actions for {title}").into(), content)
                 });
                 rows.push(ui.session_row(
                     alias,
@@ -191,7 +183,7 @@ impl Dashboard {
             })
             .when_some(
                 session_list_notice(total, rows.len(), initial_request, &failed),
-                |d, state| d.child(state.render(*ui)),
+                |d, state| d.child(state.render(ui)),
             )
             .when(!rows.is_empty(), |page| page.child(ListView::new().children(rows)));
         (overview().child(section), launcher)

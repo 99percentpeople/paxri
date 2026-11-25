@@ -1,7 +1,10 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use terminal::Terminal;
-use paxri_ui::components::directory::{SessionLocation, session_entries};
+use paxri_ui::{
+    components::directory::{SessionLocation, named_session_entries},
+    terminal::title::next_session_number,
+};
 
 #[derive(Default)]
 pub(crate) struct PeerSessions {
@@ -111,13 +114,19 @@ impl Dashboard {
         let mut titles = Vec::new();
         let mut reserved = Vec::new();
         for (peer, sessions) in &self.terminal_sessions {
-            for (key, title) in self.session_titles.entries(&sessions.title_scope) {
-                if !sessions.open.get(key).is_some_and(|v| v.upgrade().is_some()) {
-                    reserved.push(title.label(peer));
-                }
-            }
+            let name: SharedString = self
+                .status
+                .as_ref()
+                .map_or(peer.as_ref(), |s| s.peer_display_name(peer))
+                .to_owned()
+                .into();
+            reserved.extend(self.session_titles.reserved_labels(
+                &sessions.title_scope,
+                &name,
+                |key| !sessions.open.get(&key).is_some_and(|v| v.upgrade().is_some()),
+            ));
             for view in sessions.open.values().filter_map(WeakEntity::upgrade) {
-                titles.push((peer.clone(), view.read(cx).title.clone()));
+                titles.push((name.clone(), view.read(cx).title.clone()));
             }
         }
         terminal::TabTitle::assign_with_reserved(&titles, reserved, cx);
@@ -148,13 +157,16 @@ impl Dashboard {
             let view = view.read(cx);
             Some((key, view.title.read(cx).label(&name), view.is_running(), ()))
         });
-        session_entries(name.clone(), hosted, local).into_iter()
-            .map(|(key, (title, state, local))| {
-                let title = if local.is_none() {
-                    self.session_titles.get(&sessions.title_scope, key).map(|t| t.label(&name)).unwrap_or(title)
-                } else { title };
-                (key, title, state)
-            }).collect()
+        named_session_entries(
+            name.clone(),
+            &sessions.title_scope,
+            &self.session_titles,
+            hosted,
+            local,
+        )
+            .into_iter()
+            .map(|(key, (title, state, _))| (key, title, state))
+            .collect()
     }
 
     fn register_terminal(
@@ -247,15 +259,11 @@ impl Workspace {
             return;
         }
         let dashboard = self.dashboard.read(cx);
-        let number = dashboard.terminal_sessions.get(&peer).map_or(0, |s| {
-            s.hosted
-                .iter()
-                .map(|k| k.number)
-                .max()
-                .unwrap_or(0)
-                .max(s.last_number)
-        });
-        let key = match SessionKey::new(number.saturating_add(1)) {
+        let number = dashboard
+            .terminal_sessions
+            .get(&peer)
+            .map_or(1, |s| next_session_number(s.hosted.iter().copied(), s.last_number));
+        let key = match SessionKey::new(number) {
             Ok(key) => key,
             Err(e) => {
                 crate::components::Toast::show(e.to_string(), w.window_handle(), cx);

@@ -195,69 +195,67 @@ pub(super) fn preview<K: Clone + PartialEq + 'static>(
     .inset_0()
 }
 
-impl Ui {
-    pub fn tab(
-        self,
-        settings: DockSettings,
-        icon: Icon,
-        label: impl IntoElement,
-        selected: bool,
-        close: Option<impl IntoElement>,
-    ) -> Div {
-        let tab = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .rounded(CONTROL_RADIUS)
-            .h(settings.tab_height())
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .border_1()
-            .border_color(transparent_black())
-            .text_color(rgb(self.colors.muted_foreground))
-            .when(!selected, |tab| tab.hover(|s| s.bg(rgb(self.colors.tab_hover))))
-            .when(selected, |tab| {
-                tab.bg(rgb(self.colors.card))
-                    .border_color(rgb(self.colors.border))
-                    .text_color(rgb(self.colors.accent.foreground))
-            });
-        let tab = match settings.placement {
-            DockPlacement::Top => tab.min_w(TAB_MIN_WIDTH).max_w(TAB_MAX_WIDTH),
-            DockPlacement::Left => tab.w_full().min_w_0(),
-        };
-        tab.overflow_hidden()
-            .px(SPACE_3)
-            .gap(SPACE_2)
-            .child(icon.draw(16.))
-            .child(div().min_w_0().flex_grow().truncate().child(label))
-            .children(close)
-    }
+pub fn tab(
+    ui: Ui,
+    settings: DockSettings,
+    icon: Icon,
+    label: impl IntoElement,
+    selected: bool,
+    close: Option<impl IntoElement>,
+) -> Div {
+    let tab = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded(CONTROL_RADIUS)
+        .h(settings.tab_height())
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .border_1()
+        .border_color(transparent_black())
+        .text_color(rgb(ui.colors.muted_foreground))
+        .when(!selected, |tab| tab.hover(|s| s.bg(rgb(ui.colors.tab_hover))))
+        .when(selected, |tab| {
+            tab.bg(rgb(ui.colors.card))
+                .border_color(rgb(ui.colors.border))
+                .text_color(rgb(ui.colors.accent.foreground))
+        });
+    let tab = match settings.placement {
+        DockPlacement::Top => tab.min_w(TAB_MIN_WIDTH).max_w(TAB_MAX_WIDTH),
+        DockPlacement::Left => tab.w_full().min_w_0(),
+    };
+    tab.overflow_hidden()
+        .px(SPACE_3)
+        .gap(SPACE_2)
+        .child(icon.draw(16.))
+        .child(div().min_w_0().flex_grow().truncate().child(label))
+        .children(close)
+}
 
-    pub fn tab_close(self) -> Div {
-        div()
-            .size(px(20.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(SPACE_1)
-            .text_color(rgb(self.colors.muted_foreground))
-            .child(Icon::Close.draw(14.))
-    }
+pub fn tab_close(ui: Ui) -> Div {
+    div()
+        .size(px(20.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(SPACE_1)
+        .text_color(rgb(ui.colors.muted_foreground))
+        .child(Icon::Close.draw(14.))
+}
 
-    pub fn tab_close_button(
-        self,
-        on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
-        let hover = self.colors.secondary_hover;
-        self.tab_close()
-            .id("close-tab")
-            .cursor_pointer()
-            .hover(move |s| s.bg(rgb(hover)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(move |event, w, cx| {
-                cx.stop_propagation();
-                on_close(event, w, cx);
-            })
-    }
+pub fn tab_close_button(
+    ui: Ui,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let hover = ui.colors.secondary_hover;
+    tab_close(ui)
+        .id("close-tab")
+        .cursor_pointer()
+        .hover(move |s| s.bg(rgb(hover)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |event, w, cx| {
+            cx.stop_propagation();
+            on_close(event, w, cx);
+        })
 }

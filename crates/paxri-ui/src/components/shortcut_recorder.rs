@@ -1,5 +1,5 @@
 //! A focus-scoped control for recording a hardware key combination.
-use super::{ButtonVariant, DropdownContent, DropdownState, Icon, Ui, tooltip};
+use super::{ButtonVariant, DropdownContent, Icon, Ui, tooltip};
 use crate::terminal::keys::modifier_mask;
 use gpui::{prelude::*, *};
 use paxri_config::shortcuts::{Shortcut, modifier_labels};
@@ -161,7 +161,6 @@ impl RenderOnce for ShortcutRecorder {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ui = Ui::new(window, cx);
         let state = window.use_keyed_state((self.id.clone(), "recording"), cx, Recording::new);
-        let menu = DropdownState::local((self.id.clone(), "options").into(), window, cx);
         let recording = state.read(cx).is_listening();
         let focus = state.read(cx).focus.clone();
         let held = modifier_mask(state.read(cx).modifiers).unwrap_or_default();
@@ -283,9 +282,7 @@ impl RenderOnce for ShortcutRecorder {
         let actions = ui.actions_menu(
             (self.id.clone(), "actions"),
             format!("{} shortcut options", self.label).into(),
-            &menu,
             options,
-            cx,
         );
         let body = div()
             .w(px(236.))

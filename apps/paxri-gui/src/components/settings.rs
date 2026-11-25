@@ -1,44 +1,9 @@
-//! Desktop-specific input controls for the shared settings rows.
-use super::{Input, Select, Ui, input::EditingFinished};
+//! Desktop-specific text preference control for the shared settings rows.
+use super::{Input, input::EditingFinished};
 use gpui::{prelude::*, *};
 use std::collections::VecDeque;
 
 pub(crate) use paxri_ui::settings::controls::setting_field;
-
-impl Ui {
-    pub fn setting_choice<T: Clone + PartialEq + 'static, L: Into<SharedString>>(
-        self,
-        id: &'static str,
-        selected: T,
-        values: impl IntoIterator<Item = T>,
-        label: impl Fn(T) -> L,
-        change: impl Fn(&T, &mut Window, &mut App) + 'static,
-    ) -> Div {
-        let mut select = Select::new(id, selected, change);
-        for value in values {
-            let name = label(value.clone());
-            select = select.option(value, name);
-        }
-        setting_field(select)
-    }
-
-    pub fn setting_toggle(
-        self,
-        id: &'static str,
-        enabled: bool,
-        editable: bool,
-        change: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Div {
-        if editable {
-            div()
-                .flex()
-                .child(self.switch(id, enabled).on_click(change))
-        } else {
-            self.muted(if enabled { "On" } else { "Off" })
-                .whitespace_nowrap()
-        }
-    }
-}
 
 /// An editable preference that commits on Enter or blur and reconciles gateway replies.
 pub(crate) struct TextSetting {

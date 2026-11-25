@@ -18,7 +18,7 @@ use paxri_control::{Command, GuiChange};
 impl Dashboard {
     fn appearance_settings(&self, ui: Ui, cx: &Context<Self>) -> SettingsGroup {
         let settings = theme::current(cx);
-        let cards = theme_cards(*ui, settings.appearance, cx.listener(|view, mode: &Appearance, _, cx| {
+        let cards = theme_cards(ui, settings.appearance, cx.listener(|view, mode: &Appearance, _, cx| {
             view.send(Command::SetGui { change: GuiChange::Appearance(*mode) }, cx);
         }));
         let mut group = SettingsGroup::new(catalog::APPEARANCE);
@@ -231,8 +231,8 @@ impl Dashboard {
             let _ = view.update(cx, |view, cx| view.change_terminal_setting(change, cx));
         };
         let shortcut_change = change.clone();
-        sources.push((catalog::SHORTCUTS, Box::new(move || shortcuts::group(*ui, cx, shortcut_change))));
-        sources.push((catalog::TERMINAL_CONTROLS, Box::new(move || shortcuts::features_group(*ui, cx, change))));
+        sources.push((catalog::SHORTCUTS, Box::new(move || shortcuts::group(ui, cx, shortcut_change))));
+        sources.push((catalog::TERMINAL_CONTROLS, Box::new(move || shortcuts::features_group(ui, cx, change))));
         let selected = requested.map(|page| {
             if sources.iter().any(|(s, _)| catalog::page_for(*s).table == page) {
                 page

@@ -3,6 +3,19 @@ use gpui::{App, Entity, SharedString};
 use std::collections::HashSet;
 pub use store::SessionTitles;
 
+pub fn next_session_number(
+    hosted: impl IntoIterator<Item = paxri_control::terminal::managed::Key>,
+    last_number: usize,
+) -> usize {
+    hosted
+        .into_iter()
+        .map(|k| k.number)
+        .max()
+        .unwrap_or(0)
+        .max(last_number)
+        .saturating_add(1)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TabTitle {
     pty: Option<SharedString>,

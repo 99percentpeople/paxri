@@ -1,6 +1,8 @@
 use super::*;
-use alacritty_terminal::grid::Dimensions;
-use paxri_ui::terminal::mouse::{Cell, TouchMouseDrag, WheelTarget, report, wheel_input};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use jni::{EnvUnowned, objects::JClass};
+use paxri_ui::terminal::mouse::{TouchMouseDrag, WheelTarget, report, wheel_input};
+use std::sync::atomic::Ordering;
 
 pub(super) enum Gesture {
     Keyboard,
@@ -192,30 +194,6 @@ impl Session {
         [start.x, start.y, end.x, end.y, self.screen.font.cell.height]
             .map(|v| (v * scale).round() as i32)
     }
-
-    fn touch_position(&self, x: f32, y: f32) -> (usize, f32) {
-        let cell = self.screen.font.cell;
-        let last_row = self.screen.term.screen_lines() - 1;
-        let row = (y / cell.height).floor().clamp(0., last_row as f32);
-        (row as usize, x / cell.width)
-    }
-
-    fn mouse_cell(&self, x: f32, y: f32) -> Cell {
-        let (row, col) = self.touch_position(x, y);
-        Cell {
-            row: row as u16 + 1,
-            col: col
-                .floor()
-                .clamp(0., self.screen.term.last_column().0 as f32) as u16
-                + 1,
-        }
-    }
-
-    fn mouse_enabled(&self) -> bool {
-        self.connected()
-            && self.screen.term.grid().display_offset() == 0
-            && self.screen.term.mode().intersects(TermMode::MOUSE_MODE)
-    }
 }
 
 impl Mobile {
@@ -226,10 +204,10 @@ impl Mobile {
     }
 
     pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5], keys: Arc<KeybarSettings>, touchable: bool) {
-        let drag = self
-            .sessions
-            .get(&id)
-            .is_some_and(|s| s.mouse_enabled() && TouchMouseDrag::requested(*s.screen.term.mode()));
+        let drag = self.sessions.get(&id).is_some_and(|s| {
+            s.screen.mouse_enabled(s.connected())
+                && TouchMouseDrag::requested(*s.screen.term.mode())
+        });
         DRAG_SESSION.store(if drag { id } else { 0 }, Ordering::Relaxed);
         if self
             .touch_area
@@ -256,10 +234,10 @@ impl Mobile {
         match gesture {
             Gesture::Keyboard | Gesture::Tap { .. } if s.connected() => {
                 if let Gesture::Tap { x, y } = gesture
-                    && s.mouse_enabled()
+                    && s.screen.mouse_enabled(true)
                 {
                     let mode = *s.screen.term.mode();
-                    let cell = s.mouse_cell(x, y);
+                    let cell = s.screen.mouse_cell(x, y);
                     let mut click = report(mode, cell, 0, false, Modifiers::default());
                     if !click.is_empty() {
                         click.extend(report(mode, cell, 0, true, Modifiers::default()));
@@ -272,14 +250,9 @@ impl Mobile {
             Gesture::Select { x, y, start } => {
                 if !start {
                     let height = s.screen.term.screen_lines() as f32 * s.screen.font.cell.height;
-                    if y < 0. {
-                        s.screen.scroll(Scroll::Delta(1));
-                    }
-                    if y >= height {
-                        s.screen.scroll(Scroll::Delta(-1));
-                    }
+                    s.screen.scroll_for_edge(y, 0., height);
                 }
-                let (row, col) = s.touch_position(x, y);
+                let (row, col) = s.screen.grid_position(x, y);
                 if start {
                     s.screen.start_touch_selection(row, col);
                 } else {
@@ -287,12 +260,12 @@ impl Mobile {
                 }
             }
             Gesture::AppDrag { action, x, y } => {
-                let cell = s.mouse_cell(x, y);
+                let cell = s.screen.mouse_cell(x, y);
                 let mode = *s.screen.term.mode();
                 let bytes = match action {
                     0 => {
                         s.screen.term.selection = None;
-                        if s.mouse_enabled() {
+                        if s.screen.mouse_enabled(s.connected()) {
                             s.touch_mouse.begin(mode, cell)
                         } else {
                             Vec::new()
@@ -307,7 +280,7 @@ impl Mobile {
                 }
             }
             Gesture::MoveHandle { x, y, leading } => {
-                let (row, col) = s.touch_position(x, y);
+                let (row, col) = s.screen.grid_position(x, y);
                 s.screen.move_selection_handle(leading, row, col);
             }
             Gesture::FinishSelection { copy } => {
@@ -323,9 +296,9 @@ impl Mobile {
                 if s.connected() {
                     match gpui_mobile::packages::clipboard::get_text() {
                         Ok(Some(text)) => {
-                            let bracketed = s.screen.term.mode().contains(TermMode::BRACKETED_PASTE);
+                            let bytes = s.screen.paste_bytes(&text);
                             s.screen.term.selection = None;
-                            s.write_input(keys::paste(&text, bracketed));
+                            s.write_input(bytes);
                         }
                         Ok(None) => {}
                         Err(error) => Toast::show(error, self.window, cx),
@@ -334,15 +307,7 @@ impl Mobile {
             }
             Gesture::Scroll { dy, x, y, fling } => {
                 let mode = *s.screen.term.mode();
-                let target = if s.mouse_enabled() {
-                    WheelTarget::Mouse
-                } else if s.connected()
-                    && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
-                {
-                    WheelTarget::Arrows
-                } else {
-                    WheelTarget::History
-                };
+                let target = s.screen.wheel_target(s.connected(), false);
                 let cell = s.screen.font.cell;
                 let steps = s.wheel.steps(target, point(0., dy / cell.height));
                 if steps.1 == 0 {
@@ -360,7 +325,7 @@ impl Mobile {
                         let _ = activity_action(&self.android, ActivityAction::StopFling(id));
                     }
                 } else {
-                    let cell = s.mouse_cell(x, y);
+                    let cell = s.screen.mouse_cell(x, y);
                     let bytes = wheel_input(target, mode, cell, steps, Modifiers::default());
                     if !bytes.is_empty() {
                         let _ = s.input.send(Frame::Data(bytes));

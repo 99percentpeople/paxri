@@ -37,11 +37,12 @@ impl Dashboard {
         }
         if self
             .forward_filters
+            .scope
             .device
             .as_ref()
             .is_some_and(|peer| !status.peers.contains_key(peer))
         {
-            self.forward_filters.device = None;
+            self.forward_filters.scope.device = None;
         }
     }
 
@@ -102,7 +103,7 @@ impl Dashboard {
                     .row()
                     .pressed(self.devices_pane == Some(DevicesPane::Forwards))
                     .on_click(cx.listener(|v, _, _, cx| {
-                        v.forward_filters.reset(None, cx);
+                        v.forward_filters.for_device(None, cx);
                         v.show_devices_pane(DevicesPane::Forwards, cx);
                     })),
             )
@@ -111,15 +112,15 @@ impl Dashboard {
         DockNavigation::new("Devices", body)
     }
 
-    pub(crate) fn home(&self, ui: Ui, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> DockPanel {
+    pub(crate) fn home(&self, ui: Ui, width: Pixels, cx: &mut Context<Self>) -> DockPanel {
         let transition = self.gateway_transition();
         let status = self.status.as_ref().filter(|_| transition.is_none());
         let (content, action) = match (&self.devices_pane, status) {
             (_, None) => self.gateway_notice(transition, ui, cx),
-            (Some(DevicesPane::Sessions), Some(status)) => self.sessions_page(status, ui, window, cx),
+            (Some(DevicesPane::Sessions), Some(status)) => self.sessions_page(status, ui, cx),
             (Some(DevicesPane::Peer(peer)), Some(status)) => {
                 let action = self.can_open_shell(peer).then(|| self.new_session(peer, ui).into_any_element());
-                (self.device_detail(peer, status, ui, window, cx), action)
+                (self.device_detail(peer, status, ui, cx), action)
             }
             (Some(DevicesPane::Forwards), Some(status)) => {
                 let action = (!status.peers.is_empty()).then(|| ui.floating_action("add-rule", Icon::Plus, "Add forwarding rule")
@@ -139,7 +140,7 @@ impl Dashboard {
                 .child(ui.separator())
                 .child(
                     ListState::empty(Icon::Monitor, "No paired devices")
-                        .detail("Use + to pair your first device.").render(*ui),
+                        .detail("Use + to pair your first device.").render(ui),
                 ), Some(ui.floating_action("pair-first-device", Icon::Plus, "Pair a device")
                     .on_click(cx.listener(|v, _, w, cx| v.open_pairing(w, cx))).into_any_element())),
         };

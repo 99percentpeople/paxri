@@ -9,7 +9,6 @@ pub struct FilterToolbar {
     active: usize,
     fields: Vec<FilterField>,
     clear: Option<Box<dyn Fn(&mut Window, &mut App)>>,
-    state: Option<Entity<DropdownState>>,
 }
 
 struct FilterField {
@@ -32,7 +31,6 @@ impl FilterToolbar {
             active,
             fields: Vec::new(),
             clear: None,
-            state: None,
         }
     }
 
@@ -53,11 +51,6 @@ impl FilterToolbar {
         if self.active > 0 {
             self.clear = Some(Box::new(reset));
         }
-        self
-    }
-
-    pub fn with_state(mut self, state: &Entity<DropdownState>) -> Self {
-        self.state = Some(state.clone());
         self
     }
 
@@ -105,10 +98,7 @@ impl FilterToolbar {
 impl RenderOnce for FilterToolbar {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ui = Ui::new(window, cx);
-        let state = self
-            .state
-            .take()
-            .unwrap_or_else(|| DropdownState::local(self.id.into(), window, cx));
+        let state = DropdownState::local(self.id.into(), window, cx);
         let menu = self.menu(&state, ui, cx);
         let open = state.read(cx).is_open();
         let button = if self.active == 0 {

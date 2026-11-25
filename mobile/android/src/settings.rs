@@ -117,14 +117,11 @@ impl Mobile {
                 ),
             );
             let view = cx.entity().downgrade();
-            terminal = self.terminal_settings.group(
-                ui,
-                cx,
-                Some(&self.terminal_menus),
-                move |change, _, cx| {
+            terminal = self
+                .terminal_settings
+                .group(ui, cx, move |change, _, cx| {
                     let _ = view.update(cx, |view, cx| view.change_gui(change, cx));
-                },
-            );
+                });
         }
 
         let mut groups = vec![device, appearance, terminal];

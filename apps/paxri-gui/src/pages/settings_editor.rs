@@ -65,7 +65,7 @@ impl Dashboard {
         cx: &Context<Self>,
     ) -> crate::components::Button {
         let category = item.map(|section| section.table);
-        paxri_ui::settings::controls::category_button(*ui, item, selected, count, SettingsLayout::Desktop)
+        paxri_ui::settings::controls::category_button(ui, item, selected, count, SettingsLayout::Desktop)
             .on_click(cx.listener(move |dashboard, _, _, cx| {
                 let editor = &mut dashboard.settings_editor;
                 if !editor.query.is_empty() {
@@ -130,7 +130,7 @@ impl Dashboard {
         if pages.is_empty() {
             content = content
                 .child(
-                    paxri_ui::components::ListState::empty(paxri_ui::components::Icon::Search, "No matching settings").render(*ui),
+                    paxri_ui::components::ListState::empty(paxri_ui::components::Icon::Search, "No matching settings").render(ui),
                 )
                 .child(
                     div().flex().justify_center().child(
@@ -141,7 +141,7 @@ impl Dashboard {
         }
         for page in pages {
             if selected.is_none_or(|c| c == page.section.table) {
-                content = content.child(page.render(*ui, SettingsLayout::Desktop));
+                content = content.child(page.render(ui, SettingsLayout::Desktop));
             }
         }
 

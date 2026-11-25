@@ -49,6 +49,24 @@ pub fn session_entries<K: Ord, V>(
     entries
 }
 
+pub fn named_session_entries<V>(
+    name: SharedString,
+    scope: &str,
+    titles: &crate::terminal::title::SessionTitles,
+    hosted: impl IntoIterator<Item = paxri_control::terminal::managed::Key>,
+    local: impl IntoIterator<Item = (paxri_control::terminal::managed::Key, SharedString, bool, V)>,
+) -> BTreeMap<paxri_control::terminal::managed::Key, (SharedString, SessionLocation, Option<V>)> {
+    let mut entries = session_entries(name.clone(), hosted, local);
+    for (&key, (title, _, local)) in &mut entries {
+        if local.is_none()
+            && let Some(saved) = titles.get(scope, key)
+        {
+            *title = saved.label(&name);
+        }
+    }
+    entries
+}
+
 pub fn session_list_notice(
     total: usize,
     visible: usize,
@@ -93,7 +111,7 @@ impl<T: Default + 'static> ListFilters<T> {
     }
 }
 
-fn contains_terms(query: &str, fields: String) -> bool {
+pub(super) fn contains_terms(query: &str, fields: String) -> bool {
     let text = fields.to_lowercase();
     query.split_whitespace().all(|term| text.contains(term))
 }

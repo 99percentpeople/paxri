@@ -49,7 +49,7 @@ impl Dashboard {
             });
         let mut rows = rows.peekable();
         if rows.peek().is_none() {
-            return card.child(ListState::filtered("No matching devices").render(*ui));
+            return card.child(ListState::filtered("No matching devices").render(ui));
         }
         card.child(ListView::scrollable("paired-list").children(rows))
     }

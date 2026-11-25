@@ -92,6 +92,19 @@ impl SessionTitles {
             .map(|(_, t)| t)
     }
 
+    pub fn reserved_labels(
+        &self,
+        peer: &str,
+        fallback: &gpui::SharedString,
+        include: impl Fn(Key) -> bool,
+    ) -> Vec<gpui::SharedString> {
+        self.entries(peer)
+            .iter()
+            .filter(|(key, _)| include(*key))
+            .map(|(_, title)| title.label(fallback))
+            .collect()
+    }
+
     pub fn set(&mut self, peer: &str, key: Key, title: &TabTitle) -> io::Result<()> {
         if self.get(peer, key) == Some(title) {
             return Ok(());

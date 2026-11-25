@@ -14,7 +14,7 @@ use gpui::{prelude::*, *};
 pub(crate) use navigation::DockNavigation;
 pub use sidebar::DockSettings;
 pub use state::{DockDrag, DockPlacement, DockState};
-pub use tabs::DockTabs;
+pub use tabs::{DockTabs, tab, tab_close, tab_close_button};
 
 const DEFAULT_SIDEBAR_WIDTH: Pixels = px(220.);
 const TOP_TAB_HEIGHT: Pixels = px(31.);

@@ -9,7 +9,7 @@ pub use filter_toolbar::FilterToolbar;
 mod select;
 mod shortcut_recorder;
 pub use shortcut_recorder::ShortcutRecorder;
-pub use dropdown::{Dropdown, DropdownContent, DropdownState, DropdownTrigger};
+pub use dropdown::{ActionsMenu, ActiveDropdown, Dropdown, DropdownContent, DropdownState, DropdownTrigger};
 pub use select::Select;
 pub mod focus;
 pub mod input;

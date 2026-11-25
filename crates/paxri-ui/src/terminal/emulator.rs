@@ -445,6 +445,108 @@ impl Emulator {
         }
     }
 
+    pub fn scroll_metrics(&self) -> crate::components::ScrollMetrics {
+        let grid = self.term.grid();
+        crate::components::ScrollMetrics::new(
+            grid.screen_lines() as f32,
+            grid.history_size() as f32,
+            (grid.history_size() - grid.display_offset()) as f32,
+        )
+    }
+
+    pub fn scroll_to_offset(&mut self, offset: f32) -> bool {
+        let grid = self.term.grid();
+        let from_bottom = grid.history_size().saturating_sub(offset.round() as usize);
+        let delta = from_bottom as i32 - grid.display_offset() as i32;
+        if delta != 0 {
+            self.scroll(Scroll::Delta(delta));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn scroll_for_edge(&mut self, y: f32, top: f32, bottom: f32) {
+        if y < top {
+            self.scroll(Scroll::Delta(1));
+        } else if y >= bottom {
+            self.scroll(Scroll::Delta(-1));
+        }
+    }
+
+    pub fn mouse_enabled(&self, connected: bool) -> bool {
+        connected
+            && self.term.grid().display_offset() == 0
+            && self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    pub fn grid_position(&self, x: f32, y: f32) -> (usize, f32) {
+        let last = self.term.screen_lines() - 1;
+        let row = (y / self.font.cell.height)
+            .floor()
+            .clamp(0., last as f32) as usize;
+        (row, x / self.font.cell.width)
+    }
+
+    pub fn mouse_cell(&self, x: f32, y: f32) -> super::mouse::Cell {
+        let (row, col) = self.grid_position(x, y);
+        super::mouse::Cell {
+            col: col
+                .floor()
+                .clamp(0., self.term.last_column().0 as f32) as u16
+                + 1,
+            row: row as u16 + 1,
+        }
+    }
+
+    pub fn wheel_target(&self, connected: bool, bypass_app: bool) -> super::mouse::WheelTarget {
+        use super::mouse::WheelTarget;
+        if !bypass_app && self.mouse_enabled(connected) {
+            WheelTarget::Mouse
+        } else if !bypass_app
+            && connected
+            && self
+                .term
+                .mode()
+                .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+        {
+            WheelTarget::Arrows
+        } else {
+            WheelTarget::History
+        }
+    }
+
+    pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        super::keys::paste(text, self.term.mode().contains(TermMode::BRACKETED_PASTE))
+    }
+
+    pub fn sync_appearance(
+        &mut self,
+        app_palette: &'static crate::theme::Palette,
+        appearance: &crate::theme::TerminalAppearance,
+    ) -> u32 {
+        self.set_default_cursor(super::cursor::default_style(appearance));
+        self.palette = crate::theme::terminal_palette(appearance.scheme, app_palette);
+        super::display::color(
+            Color::Named(NamedColor::Background),
+            self.palette,
+            self.term.colors(),
+        )
+    }
+
+    pub fn cursor_for_paint(
+        &self,
+        active: bool,
+        composing: bool,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Option<alacritty_terminal::vte::ansi::CursorShape> {
+        let style = self.display_cursor_style();
+        let blink = style.blinking && active && !composing;
+        super::cursor::blink_visible(blink, super::cursor::CursorCell::visible(self), window, cx)
+            .then_some(style.shape)
+    }
+
     pub fn text_between(&self, start: Point, mut end: Point) -> String {
         // A wide glyph that wrapped before the last column starts on the next
         // row. Its leading spacer alone contributes no character to a copy.
@@ -708,5 +810,39 @@ mod tests {
         assert_eq!(em.visible_text(), format!("old output\n{prompt}"));
         em.process(b"!");
         assert_eq!(em.visible_text(), format!("old output\n{prompt}!"));
+    }
+
+    #[test]
+    fn shared_pointer_wheel_paste_and_scroll_helpers_track_emulator_state() {
+        use super::super::mouse::{Cell, WheelTarget};
+        let mut em = Emulator::new(grid(4, 10));
+        em.font.cell = CellSize { width: 10., height: 20. };
+        assert_eq!(em.grid_position(25., 45.), (2, 2.5));
+        assert_eq!(em.mouse_cell(25., 45.), Cell { col: 3, row: 3 });
+        assert_eq!(em.mouse_cell(999., 999.), Cell { col: 10, row: 4 });
+        assert!(!em.mouse_enabled(true));
+        assert_eq!(em.wheel_target(true, false), WheelTarget::History);
+        assert_eq!(em.paste_bytes("a\nb"), b"a\rb");
+
+        em.process(b"\x1b[?2004h\x1b[?1000h");
+        assert!(em.mouse_enabled(true));
+        assert!(!em.mouse_enabled(false));
+        assert_eq!(em.wheel_target(true, false), WheelTarget::Mouse);
+        assert_eq!(em.wheel_target(true, true), WheelTarget::History);
+        assert_eq!(em.paste_bytes("a\nb"), b"\x1b[200~a\rb\x1b[201~");
+
+        em.process(b"\x1b[?1000l\x1b[?1049h\x1b[?1007h");
+        assert_eq!(em.wheel_target(true, false), WheelTarget::Arrows);
+        assert_eq!(em.wheel_target(false, false), WheelTarget::History);
+        em.process(b"\x1b[?1049l");
+
+        for i in 0..10 {
+            em.process(format!("line {i}\r\n").as_bytes());
+        }
+        assert!(em.scroll_to_offset(0.));
+        assert_eq!(em.term.grid().display_offset(), em.term.grid().history_size());
+        assert!(!em.scroll_to_offset(0.));
+        assert!(em.scroll_to_offset(em.term.grid().history_size() as f32));
+        assert_eq!(em.term.grid().display_offset(), 0);
     }
 }

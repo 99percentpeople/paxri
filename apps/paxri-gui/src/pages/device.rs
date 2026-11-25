@@ -4,12 +4,12 @@ use crate::{
     components::{
         Button,
         ButtonVariant::Destructive,
-        Dialog, DialogContent, DialogMode, DialogSuccess, Icon, Ui,
+        Dialog, DialogContent, DialogMode, DialogSuccess, Ui,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, DevicePlatform, Status};
-use paxri_ui::components::{DeviceCounts, DropdownState};
+use paxri_ui::components::DeviceCounts;
 
 impl Dashboard {
     pub(super) fn device_counts(&self, peer: &str, status: &Status) -> DeviceCounts {
@@ -89,19 +89,21 @@ impl Dashboard {
         peer: &str,
         status: &Status,
         ui: Ui,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let Some(id) = status.peers.get(peer) else { return overview() };
         let short = status.short_peer_ids().remove(peer).unwrap_or_else(|| id.clone());
         let name = status.peer_display_name(peer);
-        let state = DropdownState::local(SharedString::from(format!("device-actions-{id}")).into(), window, cx);
         let view = cx.weak_entity();
         let selected = peer.to_owned();
         let expected = id.clone();
-        let menu = ui.device_actions(name, &state, cx, move |w, cx| {
-            let _ = view.update(cx, |v, cx| v.confirm_unpair(&selected, &expected, w, cx));
-        });
+        let menu = ui.device_actions(
+            SharedString::from(format!("device-actions-{id}")),
+            name,
+            move |w, cx| {
+                let _ = view.update(cx, |v, cx| v.confirm_unpair(&selected, &expected, w, cx));
+            },
+        );
         let header = ui.device_heading(
             None,
             name.to_owned().into(),
@@ -109,24 +111,28 @@ impl Dashboard {
             Some((id, short)),
         ).child(menu);
         let counts = self.device_counts(peer, status);
+        let show_forwards = counts.forwards.is_some_and(|n| n > 0)
+            || status.peer_platform(peer) == DevicePlatform::Android
+            || status.peer_supports_forward_rules(peer);
         let selected = peer.to_owned();
-        let forwards = ui
-            .counted_navigation_row("device-forwards", Icon::Forward, "Port forwarding", counts.forwards)
-            .on_click(cx.listener(move |v, _, _, cx| {
-                v.forward_filters.reset(Some(selected.clone()), cx);
-                v.show_devices_pane(DevicesPane::Forwards, cx);
-            }));
         let session_peer = peer.to_owned();
         overview()
             .py_2()
             .child(header)
-            .child(ui.separator())
-            .child(self.connection_history.connection_section(id, status.connections_for(peer), status.peer_presence, *ui))
-            .child(ui.separator())
-            .child(ui.counted_navigation_row("device-sessions", Icon::Terminal, "Sessions", counts.sessions)
-                .on_click(cx.listener(move |v, _, _, cx| v.show_sessions(Some(session_peer.clone()), cx))))
-            // Android uses this gateway to store rules, including its first one.
-            .when(counts.forwards.is_some_and(|n| n > 0) || status.peer_platform(peer) == DevicePlatform::Android
-                || status.peer_supports_forward_rules(peer), |page| page.child(ui.separator()).child(forwards))
+            .child(ui.device_detail_sections(
+                self.connection_history.connection_section(
+                    id,
+                    status.connections_for(peer),
+                    status.peer_presence,
+                    ui,
+                ),
+                counts,
+                show_forwards,
+                cx.listener(move |v, _, _, cx| v.show_sessions(Some(session_peer.clone()), cx)),
+                cx.listener(move |v, _, _, cx| {
+                    v.forward_filters.for_device(Some(selected.clone()), cx);
+                    v.show_devices_pane(DevicesPane::Forwards, cx);
+                }),
+            ))
     }
 }

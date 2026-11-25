@@ -1,8 +1,5 @@
 use super::Terminal;
-use alacritty_terminal::{
-    grid::{Dimensions, Scroll},
-    term::TermMode,
-};
+use alacritty_terminal::{grid::Scroll, term::TermMode};
 use gpui::{
     ClipboardItem, Context, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, ScrollWheelEvent, Window,
@@ -53,20 +50,13 @@ impl Terminal {
     }
 
     pub(super) fn mouse_cell(&self, position: Point<Pixels>) -> Cell {
-        let (row, x) = self.cell_at(position);
-        Cell {
-            col: x
-                .floor()
-                .clamp(0., self.emulator.term.last_column().0 as f32) as u16
-                + 1,
-            row: row as u16 + 1,
-        }
+        let local = position - self.viewport.origin;
+        self.emulator
+            .mouse_cell(f32::from(local.x), f32::from(local.y))
     }
 
     pub(super) fn mouse_enabled(&self) -> bool {
-        self.is_running()
-            && self.emulator.term.grid().display_offset() == 0
-            && self.emulator.term.mode().intersects(TermMode::MOUSE_MODE)
+        self.emulator.mouse_enabled(self.is_running())
     }
 
     pub(super) fn mouse_down(
@@ -168,11 +158,11 @@ impl Terminal {
                 self.selecting = false;
                 return;
             }
-            if e.position.y < self.viewport.top() {
-                self.emulator.scroll(Scroll::Delta(1));
-            } else if e.position.y >= self.viewport.bottom() {
-                self.emulator.scroll(Scroll::Delta(-1));
-            }
+            self.emulator.scroll_for_edge(
+                f32::from(e.position.y),
+                f32::from(self.viewport.top()),
+                f32::from(self.viewport.bottom()),
+            );
             self.extend_selection(e.position, cx);
         } else if let Some(code) = e.pressed_button.and_then(button_code)
             && self.mouse.held & (1 << code) != 0
@@ -207,16 +197,9 @@ impl Terminal {
 
     pub(super) fn wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let mode = *self.emulator.term.mode();
-        let target = if self.mouse_enabled() && !e.modifiers.shift && !self.selecting {
-            WheelTarget::Mouse
-        } else if !e.modifiers.shift
-            && self.is_running()
-            && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
-        {
-            WheelTarget::Arrows
-        } else {
-            WheelTarget::History
-        };
+        let target = self
+            .emulator
+            .wheel_target(self.is_running(), e.modifiers.shift || self.selecting);
         let cell = self.emulator.font.cell;
         let delta = match e.delta {
             gpui::ScrollDelta::Pixels(p) => gpui::point(f32::from(p.x) / cell.width, f32::from(p.y) / cell.height),

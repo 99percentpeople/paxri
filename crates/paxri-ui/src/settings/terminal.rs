@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     components::{
-        DropdownState, Select, Ui,
+        Select, Ui,
         input::{EditingFinished, Input, NumberFormat, NumberStep},
     },
     terminal::preview::TerminalPreview,
@@ -220,7 +220,6 @@ impl TerminalSettings {
         &self,
         ui: Ui,
         cx: &App,
-        menus: Option<&[Entity<DropdownState>; 3]>,
         change: impl Fn(GuiChange, &mut Window, &mut App) + 'static,
     ) -> SettingsGroup {
         let change = Rc::new(change);
@@ -234,11 +233,7 @@ impl TerminalSettings {
         let schemes = scheme_select(ui, style.scheme, move |v, w, cx| {
             on_scheme(GuiChange::Scheme(*v), w, cx)
         });
-        group.grouped_setting(
-            "Text",
-            catalog::SCHEME,
-            setting_field(schemes.with_optional_state(menus.map(|m| &m[0]))),
-        );
+        group.grouped_setting("Text", catalog::SCHEME, setting_field(schemes));
 
         let selected = fonts
             .custom_face(&style.font_family)
@@ -260,11 +255,7 @@ impl TerminalSettings {
                     .child(font.family.clone())
             });
         }
-        group.grouped_setting(
-            "Text",
-            catalog::FONT_FAMILY,
-            setting_field(families.with_optional_state(menus.map(|m| &m[1]))),
-        );
+        group.grouped_setting("Text", catalog::FONT_FAMILY, setting_field(families));
         for (spec, field) in [
             catalog::FONT_SIZE,
             catalog::LINE_HEIGHT,
@@ -304,11 +295,7 @@ impl TerminalSettings {
                 )
             });
         }
-        group.grouped_setting(
-            "Cursor",
-            catalog::CURSOR_SHAPE,
-            setting_field(shapes.with_optional_state(menus.map(|m| &m[2]))),
-        );
+        group.grouped_setting("Cursor", catalog::CURSOR_SHAPE, setting_field(shapes));
         group.grouped_setting(
             "Cursor",
             catalog::CURSOR_BLINK,
