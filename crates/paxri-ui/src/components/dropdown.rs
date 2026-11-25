@@ -4,8 +4,6 @@ use super::{
     *,
 };
 use std::rc::Rc;
-#[cfg(target_os = "android")]
-use gpui::Anchor as Corner;
 
 type SelectAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -23,7 +21,8 @@ pub struct DropdownState {
     scroll: ScrollHandle,
     trigger_bounds: Option<Bounds<Pixels>>,
     opening_index: usize,
-    expansion: Pixels,
+    expansion_up: Pixels,
+    expansion_down: Pixels,
 }
 
 impl DropdownState {
@@ -87,7 +86,8 @@ impl DropdownState {
             scroll: ScrollHandle::new(),
             trigger_bounds: None,
             opening_index: 0,
-            expansion: px(0.),
+            expansion_up: px(0.),
+            expansion_down: px(0.),
         }
     }
 
@@ -150,7 +150,8 @@ impl DropdownState {
         self.open = true;
         self.item_count = count;
         self.opening_index = selected.unwrap_or(0);
-        self.expansion = px(0.);
+        self.expansion_up = px(0.);
+        self.expansion_down = px(0.);
         let current = cx.entity_id();
         let previous = cx
             .try_global::<ActiveDropdown>()
@@ -161,7 +162,7 @@ impl DropdownState {
             let _ = previous.update(cx, Self::dismiss);
         }
         if let Some(trigger) = self.trigger_bounds {
-            let placement = self.field_placement(trigger, count, window);
+            let placement = self.field_placement(trigger, count, window, cx);
             self.scroll.set_offset(point(px(0.), -placement.opening_scroll));
             self.highlighted = selected;
             cx.notify();
@@ -176,7 +177,7 @@ impl DropdownState {
             return;
         }
         if let Some(trigger) = self.trigger_bounds {
-            let placement = self.field_placement(trigger, count, window);
+            let placement = self.field_placement(trigger, count, window, cx);
             let offset = -self.scroll.offset().y;
             let start = MENU_ROW_HEIGHT * index as f32;
             let end = start + MENU_ROW_HEIGHT + select_inset() * 2.;
@@ -198,7 +199,7 @@ impl DropdownState {
         let menu = Self::active(cx)?;
         let menu = menu.read(cx);
         menu.trigger_bounds
-            .map(|trigger| menu.field_placement(trigger, menu.item_count, window).top)
+            .map(|trigger| menu.field_placement(trigger, menu.item_count, window, cx).top)
     }
 
     fn field_placement(
@@ -206,15 +207,18 @@ impl DropdownState {
         trigger: Bounds<Pixels>,
         count: usize,
         window: &Window,
+        cx: &App,
     ) -> SelectPlacement {
+        let insets = popup_insets(window, cx);
         SelectPlacement::new(
             trigger.center().y,
             self.opening_index,
             count,
             window.viewport_size().height,
-            popup_margin(window),
+            insets.top,
+            insets.bottom,
         )
-        .expanded(self.expansion)
+        .expanded(self.expansion_up, self.expansion_down)
     }
 
     fn scroll_field(
@@ -224,9 +228,10 @@ impl DropdownState {
         cx: &mut Context<Self>,
     ) {
         let offset = -self.scroll.offset().y;
-        let (growth, next_offset) = placement.scroll_by(offset, distance);
-        if growth > px(0.) || next_offset != offset {
-            self.expansion += growth;
+        let (grow_up, grow_down, next_offset) = placement.scroll_by(offset, distance);
+        if grow_up > px(0.) || grow_down > px(0.) || next_offset != offset {
+            self.expansion_up += grow_up;
+            self.expansion_down += grow_down;
             self.scroll.set_offset(point(px(0.), -next_offset));
             cx.notify();
         }
@@ -480,30 +485,35 @@ impl DropdownContent {
     ) -> Deferred {
         let ui = Ui::new(window, cx);
         let viewport = window.viewport_size();
+        let insets = popup_insets(window, cx);
+        let safe_width = (viewport.width - insets.left - insets.right).max(px(1.));
+        let safe_height = (viewport.height - insets.top - insets.bottom).max(px(1.));
         let outside = state.clone();
         let menu = state.read(cx);
         let count = self.items.len();
-        let mut height = (viewport.height - px(48.)).max(px(32.));
+        let mut height = safe_height;
         let mut offset = SPACE_1;
         let mut list = ui
             .popover("content")
             .flex_none()
             .whitespace_nowrap()
-            .max_w((viewport.width - popup_margin(window) * 2.).max(px(1.)));
+            .max_w(safe_width);
         if layout == DropdownLayout::Filters {
-            list = list.w(px(240.));
-            height = height.min(px(440.));
+            list = list.w(px(240.).min(safe_width));
+            height = safe_height.min(px(440.));
         }
         if layout == DropdownLayout::AboveEnd {
-            height = (viewport.height - FLOATING_ACTION_CLEARANCE - popup_margin(window)).max(MENU_ROW_HEIGHT);
+            height = (safe_height - FLOATING_ACTION_CLEARANCE)
+                .max(MENU_ROW_HEIGHT)
+                .min(safe_height);
             offset = -SPACE_2;
-            list = list.min_w(px(176.));
+            list = list.min_w(px(176.).min(safe_width));
         }
         if layout == DropdownLayout::Field
             && let Some(trigger) = menu.trigger_bounds
         {
-            let placement = menu.field_placement(trigger, count, window);
-            list = list.w(trigger.size.width);
+            let placement = menu.field_placement(trigger, count, window, cx);
+            list = list.w(trigger.size.width.min(safe_width));
             height = placement.height;
             offset = placement.top - trigger.bottom();
         }
@@ -513,14 +523,14 @@ impl DropdownContent {
             .on_mouse_down_out(move |_, _, cx| outside.update(cx, DropdownState::dismiss));
         if layout == DropdownLayout::Field {
             let state = state.clone();
-            // A wheel delta is shared between revealing more rows and scrolling the list.
+            // A wheel or touch-pan delta is shared between expanding into safe space and scrolling.
             // Clip and position rows with the handle, without GPUI also applying that delta.
             list = list
                 .overflow_hidden()
                 .on_scroll_wheel(move |event, window, cx| {
                     state.update(cx, |menu, cx| {
                         if let Some(trigger) = menu.trigger_bounds {
-                            let placement = menu.field_placement(trigger, count, window);
+                            let placement = menu.field_placement(trigger, count, window, cx);
                             let distance = -event.delta.pixel_delta(window.line_height()).y;
                             menu.scroll_field(&placement, distance, cx);
                         }
@@ -557,22 +567,140 @@ impl DropdownContent {
                 });
             list = list.child(row);
         }
-        deferred(
-            anchored()
-                .anchor(match layout {
-                    DropdownLayout::End | DropdownLayout::Filters => Corner::TopRight,
-                    DropdownLayout::AboveEnd => Corner::BottomRight,
-                    _ => Corner::TopLeft,
-                })
-                .offset(point(px(0.), offset))
-                .snap_to_window_with_margin(px(6.))
-                .child(list),
-        )
+        deferred(ClampedPopup {
+            corner: match layout {
+                DropdownLayout::End | DropdownLayout::Filters => PopupCorner::TopRight,
+                DropdownLayout::AboveEnd => PopupCorner::BottomRight,
+                _ => PopupCorner::TopLeft,
+            },
+            offset: point(px(0.), offset),
+            insets,
+            child: list.into_any_element(),
+        })
     }
 }
 
-fn popup_margin(window: &Window) -> Pixels {
-    px(6.) + window.client_inset().unwrap_or_default()
+fn popup_insets(window: &Window, cx: &App) -> Edges<Pixels> {
+    let margin = px(6.) + window.client_inset().unwrap_or_default();
+    let safe = theme::safe_area(cx);
+    Edges {
+        top: safe.top + margin,
+        right: safe.right + margin,
+        bottom: safe.bottom + margin,
+        left: safe.left + margin,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PopupCorner {
+    TopLeft,
+    TopRight,
+    BottomRight,
+}
+
+fn clamp_popup(
+    anchor: Point<Pixels>,
+    corner: PopupCorner,
+    size: Size<Pixels>,
+    offset: Point<Pixels>,
+    viewport: Size<Pixels>,
+    insets: Edges<Pixels>,
+) -> Point<Pixels> {
+    let mut origin = match corner {
+        PopupCorner::TopLeft => anchor,
+        PopupCorner::TopRight => point(anchor.x - size.width, anchor.y),
+        PopupCorner::BottomRight => point(anchor.x - size.width, anchor.y - size.height),
+    } + offset;
+    let min_x = insets.left;
+    let max_x = (viewport.width - insets.right - size.width).max(min_x);
+    let min_y = insets.top;
+    let max_y = (viewport.height - insets.bottom - size.height).max(min_y);
+    origin.x = origin.x.clamp(min_x, max_x);
+    origin.y = origin.y.clamp(min_y, max_y);
+    origin
+}
+
+struct ClampedPopup {
+    corner: PopupCorner,
+    offset: Point<Pixels>,
+    insets: Edges<Pixels>,
+    child: AnyElement,
+}
+
+impl IntoElement for ClampedPopup {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ClampedPopup {
+    type RequestLayoutState = LayoutId;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let child_id = self.child.request_layout(window, cx);
+        let style = Style {
+            position: Position::Absolute,
+            display: Display::Flex,
+            ..Style::default()
+        };
+        let layout_id = window.request_layout(style, [child_id], cx);
+        (layout_id, child_id)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        child_id: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let child_bounds = window.layout_bounds(*child_id);
+        let origin = clamp_popup(
+            bounds.origin,
+            self.corner,
+            child_bounds.size,
+            self.offset,
+            window.viewport_size(),
+            self.insets,
+        );
+        let delta = origin - child_bounds.origin;
+        let delta = point(delta.x.round(), delta.y.round());
+        window.with_element_offset(delta, |window| {
+            self.child.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _child_id: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
 }
 
 fn select_inset() -> Pixels {
@@ -584,58 +712,81 @@ struct SelectPlacement {
     height: Pixels,
     opening_scroll: Pixels,
     content_height: Pixels,
-    growth_left: Pixels,
+    max_growth: Pixels,
+    room_above: Pixels,
+    room_below: Pixels,
 }
 
 impl SelectPlacement {
-    fn new(center: Pixels, index: usize, count: usize, viewport: Pixels, margin: Pixels) -> Self {
+    fn new(
+        center: Pixels,
+        index: usize,
+        count: usize,
+        viewport: Pixels,
+        top_margin: Pixels,
+        bottom_margin: Pixels,
+    ) -> Self {
+        let safe_height = (viewport - top_margin - bottom_margin).max(px(1.));
         // The outer border and padding surround a list of equal-height menu items.
         let total = select_inset() * 2. + MENU_ROW_HEIGHT * count as f32;
         let max_height = total
             .min(select_inset() * 2. + MENU_ROW_HEIGHT * 9.)
-            .min((viewport - margin * 2.).max(px(1.)));
+            .min(safe_height);
         let row_center =
             select_inset() + MENU_ROW_HEIGHT * (index.min(count.saturating_sub(1)) as f32 + 0.5);
-        let below = (viewport - margin - center).max(px(0.));
-        // Keep the checked row over the field. Near the bottom, open with only the
-        // rows that fit around it. At the end of the list its short tail already fits.
-        let height = if total - row_center <= below {
-            max_height
-        } else {
-            (below + below.min(row_center))
-                .max(MENU_ROW_HEIGHT + select_inset() * 2.)
-                .min(max_height)
-        };
-        let half_row = (select_inset() + MENU_ROW_HEIGHT * 0.5).min(height * 0.5);
-        let center = center.clamp(
-            margin + half_row,
-            (viewport - margin - half_row).max(margin + half_row),
-        );
-        let overflow = total - height;
-        let centered_scroll = (row_center - height * 0.5).clamp(px(0.), overflow);
-        let top = (center - row_center + centered_scroll)
-            .clamp(margin, (viewport - margin - height).max(margin));
+        let min_height = (MENU_ROW_HEIGHT + select_inset() * 2.).min(max_height);
+        let half_min = min_height * 0.5;
+        let max_center = (viewport - bottom_margin - half_min).max(top_margin + half_min);
+        let center = center.clamp(top_margin + half_min, max_center);
+
+        // Keep the checked row aligned with the trigger center while expanding into all
+        // available safe space on both sides instead of capping one side by the other.
+        let space_above = (center - top_margin).max(px(0.));
+        let space_below = (viewport - bottom_margin - center).max(px(0.));
+        let max_above = row_center.min(space_above);
+        let max_below = (total - row_center).min(space_below);
+        let height = (max_above + max_below).max(min_height).min(max_height);
+        let above = (height * 0.5)
+            .min(max_above)
+            .max((height - max_below).min(max_above));
+        let max_top = (viewport - bottom_margin - height).max(top_margin);
+        let top = (center - above).clamp(top_margin, max_top);
+        let overflow = (total - height).max(px(0.));
+        let opening_scroll = (top + row_center - center).clamp(px(0.), overflow);
         Self {
             top,
             height,
-            opening_scroll: (top + row_center - center).clamp(px(0.), overflow),
+            opening_scroll,
             content_height: total,
-            growth_left: (max_height - height).min(top - margin),
+            max_growth: (max_height - height).max(px(0.)),
+            room_above: (top - top_margin).max(px(0.)),
+            room_below: (viewport - bottom_margin - (top + height)).max(px(0.)),
         }
     }
 
-    fn expanded(mut self, amount: Pixels) -> Self {
-        let growth = amount.min(self.growth_left);
-        self.top -= growth;
-        self.height += growth;
-        self.growth_left -= growth;
+    fn expanded(mut self, up: Pixels, down: Pixels) -> Self {
+        let up = up.clamp(px(0.), self.max_growth.min(self.room_above));
+        self.top -= up;
+        self.height += up;
+        self.max_growth -= up;
+        self.room_above -= up;
+        let down = down.clamp(px(0.), self.max_growth.min(self.room_below));
+        self.height += down;
+        self.max_growth -= down;
+        self.room_below -= down;
         self
     }
 
-    fn scroll_by(&self, offset: Pixels, distance: Pixels) -> (Pixels, Pixels) {
-        let target = (offset + distance).clamp(px(0.), self.content_height - self.height);
-        let growth = (target - offset).clamp(px(0.), self.growth_left);
-        (growth, target - growth)
+    fn scroll_by(&self, offset: Pixels, distance: Pixels) -> (Pixels, Pixels, Pixels) {
+        let max_offset = (self.content_height - self.height).max(px(0.));
+        let target = (offset + distance).clamp(px(0.), max_offset);
+        if distance >= px(0.) {
+            let grow_up = (target - offset).clamp(px(0.), self.max_growth.min(self.room_above));
+            (grow_up, px(0.), target - grow_up)
+        } else {
+            let grow_down = (offset - target).clamp(px(0.), self.max_growth.min(self.room_below));
+            (px(0.), grow_down, target)
+        }
     }
 }
 
@@ -815,14 +966,14 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
 
 #[cfg(test)]
 mod form_controls {
-    use super::{MenuAction::*, SelectPlacement, navigation};
-    use gpui::px;
+    use super::{MenuAction::*, PopupCorner, SelectPlacement, clamp_popup, navigation};
+    use gpui::{Edges, point, px, size};
 
     #[test]
     fn selected_row_aligns_with_the_trigger_and_scrolls_into_view_on_open() {
         // Three choices fit without scrolling. Changing the selection moves the popup.
         for (i, top) in [(0, 277.), (1, 243.), (2, 209.)] {
-            let p = SelectPlacement::new(px(300.), i, 3, px(600.), px(6.));
+            let p = SelectPlacement::new(px(300.), i, 3, px(600.), px(6.), px(6.));
             assert_eq!(
                 (p.top, p.opening_scroll, p.height),
                 (px(top), px(0.), px(114.))
@@ -830,11 +981,11 @@ mod form_controls {
         }
         // A long list can align the current row even when the window constrains its top.
         for center in [40., 180., 560.] {
-            let p = SelectPlacement::new(px(center), 24, 60, px(600.), px(6.));
+            let p = SelectPlacement::new(px(center), 24, 60, px(600.), px(6.), px(6.));
             assert_eq!(p.top + px(6. + 24.5 * 34.) - p.opening_scroll, px(center));
             assert!(p.top >= px(6.) && p.top + p.height <= px(594.));
         }
-        let p = SelectPlacement::new(px(585.), 0, 3, px(600.), px(6.));
+        let p = SelectPlacement::new(px(585.), 0, 3, px(600.), px(6.), px(6.));
         assert_eq!(
             (p.top, p.height, p.opening_scroll),
             (px(548.), px(46.), px(0.))
@@ -842,28 +993,96 @@ mod form_controls {
     }
 
     #[test]
-    fn bottom_constrained_select_grows_by_the_downward_scroll_before_moving_its_contents() {
-        let open = || SelectPlacement::new(px(550.), 24, 60, px(600.), px(6.));
+    fn bottom_constrained_select_aligns_selection_and_expands_upward() {
+        // Middle selection near bottom: stays aligned with trigger AND immediately expands upward to 9 rows.
+        let p = SelectPlacement::new(px(550.), 24, 60, px(600.), px(6.), px(6.));
+        assert_eq!((p.top, p.height), (px(276.), px(318.)));
+        assert_eq!(p.top + px(6. + 24.5 * 34.) - p.opening_scroll, px(550.));
+
+        // 3rd of 4 items near bottom safe area: aligns item 2 with center and shows items 0..=2 above it,
+        // then scrolling downward grows the top edge upward to reveal item 3.
+        let open = || SelectPlacement::new(px(803.), 2, 4, px(880.), px(38.), px(54.));
         let initial = open();
-        let offset = initial.opening_scroll;
-        assert_eq!((initial.top, initial.height), (px(506.), px(88.)));
-        assert_eq!(
-            initial.scroll_by(offset, px(-8.)),
-            (px(0.), offset - px(8.))
+        assert_eq!((initial.top, initial.height, initial.opening_scroll), (px(712.), px(114.), px(0.)));
+        assert_eq!(initial.top + px(6. + 2.5 * 34.) - initial.opening_scroll, px(803.));
+        let (up, down, next_scroll) = initial.scroll_by(initial.opening_scroll, px(34.));
+        assert_eq!((up, down, next_scroll), (px(34.), px(0.), px(0.)));
+        let grown = open().expanded(up, down);
+        assert_eq!((grown.top, grown.height), (px(678.), px(148.)));
+
+        // Last of 4 items near top safe area: aligns item 3 with center, scrolling upward grows downward.
+        let top_open = || SelectPlacement::new(px(61.), 3, 4, px(880.), px(38.), px(54.));
+        let top_initial = top_open();
+        assert_eq!((top_initial.top, top_initial.height, top_initial.opening_scroll), (px(38.), px(46.), px(102.)));
+        let (up, down, next_scroll) = top_initial.scroll_by(top_initial.opening_scroll, px(-68.));
+        assert_eq!((up, down, next_scroll), (px(0.), px(68.), px(34.)));
+        let top_grown = top_open().expanded(up, down);
+        assert_eq!((top_grown.top, top_grown.height), (px(38.), px(114.)));
+    }
+
+    #[test]
+    fn select_placement_excludes_asymmetric_safe_area_insets() {
+        let top_inset = px(38.);
+        let bottom_inset = px(54.);
+        let viewport = px(880.);
+        for center in [45., 120., 440., 790., 840.] {
+            let p = SelectPlacement::new(px(center), 24, 60, viewport, top_inset, bottom_inset);
+            assert!(p.top >= top_inset, "center={center}: top={:?}", p.top);
+            assert!(
+                p.top + p.height <= viewport - bottom_inset,
+                "center={center}: bottom={:?}",
+                p.top + p.height
+            );
+            assert_eq!(p.height, px(318.));
+            let expanded = p.expanded(px(1000.), px(1000.));
+            assert!(expanded.top >= top_inset);
+            assert!(expanded.top + expanded.height <= viewport - bottom_inset);
+        }
+        // A tall soft keyboard shrinks the safe height cleanly below the 9-row cap.
+        let p = SelectPlacement::new(px(260.), 10, 40, viewport, top_inset, px(640.));
+        assert!(p.top >= top_inset);
+        assert!(p.top + p.height <= viewport - px(640.));
+    }
+
+    #[test]
+    fn clamped_popup_excludes_all_safe_area_edges() {
+        let viewport = size(px(360.), px(880.));
+        let insets = Edges {
+            top: px(38.),
+            right: px(54.),
+            bottom: px(54.),
+            left: px(38.),
+        };
+        // Bottom overflow inside the safe margin (still < viewport height) must clamp above bottom inset.
+        let pos = clamp_popup(
+            point(px(300.), px(724.)),
+            PopupCorner::TopRight,
+            size(px(180.), px(120.)),
+            point(px(0.), px(4.)),
+            viewport,
+            insets,
         );
-        let (first, scroll) = initial.scroll_by(offset, px(12.5));
-        assert_eq!((first, scroll), (px(12.5), offset));
-        let next = open().expanded(first);
-        assert_eq!((next.top, next.height), (px(493.5), px(100.5)));
-        let (rest, scroll) = next.scroll_by(scroll, px(240.));
-        let full = open().expanded(first + rest);
-        assert_eq!((full.height, full.top + full.height), (px(318.), px(594.)));
-        assert_eq!(scroll - offset, px(22.5));
-        assert_eq!(full.scroll_by(scroll, px(34.)), (px(0.), scroll + px(34.)));
-        assert_eq!(
-            full.scroll_by(scroll, px(9999.)).1,
-            full.content_height - full.height
+        assert_eq!(pos, point(px(120.), px(706.)));
+        // Top overflow into the status bar clamps to top inset.
+        let pos = clamp_popup(
+            point(px(100.), px(80.)),
+            PopupCorner::BottomRight,
+            size(px(180.), px(120.)),
+            point(px(0.), px(-8.)),
+            viewport,
+            insets,
         );
+        assert_eq!(pos, point(px(38.), px(38.)));
+        // Right overflow into landscape navigation bar clamps inside right inset.
+        let pos = clamp_popup(
+            point(px(260.), px(200.)),
+            PopupCorner::TopLeft,
+            size(px(180.), px(120.)),
+            point(px(0.), px(4.)),
+            viewport,
+            insets,
+        );
+        assert_eq!(pos, point(px(126.), px(204.)));
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub(super) fn render(
     change: Change,
     ui: Ui,
 ) -> Div {
-    let mut modifiers = div().flex().flex_wrap().gap_1();
+    let mut modifiers = div().w_full().flex().gap_1();
     for (name, bit) in [
         ("Ctrl", CTRL),
         ("Alt", ALT),
@@ -43,6 +43,7 @@ pub(super) fn render(
         let state = state.clone();
         modifiers = modifiers.child(
             ui.button(ButtonVariant::Secondary, name, name)
+                .key()
                 .pressed(choice.modifiers & bit != 0)
                 .on_click(move |_, _, cx| {
                     state.update(cx, |s, cx| {

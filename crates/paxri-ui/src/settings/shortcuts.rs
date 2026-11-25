@@ -41,11 +41,7 @@ pub fn group(
             _ => "",
         };
         let spec = SettingSpec::new(action.key(), action.title(), description, "keyboard shortcut");
-        if cfg!(target_os = "android") {
-            group.setting(spec, Empty).details = Some(recorder.into_any_element());
-        } else {
-            group.setting(spec, recorder);
-        }
+        group.setting(spec, recorder);
     }
     group
 }

@@ -122,13 +122,18 @@ impl SettingRow {
         let control = div().min_w_0().max_w(px(440.)).flex_initial();
         let header = row()
             .w_full()
-            .gap(SPACE_3)
+            .gap_x(SPACE_3)
+            .gap_y(SPACE_2)
             .child(copy)
             .child(control.ml_auto().child(self.control));
         div()
             .min_w_0()
             .flex_none()
-            .py(SPACE_4)
+            .py(if cfg!(target_os = "android") {
+                SPACE_3
+            } else {
+                SPACE_4
+            })
             .when(separator, |row| {
                 row.border_t_1().border_color(rgb(ui.colors.border))
             })
@@ -268,7 +273,7 @@ impl SettingsGroup {
             {
                 section = section.child(
                     div()
-                        .pt(SPACE_4)
+                        .when(index > 0 || has_intro, |d| d.pt(SPACE_4))
                         .pb(SPACE_2)
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)

@@ -9,14 +9,14 @@ pub use paxri_config::gui::{
     Appearance, CursorShape, GuiSettings, TerminalAppearance, TerminalScheme,
 };
 
-use gpui::{App, Global, Pixels, Window, WindowAppearance, px};
+use gpui::{App, Edges, Global, Pixels, Window, WindowAppearance, px};
 
 pub const SPACE_1: Pixels = px(4.);
 pub const SPACE_2: Pixels = px(8.);
 pub const SPACE_3: Pixels = px(12.);
 pub const SPACE_4: Pixels = px(16.);
 pub const BUTTON_HEIGHT: Pixels = px(if cfg!(target_os = "android") {
-    40.
+    34.
 } else {
     32.
 });
@@ -26,6 +26,22 @@ pub const PANEL_RADIUS: Pixels = px(12.);
 #[derive(Default)]
 pub struct Preferences(GuiSettings);
 impl Global for Preferences {}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+struct SafeArea(Edges<Pixels>);
+impl Global for SafeArea {}
+
+pub fn safe_area(cx: &App) -> Edges<Pixels> {
+    cx.try_global::<SafeArea>()
+        .map(|area| area.0)
+        .unwrap_or_default()
+}
+
+pub fn set_safe_area(insets: Edges<Pixels>, cx: &mut App) {
+    if safe_area(cx) != insets {
+        cx.set_global(SafeArea(insets));
+    }
+}
 
 pub fn current(cx: &App) -> GuiSettings {
     cx.global::<Preferences>().0.clone()

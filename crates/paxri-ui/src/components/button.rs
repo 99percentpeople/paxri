@@ -36,6 +36,7 @@ pub struct Button {
 
 /// Space below the last item of a scrolling page with a floating primary action.
 pub const FLOATING_ACTION_CLEARANCE: Pixels = px(88.);
+const TOUCH_TARGET: Pixels = px(if cfg!(target_os = "android") { 40. } else { 32. });
 
 pub fn floating_corner() -> Div {
     div().absolute().bottom_4().right_4()
@@ -45,7 +46,7 @@ pub(super) fn row_layout<E: Styled>(row: E) -> E {
     row.w_full()
         .min_w_0()
         .h_auto()
-        .min_h(BUTTON_HEIGHT)
+        .min_h(TOUCH_TARGET)
         .px(SPACE_3)
         .justify_start()
         .overflow_hidden()
@@ -217,7 +218,7 @@ impl RenderOnce for Button {
             ButtonLayout::Label => root.px(SPACE_3),
             ButtonLayout::Key => root.flex_1().min_w_0().px(SPACE_1),
             ButtonLayout::Icon => root.w(BUTTON_HEIGHT),
-            ButtonLayout::Circular => root.size(BUTTON_HEIGHT).rounded_full(),
+            ButtonLayout::Circular => root.size(TOUCH_TARGET).rounded_full(),
             ButtonLayout::Floating => root.size(px(if cfg!(target_os = "android") { 56. } else { 48. })).rounded_full().shadow_md(),
             ButtonLayout::Row => row_layout(root),
             ButtonLayout::Field => root.w_full().px(SPACE_3).justify_between(),

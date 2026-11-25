@@ -374,7 +374,7 @@ impl Mobile {
             return;
         }
         let page = match self.page {
-            Page::SettingsCategory(keybar::SECTION) => {
+            Page::SettingsCategory(keybar::SECTION | paxri_ui::settings::catalog::SHORTCUTS) => {
                 Page::SettingsCategory(paxri_ui::settings::catalog::TERMINAL_CONTROLS)
             }
             Page::SettingsCategory(_) => Page::Settings,

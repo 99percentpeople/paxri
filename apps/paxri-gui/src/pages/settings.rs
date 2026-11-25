@@ -230,9 +230,15 @@ impl Dashboard {
         let change = move |change, _: &mut Window, cx: &mut App| {
             let _ = view.update(cx, |view, cx| view.change_terminal_setting(change, cx));
         };
-        let shortcut_change = change.clone();
-        sources.push((catalog::SHORTCUTS, Box::new(move || shortcuts::group(ui, cx, shortcut_change))));
-        sources.push((catalog::TERMINAL_CONTROLS, Box::new(move || shortcuts::features_group(ui, cx, change))));
+        let feature_change = change.clone();
+        sources.push((
+            catalog::TERMINAL_CONTROLS,
+            Box::new(move || shortcuts::features_group(ui, cx, feature_change)),
+        ));
+        sources.push((
+            catalog::SHORTCUTS,
+            Box::new(move || shortcuts::group(ui, cx, change)),
+        ));
         let selected = requested.map(|page| {
             if sources.iter().any(|(s, _)| catalog::page_for(*s).table == page) {
                 page

@@ -76,7 +76,16 @@ impl Mobile {
             Page::SettingsCategory(section) => (
                 SharedString::from(section.title),
                 section.table.heading_label().map(|label| label.to_string()),
-                Some("Back to settings"),
+                Some(
+                    if matches!(
+                        *section,
+                        keybar::SECTION | paxri_ui::settings::catalog::SHORTCUTS
+                    ) {
+                        "Back to terminal controls"
+                    } else {
+                        "Back to settings"
+                    },
+                ),
                 None,
             ),
             Page::Terminal(id) => {
@@ -492,6 +501,15 @@ impl Render for Mobile {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(px(*SYSTEM_UI_REM.lock().unwrap()));
         let [left, top, right, bottom] = *EDGES.lock().unwrap();
+        theme::set_safe_area(
+            Edges {
+                top: px(top),
+                right: px(right),
+                bottom: px(bottom),
+                left: px(left),
+            },
+            cx,
+        );
         if bottom > self.bottom_inset
             && let Some(bounds) = self
                 .editing_input

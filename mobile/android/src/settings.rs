@@ -99,6 +99,19 @@ impl Mobile {
         if selected == Some(keybar::SECTION) {
             return self.keybar_editor(ui, cx).into_any_element();
         }
+        if selected == Some(catalog::SHORTCUTS) {
+            let view = cx.entity().downgrade();
+            let change = move |change, _: &mut Window, cx: &mut App| {
+                let _ = view.update(cx, |view, cx| view.change_gui(change, cx));
+            };
+            return self
+                .settings_body((
+                    ElementId::from("settings"),
+                    SharedString::from(catalog::SHORTCUTS.title),
+                ))
+                .child(paxri_ui::settings::shortcuts::group(ui, cx, change).render_rows(ui))
+                .into_any_element();
+        }
         let device = SettingsGroup::device(paxri_ui::settings::controls::setting_field(
             self.name_input.clone(),
         ));
@@ -130,7 +143,6 @@ impl Mobile {
             let change = move |change, _: &mut Window, cx: &mut App| {
                 let _ = view.update(cx, |view, cx| view.change_gui(change, cx));
             };
-            groups.push(paxri_ui::settings::shortcuts::group(ui, cx, change.clone()));
             groups.push(paxri_ui::settings::shortcuts::features_group(ui, cx, change));
         } else {
             groups.push(SettingsGroup::new(catalog::TERMINAL_CONTROLS));
@@ -163,10 +175,35 @@ impl Mobile {
             }
         }
         if selected == Some(catalog::TERMINAL_CONTROLS) {
-            body = body.child(paxri_ui::settings::controls::category_button(
-                ui, Some(keybar::SECTION), false, None, SettingsLayout::Mobile,
-            ).role(Role::Button).aria_label("Terminal keys")
-                .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))));
+            body = body
+                .child(ui.separator())
+                .child(
+                    paxri_ui::settings::controls::category_button(
+                        ui,
+                        Some(keybar::SECTION),
+                        false,
+                        None,
+                        SettingsLayout::Mobile,
+                    )
+                    .role(Role::Button)
+                    .aria_label("Terminal keys")
+                    .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))),
+                )
+                .child(
+                    paxri_ui::settings::controls::category_button(
+                        ui,
+                        Some(catalog::SHORTCUTS),
+                        false,
+                        None,
+                        SettingsLayout::Mobile,
+                    )
+                    .role(Role::Button)
+                    .aria_label(catalog::SHORTCUTS.title)
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.navigate(Page::SettingsCategory(catalog::SHORTCUTS), cx);
+                        cx.notify();
+                    })),
+                );
         }
         body.into_any_element()
     }
