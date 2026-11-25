@@ -2,7 +2,6 @@
 mod replay;
 
 use super::*;
-use anyhow::Context;
 use paxri_terminal::managed::{self as protocol, Key, Request};
 use std::{
     collections::BTreeMap,
@@ -11,34 +10,18 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::broadcast,
+    sync::mpsc,
 };
 
 const DISCONNECT_GRACE: Duration = Duration::from_secs(300);
+const OUTPUT_QUEUE_SIZE: usize = 128;
 type OwnerKey = (String, Key);
 
-#[derive(Clone)]
-enum Event {
-    Data(Arc<Vec<u8>>),
-    Exit(u32),
-}
-
+#[derive(Default)]
 struct History {
     bytes: replay::Replay,
     exit: Option<u32>,
-    events: broadcast::Sender<Event>,
-}
-
-impl History {
-    fn publish(&mut self, event: Event) {
-        match &event {
-            Event::Data(bytes) => {
-                self.bytes.append(bytes);
-            }
-            Event::Exit(code) => self.exit = Some(*code),
-        }
-        let _ = self.events.send(event);
-    }
+    viewer: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 struct Entry {
@@ -128,11 +111,7 @@ impl Registry {
         let (stop, mut stopping) = watch::channel(false);
         let (finished, done) = watch::channel(false);
         let entry = Arc::new(Entry {
-            history: Mutex::new(History {
-                bytes: Default::default(),
-                exit: None,
-                events: broadcast::channel(128).0,
-            }),
+            history: Mutex::default(),
             pty: Arc::downgrade(&pty),
             attachment: watch::channel(()).0,
             stop,
@@ -151,11 +130,7 @@ impl Registry {
                 while let Ok(event) = output.recv().await {
                     tokio::task::consume_budget().await;
                     match event {
-                        Output::Bytes(bytes) | Output::Replay(bytes) => active
-                            .history
-                            .lock()
-                            .unwrap()
-                            .publish(Event::Data(Arc::new(bytes))),
+                        Output::Bytes(bytes) | Output::Replay(bytes) => active.publish(bytes).await,
                         Output::Exited(status) => {
                             return status.map(|s| s.exit_code()).unwrap_or(1);
                         }
@@ -176,7 +151,7 @@ impl Registry {
             if let Some(registry) = registry.upgrade() {
                 registry.entries.lock().unwrap().remove(&owner);
             }
-            active.history.lock().unwrap().publish(Event::Exit(code));
+            active.finish(code);
             drop(slot);
             finished.send_replace(true);
         });
@@ -246,22 +221,41 @@ impl Registry {
 }
 
 impl Entry {
+    async fn publish(&self, bytes: Vec<u8>) {
+        let viewer = {
+            let mut h = self.history.lock().unwrap();
+            // A new attachment must see each chunk either in its snapshot or in its live queue.
+            h.bytes.append(&bytes);
+            h.viewer.take_if(|queue| queue.is_closed());
+            h.viewer.clone()
+        };
+        if let Some(viewer) = viewer {
+            // Only an attached viewer applies backpressure. Detach or replacement drops its receiver.
+            let _ = viewer.send(bytes).await;
+        }
+    }
+
+    fn finish(&self, code: u32) {
+        let mut h = self.history.lock().unwrap();
+        h.exit = Some(code);
+        h.viewer = None;
+    }
+
     async fn attach(
         &self,
         stream: impl AsyncRead + AsyncWrite + Unpin,
         replay: bool,
     ) -> Result<()> {
         let (mut reader, mut writer) = tokio::io::split(stream);
-        let (acknowledge, mut probes) = tokio::sync::mpsc::channel(1);
-        let (history, exit, mut events, mut replaced) = {
-            let h = self.history.lock().unwrap();
+        let (acknowledge, mut probes) = mpsc::channel(1);
+        let (history, mut output, mut replaced) = {
+            let mut h = self.history.lock().unwrap();
             self.attachment.send_replace(());
-            (
-                h.bytes.snapshot(),
-                h.exit,
-                h.events.subscribe(),
-                self.attachment.subscribe(),
-            )
+            let (viewer, output) = mpsc::channel(OUTPUT_QUEUE_SIZE);
+            if h.exit.is_none() {
+                h.viewer = Some(viewer);
+            }
+            (h.bytes.snapshot(), output, self.attachment.subscribe())
         };
         let send = async {
             if replay {
@@ -271,15 +265,18 @@ impl Entry {
                 writer.write_u32(0).await?;
                 Frame::Data(history).write(&mut writer).await?;
             }
-            if let Some(code) = exit {
-                return Frame::Exit(code).write(&mut writer).await;
-            }
             loop {
                 tokio::select! {
                     Some(()) = probes.recv() => protocol::write_heartbeat(&mut writer).await?,
-                    event = events.recv() => match event? {
-                        Event::Data(bytes) => Frame::Data((*bytes).clone()).write(&mut writer).await?,
-                        Event::Exit(code) => return Frame::Exit(code).write(&mut writer).await,
+                    bytes = output.recv() => match bytes {
+                        Some(bytes) => Frame::Data(bytes).write(&mut writer).await?,
+                        None => {
+                            let exit = self.history.lock().unwrap().exit;
+                            if let Some(code) = exit {
+                                Frame::Exit(code).write(&mut writer).await?;
+                            }
+                            return Ok(());
+                        }
                     },
                 }
             }
@@ -287,22 +284,17 @@ impl Entry {
         let input = async {
             loop {
                 let Some(frame) = protocol::read_frame(&mut reader).await? else {
-                    anyhow::ensure!(
-                        self.pty.upgrade().is_some_and(|s| !s.input.is_closed()),
-                        "Terminal input closed"
-                    );
-                    acknowledge.send(()).await?;
+                    if self.pty.upgrade().is_some_and(|s| !s.input.is_closed()) {
+                        acknowledge.send(()).await?;
+                    }
                     continue;
                 };
                 match frame {
                     Frame::Data(bytes) => {
-                        let sender = self
-                            .pty
-                            .upgrade()
-                            .context("Terminal input closed")?
-                            .input
-                            .clone();
-                        sender.send(bytes).await.context("Terminal input closed")?;
+                        if let Some(sender) = self.pty.upgrade().map(|s| s.input.clone()) {
+                            // The PTY can close input while its final output is still draining.
+                            let _ = sender.send(bytes).await;
+                        }
                     }
                     Frame::Resize(size) => {
                         if let Some(pty) = self.pty.upgrade() {
@@ -325,6 +317,91 @@ impl Entry {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, DuplexStream, duplex};
+
+    fn entry() -> Arc<Entry> {
+        Arc::new(Entry {
+            history: Mutex::default(),
+            pty: Weak::new(),
+            attachment: watch::channel(()).0,
+            stop: watch::channel(false).0,
+            finished: watch::channel(false).1,
+        })
+    }
+
+    fn viewer(entry: &Arc<Entry>) -> DuplexStream {
+        let (stream, host) = duplex(16);
+        let entry = entry.clone();
+        tokio::spawn(async move { entry.attach(host, true).await.unwrap() });
+        stream
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_output_queue_preserves_bytes_and_can_hand_over_to_a_new_viewer() {
+        for replace in [false, true] {
+            timeout(Duration::from_secs(5), exercise_full_queue(replace))
+                .await
+                .expect("output stalled");
+        }
+    }
+
+    async fn exercise_full_queue(replace: bool) {
+        let entry = entry();
+        let mut stream = viewer(&entry);
+        assert!(
+            protocol::read_history(&mut stream)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let first = vec![b'x'; 64];
+        entry.publish(first.clone()).await;
+        assert_eq!(stream.read_u8().await.unwrap(), 1);
+        // The first data frame cannot fit in the stream, so every following chunk queues up.
+        let mut expected = first.clone();
+        for i in 0..OUTPUT_QUEUE_SIZE {
+            entry.publish(vec![i as u8]).await;
+            expected.push(i as u8);
+        }
+        let blocked = entry.publish(b"pending".to_vec());
+        tokio::pin!(blocked);
+        tokio::select! {
+            biased;
+            _ = &mut blocked => panic!("a full output queue must wait for its viewer"),
+            _ = std::future::ready(()) => {}
+        }
+        expected.extend_from_slice(b"pending");
+        let mut next;
+        let (reader, mut received) = if replace {
+            // Keep the old stream open and stalled throughout the handover.
+            next = viewer(&entry);
+            let replay = protocol::read_history(&mut next).await.unwrap();
+            (&mut next, replay)
+        } else {
+            assert_eq!(usize::from(stream.read_u16().await.unwrap()), first.len());
+            let mut received = vec![0; first.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            (&mut stream, received)
+        };
+        let ((), ()) = tokio::join!(
+            async {
+                blocked.await;
+                entry.publish(b"tail".to_vec()).await;
+                entry.finish(23);
+            },
+            async {
+                loop {
+                    match Frame::read(reader).await.unwrap() {
+                        Frame::Data(bytes) => received.extend(bytes),
+                        Frame::Exit(23) => break,
+                        _ => panic!("unexpected output frame"),
+                    }
+                }
+            },
+        );
+        expected.extend_from_slice(b"tail");
+        assert_eq!(received, expected);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn expiry_requires_five_continuous_minutes_offline() {
@@ -369,16 +446,12 @@ mod tests {
         lease.await.unwrap();
     }
 
-    #[test]
-    fn history_keeps_only_the_most_recent_bytes() {
-        let mut history = History {
-            bytes: Default::default(),
-            exit: None,
-            events: broadcast::channel(1).0,
-        };
-        history.publish(Event::Data(Arc::new(vec![1; protocol::HISTORY_LIMIT + 10])));
-        history.publish(Event::Data(Arc::new(vec![2; 3])));
-        let bytes = history.bytes.snapshot();
+    #[tokio::test]
+    async fn history_keeps_only_the_most_recent_bytes() {
+        let entry = entry();
+        entry.publish(vec![1; protocol::HISTORY_LIMIT + 10]).await;
+        entry.publish(vec![2; 3]).await;
+        let bytes = entry.history.lock().unwrap().bytes.snapshot();
         assert!(bytes.len() <= protocol::HISTORY_LIMIT);
         assert_eq!(bytes.first(), Some(&1));
         assert_eq!(
