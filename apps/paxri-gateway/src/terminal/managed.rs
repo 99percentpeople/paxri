@@ -13,7 +13,6 @@ use tokio::{
     sync::mpsc,
 };
 
-const DISCONNECT_GRACE: Duration = Duration::from_secs(300);
 const OUTPUT_QUEUE_SIZE: usize = 128;
 type OwnerKey = (String, Key);
 
@@ -32,19 +31,22 @@ struct Entry {
     finished: watch::Receiver<bool>,
 }
 
-async fn disconnected_for(
+async fn disconnected_for<T>(
     mut changes: watch::Receiver<BTreeMap<String, i64>>,
+    mut policy: watch::Receiver<T>,
     online: impl Fn() -> bool,
-    grace: Duration,
+    grace: impl Fn(&T) -> Option<Duration>,
 ) {
-    let mut deadline = None;
+    let mut offline_since = None;
     loop {
         changes.borrow_and_update();
+        let timeout = grace(&policy.borrow_and_update());
         if online() {
-            deadline = None;
+            offline_since = None;
         } else {
-            deadline.get_or_insert_with(|| tokio::time::Instant::now() + grace);
+            offline_since.get_or_insert_with(tokio::time::Instant::now);
         }
+        let deadline = offline_since.and_then(|since| timeout.map(|limit| since + limit));
         let expired = async {
             match deadline {
                 Some(until) => tokio::time::sleep_until(until).await,
@@ -53,6 +55,7 @@ async fn disconnected_for(
         };
         tokio::select! {
             result = changes.changed() => if result.is_err() { return; },
+            result = policy.changed() => if result.is_err() { return; },
             _ = expired => if !online() { return; },
         }
     }
@@ -62,15 +65,20 @@ pub(crate) struct Registry {
     entries: Mutex<BTreeMap<OwnerKey, Arc<Entry>>>,
     creation: tokio::sync::Mutex<()>,
     transport: Arc<paxri_native::gateway::NativeTransport>,
+    session_keep_alive: watch::Receiver<paxri_config::startup::SessionKeepAlive>,
     shutdown: watch::Sender<()>,
 }
 
 impl Registry {
-    pub(crate) fn new(transport: Arc<paxri_native::gateway::NativeTransport>) -> Self {
+    pub(crate) fn new(
+        transport: Arc<paxri_native::gateway::NativeTransport>,
+        session_keep_alive: watch::Receiver<paxri_config::startup::SessionKeepAlive>,
+    ) -> Self {
         Self {
             entries: Default::default(),
             creation: Default::default(),
             transport,
+            session_keep_alive,
             shutdown: watch::channel(()).0,
         }
     }
@@ -98,6 +106,7 @@ impl Registry {
             "Session already exists"
         );
         let mut config = host.config.clone();
+        let keep_alive = self.session_keep_alive.clone();
         let cmd = command_for(None, &host.tools, &owner.0).await?;
         let cfg = config.clone();
         let peer = owner.0.clone();
@@ -144,7 +153,12 @@ impl Registry {
                 _ = shutdown.changed() => 1,
                 _ = stopping.changed() => 0,
                 _ = config.wait_for(|cfg| !is_paired(cfg, &owner.0)) => 1,
-                _ = disconnected_for(transport.subscribe_peer_changes(), || transport.endpoint_online(&owner.0), DISCONNECT_GRACE) => 1,
+                _ = disconnected_for(
+                    transport.subscribe_peer_changes(),
+                    keep_alive,
+                    || transport.endpoint_online(&owner.0),
+                    |policy| policy.duration(),
+                ) => 1,
                 code = collect => code,
             };
             drop(pty);
@@ -408,11 +422,13 @@ mod tests {
         let online = Arc::new(AtomicBool::new(true));
         let observed = online.clone();
         let (changes, receiver) = watch::channel(BTreeMap::new());
+        let (_policy_tx, policy_rx) = watch::channel(Some(Duration::from_secs(300)));
         let lease = tokio::spawn(async move {
             disconnected_for(
                 receiver,
+                policy_rx,
                 || observed.load(Ordering::SeqCst),
-                DISCONNECT_GRACE,
+                |grace| *grace,
             )
             .await;
         });
@@ -441,6 +457,39 @@ mod tests {
         changes.send_modify(|_| {}); // Another peer changed state.
         advance(99).await;
         assert!(!lease.is_finished());
+        advance(1).await;
+        assert!(lease.is_finished());
+        lease.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forever_keep_alive_never_expires_offline_and_live_updates_apply() {
+        let online = Arc::new(AtomicBool::new(false));
+        let observed = online.clone();
+        let (_changes, receiver) = watch::channel(BTreeMap::new());
+        let (policy_tx, policy_rx) = watch::channel(Some(Duration::from_secs(300)));
+        let lease = tokio::spawn(async move {
+            disconnected_for(
+                receiver,
+                policy_rx,
+                || observed.load(Ordering::SeqCst),
+                |grace| *grace,
+            )
+            .await;
+        });
+        let advance = |seconds| async move {
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(seconds)).await;
+            tokio::task::yield_now().await;
+        };
+        advance(299).await;
+        assert!(!lease.is_finished());
+        // Switching to Forever while already offline cancels expiry.
+        policy_tx.send_replace(None);
+        advance(48 * 3600).await;
+        assert!(!lease.is_finished(), "forever policy must never expire");
+        // Lowering the policy back while still offline expires promptly.
+        policy_tx.send_replace(Some(Duration::from_secs(300)));
         advance(1).await;
         assert!(lease.is_finished());
         lease.await.unwrap();

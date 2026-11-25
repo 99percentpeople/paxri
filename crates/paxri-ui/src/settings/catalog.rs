@@ -44,6 +44,12 @@ pub const STARTUP: SettingSpec = SettingSpec::new(
     "Choose when the gateway starts on this computer.",
     "manual gui login system boot sign-in",
 );
+pub const SESSION_KEEP_ALIVE: SettingSpec = SettingSpec::new(
+    "session_keep_alive",
+    "Session keep-alive",
+    "How long this gateway keeps hosted terminal sessions running after a device disconnects.",
+    "timeout expire ttl forever persistent idle disconnect",
+);
 pub const UPNP: SettingSpec = SettingSpec::new(
     "upnp",
     "Allow UPnP",

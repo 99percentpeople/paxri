@@ -167,6 +167,31 @@ pub fn set_startup(path: &Path, mode: crate::startup::Startup) -> Result<()> {
     Ok(())
 }
 
+pub fn set_gateway(
+    path: &Path,
+    change: crate::startup::GatewayChange,
+    create: bool,
+) -> Result<crate::startup::GatewaySettings> {
+    let text = edit(path, create, |current| {
+        let mut doc: DocumentMut = current.parse()?;
+        let gateway = subtable(doc.as_table_mut(), "gateway")?;
+        let (key, mut value) = match change {
+            crate::startup::GatewayChange::SessionKeepAlive(mode) => (
+                "session_keep_alive",
+                toml_edit::Value::from(mode.as_str()),
+            ),
+        };
+        if let Some(old) = gateway.get(key).and_then(Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        gateway.insert(key, Item::Value(value));
+        let text = doc.to_string();
+        crate::parse(&text).map_err(anyhow::Error::msg)?;
+        Ok(text)
+    })?;
+    Ok(toml::from_str::<LocalSettings>(&text)?.gateway)
+}
+
 pub fn subtable<'a>(table: &'a mut dyn TableLike, key: &str) -> Result<&'a mut dyn TableLike> {
     if !table.contains_key(key) {
         table.insert(key, Item::Table(Table::new()));
@@ -373,6 +398,33 @@ mod network_tests {
                 .relay_url
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_session_keep_alive_round_trips_and_survives_gateway_saves() -> Result<()> {
+        use crate::startup::{GatewayChange, SessionKeepAlive};
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("node.toml");
+        let initial = "version = 1\n[gateway]\nstartup = 'gui' # keep\n";
+        fs::write(&path, initial)?;
+        assert_eq!(
+            read_local(&path)?.gateway.session_keep_alive,
+            SessionKeepAlive::Minutes5
+        );
+        for mode in SessionKeepAlive::ALL {
+            let updated = set_gateway(&path, GatewayChange::SessionKeepAlive(mode), false)?;
+            assert_eq!(updated.session_keep_alive, mode);
+            assert_eq!(read_local(&path)?.gateway.session_keep_alive, mode);
+        }
+        save_gateway(&path, initial, format!("device_name = 'host'\n{initial}"))?;
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.contains("# keep"));
+        assert_eq!(
+            crate::parse(&saved).unwrap().gateway.session_keep_alive,
+            SessionKeepAlive::Forever
+        );
+        assert!(crate::parse(&saved.replace("forever", "invalid")).is_err());
         Ok(())
     }
 }

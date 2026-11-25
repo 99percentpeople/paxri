@@ -7,7 +7,8 @@ use std::cell::Cell;
 #[cfg(any(target_os = "android", test))]
 mod mobile;
 
-const TRACK_WIDTH: Pixels = px(if cfg!(target_os = "android") { 3. } else { 12. });
+#[cfg(not(target_os = "android"))]
+const TRACK_WIDTH: Pixels = px(12.);
 const MIN_THUMB: Pixels = px(24.);
 
 /// Visible extent, scrollable distance (content minus viewport), and distance from the top.
@@ -130,7 +131,6 @@ impl RenderOnce for ScrollArea {
             .id(id.clone())
             .size_full()
             .overflow_y_scroll()
-            .scrollbar_width(TRACK_WIDTH)
             .track_scroll(&handle);
         #[cfg(target_os = "android")]
         let viewport = viewport.restrict_scroll_to_axis();

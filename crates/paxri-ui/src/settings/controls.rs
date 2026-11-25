@@ -82,7 +82,7 @@ pub fn preview_label(preview: Div, label: &'static str) -> Div {
         .items_center()
         .gap(theme::SPACE_2)
         .child(preview)
-        .child(div().truncate().child(label))
+        .child(div().min_w_0().truncate().child(label))
 }
 
 pub fn scheme_select(

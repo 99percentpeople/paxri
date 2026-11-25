@@ -354,6 +354,7 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
         actions: Vec<SelectAction>,
         checked: Option<usize>,
         keep_open: bool,
+        on_open: Option<SelectAction>,
         cx: &App,
     ) -> T {
         let open = state.read(cx).is_open();
@@ -362,29 +363,43 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
         }
         let count = actions.len();
         let key_state = state.clone();
+        let key_on_open = on_open.clone();
         self.0
             .track_focus(&state.read(cx).focus)
             .on_key_down(move |event, window, cx| {
+                let was_open = key_state.read(cx).is_open();
                 let selected = key_state.update(cx, |menu, cx| {
                     menu.key(event, actions.len(), checked, keep_open, window, cx)
                 });
+                if !was_open
+                    && key_state.read(cx).is_open()
+                    && let Some(callback) = &key_on_open
+                {
+                    callback(window, cx);
+                }
                 if let Some(index) = selected {
                     actions[index](window, cx);
                 }
             })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                state.update(cx, |menu, cx| {
+                let opened = state.update(cx, |menu, cx| {
                     // Outside dismissal may already have run on this same press.
-                    if open {
+                    let opened = if open {
                         menu.dismiss(cx);
+                        false
                     } else {
                         menu.open(checked, count, window, cx);
-                    }
+                        true
+                    };
                     #[cfg(target_os = "android")]
                     menu.focus.focus(window, cx);
                     #[cfg(not(target_os = "android"))]
                     menu.focus.focus(window);
+                    opened
                 });
+                if opened && let Some(callback) = &on_open {
+                    callback(window, cx);
+                }
             })
     }
 }
@@ -393,6 +408,7 @@ struct MenuItem {
     id: ElementId,
     label: AnyElement,
     on_select: SelectAction,
+    separator: bool,
 }
 
 // The collapsed field only needs its selected label. Construct the other option
@@ -407,6 +423,7 @@ impl RenderOnce for CheckedLabel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         div()
             .w_full()
+            .min_w_0()
             .flex()
             .items_center()
             .justify_between()
@@ -420,11 +437,17 @@ impl RenderOnce for CheckedLabel {
 pub struct DropdownContent {
     items: Vec<MenuItem>,
     checked: Option<usize>,
+    pending_separator: bool,
 }
 
 impl DropdownContent {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn separator(mut self) -> Self {
+        self.pending_separator = true;
+        self
     }
 
     pub fn item(
@@ -437,6 +460,7 @@ impl DropdownContent {
             id: id.into(),
             label: label.into_any_element(),
             on_select: Rc::new(on_select),
+            separator: std::mem::take(&mut self.pending_separator),
         });
         self
     }
@@ -493,14 +517,18 @@ impl DropdownContent {
         let count = self.items.len();
         let mut height = safe_height;
         let mut offset = SPACE_1;
+        const MAX_MENU_WIDTH: Pixels = px(320.);
         let mut list = ui
             .popover("content")
             .flex_none()
             .whitespace_nowrap()
-            .max_w(safe_width);
+            .max_w(MAX_MENU_WIDTH.min(safe_width));
         if layout == DropdownLayout::Filters {
             list = list.w(px(240.).min(safe_width));
             height = safe_height.min(px(440.));
+        }
+        if layout == DropdownLayout::Start {
+            list = list.min_w(px(200.).min(safe_width));
         }
         if layout == DropdownLayout::AboveEnd {
             height = (safe_height - FLOATING_ACTION_CLEARANCE)
@@ -513,7 +541,9 @@ impl DropdownContent {
             && let Some(trigger) = menu.trigger_bounds
         {
             let placement = menu.field_placement(trigger, count, window, cx);
-            list = list.w(trigger.size.width.min(safe_width));
+            list = list
+                .max_w(safe_width)
+                .w(trigger.size.width.min(safe_width));
             height = placement.height;
             offset = placement.top - trigger.bottom();
         }
@@ -539,6 +569,9 @@ impl DropdownContent {
                 });
         }
         for (index, item) in self.items.into_iter().enumerate() {
+            if item.separator && index > 0 {
+                list = list.child(ui.separator().my(px(2.)));
+            }
             let hover = state.clone();
             let select = state.clone();
             let row = ui
@@ -805,6 +838,7 @@ pub struct Dropdown<T: InteractiveElement + IntoElement + 'static> {
     trigger: DropdownTrigger<T>,
     content: DropdownContent,
     layout: DropdownLayout,
+    on_open: Option<SelectAction>,
 }
 
 #[derive(IntoElement)]
@@ -872,7 +906,13 @@ impl<T: InteractiveElement + IntoElement> Dropdown<T> {
             trigger,
             content,
             layout: DropdownLayout::End,
+            on_open: None,
         }
+    }
+
+    pub fn on_open(mut self, callback: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_open = Some(Rc::new(callback));
+        self
     }
 
     /// Grouped filters stay open while the user combines choices.
@@ -905,6 +945,7 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
             trigger,
             content,
             layout,
+            on_open,
         } = self;
         let field = layout == DropdownLayout::Field;
         let count = content.items.len();
@@ -947,6 +988,7 @@ impl<T: InteractiveElement + IntoElement> RenderOnce for Dropdown<T> {
                 actions,
                 content.checked,
                 layout == DropdownLayout::Filters,
+                on_open,
                 cx,
             ))
             .when(state.read(cx).is_open(), |root| {

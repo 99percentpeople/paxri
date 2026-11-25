@@ -102,6 +102,7 @@ struct Gateway {
     file: SettingsFile,
     direct_only: bool,
     transport: Arc<NativeTransport>,
+    session_keep_alive: tokio::sync::watch::Sender<paxri_config::startup::SessionKeepAlive>,
     peer_changes: tokio::sync::watch::Receiver<BTreeMap<String, i64>>,
     device_info: tokio::sync::watch::Receiver<paxri_native::gateway::PeerDeviceInfo>,
     listeners: BTreeMap<String, Listener>,
@@ -347,6 +348,10 @@ impl Gateway {
             startup: local
                 .as_ref()
                 .map_or(config.gateway.startup, |p| p.gateway.startup),
+            session_keep_alive: local.as_ref().map_or_else(
+                || *self.session_keep_alive.borrow(),
+                |p| p.gateway.session_keep_alive,
+            ),
             user_managed: self.user_managed,
             executable: std::env::current_exe().ok(),
             ipc_path: None,
@@ -528,6 +533,16 @@ async fn handle_client(
             let mut state = gateway.lock().await;
             let result = paxri_config::file::set_native(&state.file.path, change, false)
                 .map(|_| state.status());
+            drop(state);
+            paxri_control::respond(&mut socket, result).await
+        }
+        Command::SetGateway { change } => {
+            let mut state = gateway.lock().await;
+            let result = paxri_config::file::set_gateway(&state.file.path, change, false)
+                .map(|updated| {
+                    state.session_keep_alive.send_replace(updated.session_keep_alive);
+                    state.status()
+                });
             drop(state);
             paxri_control::respond(&mut socket, result).await
         }
@@ -784,6 +799,7 @@ async fn run(
         },
         direct_only: options.no_relay,
         transport: Arc::new(transport),
+        session_keep_alive: tokio::sync::watch::channel(config.gateway.session_keep_alive).0,
         peer_changes: peer_changes.clone(),
         device_info: device_info.clone(),
         listeners: BTreeMap::new(),

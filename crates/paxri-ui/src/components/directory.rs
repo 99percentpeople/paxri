@@ -180,6 +180,10 @@ impl DeviceFilters {
 }
 
 impl SessionFilters {
+    pub fn has_selections(&self) -> bool {
+        self.scope.device.is_some() || self.scope.state.is_some()
+    }
+
     pub fn for_device(&mut self, device: Option<String>, cx: &mut App) {
         self.reset(cx);
         self.scope.device = device;
@@ -338,9 +342,24 @@ impl RenderOnce for SessionLauncher {
     }
 }
 
+pub fn count_summary(
+    shown: usize,
+    total: usize,
+    filtered: bool,
+    singular: &str,
+    plural: &str,
+) -> String {
+    let unit = if total == 1 { singular } else { plural };
+    if filtered && total > 0 {
+        format!("{shown} of {total} {unit}")
+    } else {
+        format!("{total} {unit}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SessionLocation, contains_terms, session_entries};
+    use super::{SessionLocation, contains_terms, count_summary, session_entries};
 
     #[test]
     fn session_list_preserves_local_titles_and_picks_the_live_target() {
@@ -377,5 +396,15 @@ mod tests {
         let fields = "RaspberryPi Linux CAFE Connected".to_owned();
         assert!(contains_terms("cafe  linux rasp", fields.clone()));
         assert!(!contains_terms("rasp offline", fields));
+    }
+
+    #[test]
+    fn count_summary_formats_totals_and_filtered_subsets() {
+        assert_eq!(count_summary(0, 0, false, "session", "sessions"), "0 sessions");
+        assert_eq!(count_summary(1, 1, false, "session", "sessions"), "1 session");
+        assert_eq!(count_summary(3, 3, false, "session", "sessions"), "3 sessions");
+        assert_eq!(count_summary(1, 3, true, "session", "sessions"), "1 of 3 sessions");
+        assert_eq!(count_summary(0, 1, true, "rule", "rules"), "0 of 1 rule");
+        assert_eq!(count_summary(0, 0, true, "rule", "rules"), "0 rules");
     }
 }

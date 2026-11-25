@@ -59,6 +59,9 @@ impl Ui {
     ) -> Stateful<Div> {
         div()
             .id(id)
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .flex_none()
             .items_center()

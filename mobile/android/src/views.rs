@@ -76,7 +76,10 @@ impl Mobile {
                 (SharedString::from("Devices"), subtitle, None, None)
             }
             Page::Sessions(origin) => (
-                "Sessions".into(), None, origin.as_ref().map(|_| "Back to device details"), None,
+                "Sessions".into(),
+                self.sessions_subtitle(cx),
+                origin.as_ref().map(|_| "Back to device details"),
+                None,
             ),
             Page::Peer(id) => (
                 SharedString::from("Device"),
@@ -97,7 +100,7 @@ impl Mobile {
             ),
             Page::Forwards(peer) => (
                 "Port forwarding".into(),
-                None,
+                self.forwards_subtitle(cx),
                 peer.as_ref().map(|_| "Back to device details"),
                 None,
             ),

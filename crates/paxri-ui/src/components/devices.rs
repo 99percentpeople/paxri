@@ -30,6 +30,34 @@ impl Ui {
             )
     }
 
+    pub fn page_heading(
+        self,
+        icon: Icon,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+    ) -> Div {
+        let title = single_line(div())
+            .text_2xl()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(title.into());
+        let detail = single_line(self.muted(subtitle.into())).w_full();
+        div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(SPACE_3)
+            .child(self.icon_tile(icon, 48., 25.))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(title)
+                    .child(detail),
+            )
+    }
+
     pub fn device_heading(
         self,
         badge: Option<Div>,
@@ -38,15 +66,11 @@ impl Ui {
         id: Option<(&str, String)>,
     ) -> Div {
         let detail = match id {
-            Some((id, display_id)) => {
-                let text = single_line(self.muted(format!("{} · {display_id}", platform.label())))
-                    .w_full()
-                    .id("device-identity")
-                    .tooltip(tooltip(id.to_owned().into()));
-                #[cfg(target_os = "android")]
-                let text = text.text_ellipsis();
-                text.into_any_element()
-            }
+            Some((id, display_id)) => single_line(self.muted(format!("{} · {display_id}", platform.label())))
+                .w_full()
+                .id("device-identity")
+                .tooltip(tooltip(id.to_owned().into()))
+                .into_any_element(),
             None => self.muted(platform.label()).into_any_element(),
         };
         let title = single_line(div())
@@ -55,8 +79,6 @@ impl Ui {
             .id("device-heading")
             .tooltip(tooltip(name.clone()))
             .child(name);
-        #[cfg(target_os = "android")]
-        let title = title.text_ellipsis();
         div()
             .min_w_0()
             .flex()

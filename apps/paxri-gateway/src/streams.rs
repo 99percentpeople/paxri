@@ -26,7 +26,11 @@ pub async fn serve<S: PeerSession>(
 ) {
     let limit = Arc::new(Semaphore::new(256));
     let terminals = Arc::new(Terminals::new(config.clone(), tools));
-    let managed = Arc::new(crate::terminal::managed::Registry::new(gateway.lock().await.transport.clone()));
+    let (transport, keep_alive) = {
+        let state = gateway.lock().await;
+        (state.transport.clone(), state.session_keep_alive.subscribe())
+    };
+    let managed = Arc::new(crate::terminal::managed::Registry::new(transport, keep_alive));
     let listeners = Arc::new(Listeners::new(config.clone(), limit.clone()));
     let mut tasks = JoinSet::new();
     loop {

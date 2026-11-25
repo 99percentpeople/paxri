@@ -8,7 +8,10 @@ use std::{
     time::Duration,
 };
 use paxri_cli::gateway::{self, Action as GatewayAction};
-use paxri_config::{Native, NativeChange, startup::Startup};
+use paxri_config::{
+    Native, NativeChange,
+    startup::{GatewayChange, GatewaySettings, SessionKeepAlive, Startup},
+};
 use paxri_control::{Command, GuiChange, Status};
 use paxri_ui::components::directory::{DeviceFilters, SessionFilters};
 use paxri_ui::connections::ConnectionHistory;
@@ -56,6 +59,7 @@ enum RequestResult {
     Gateway(Box<Status>, Option<Native>),
     Peer(paxri_control::PeerStatus),
     OfflineGui(theme::GuiSettings),
+    OfflineGateway(GatewaySettings),
     OfflineNative(Native),
     Stopped(Option<paxri_config::file::LocalSettings>),
 }
@@ -98,6 +102,7 @@ struct Dashboard {
     local_name: SharedString,
     status: Option<Status>,
     startup: Startup,
+    session_keep_alive: SessionKeepAlive,
     offline: Option<GatewayOffline>,
     busy: bool,
     pending: VecDeque<GatewayRequest>,
@@ -277,10 +282,12 @@ impl Dashboard {
             };
             enum Edit {
                 Appearance(GuiChange),
+                Gateway(GatewayChange),
                 Network(NativeChange),
             }
             let edit = match &command {
                 Command::SetGui { change } => Some(Edit::Appearance(change.clone())),
+                Command::SetGateway { change } => Some(Edit::Gateway(*change)),
                 Command::SetNative { change } => Some(Edit::Network(change.clone())),
                 _ => None,
             };
@@ -296,6 +303,9 @@ impl Dashboard {
                         Ok(match edit {
                             Edit::Appearance(change) => RequestResult::OfflineGui(
                                 paxri_config::file::set_gui(&file, change, true)?,
+                            ),
+                            Edit::Gateway(change) => RequestResult::OfflineGateway(
+                                paxri_config::file::set_gateway(&file, change, true)?,
                             ),
                             Edit::Network(change) => RequestResult::OfflineNative(
                                 paxri_config::file::set_native(&file, change, true)?,
@@ -334,7 +344,18 @@ impl Dashboard {
                         let name = local.as_ref().and_then(|s| s.device_name.as_deref());
                         view.sync_device_name(name, &gethostname::gethostname().to_string_lossy(), cx);
                         view.startup = local.as_ref().map(|s| s.gateway.startup).unwrap_or_default();
+                        view.session_keep_alive = local
+                            .as_ref()
+                            .map(|s| s.gateway.session_keep_alive)
+                            .unwrap_or_default();
                         view.profile_native = local.map(|s| s.native);
+                        view.status = None;
+                        view.offline = Some(GatewayOffline::Stopped);
+                    }
+                    Ok(RequestResult::OfflineGateway(settings)) => {
+                        view.presence_watch = None;
+                        view.startup = settings.startup;
+                        view.session_keep_alive = settings.session_keep_alive;
                         view.status = None;
                         view.offline = Some(GatewayOffline::Stopped);
                     }
@@ -403,8 +424,16 @@ impl Dashboard {
                                 .and_then(|code| qrcode::QrCode::new(code).ok())
                                 .map(std::rc::Rc::new);
                         }
+                        let peer_newly_online = status.peers.keys().any(|peer| {
+                            status.peer_online(peer)
+                                && !view.status.as_ref().is_some_and(|old| old.peer_online(peer))
+                        });
                         view.startup = status.startup;
+                        view.session_keep_alive = status.session_keep_alive;
                         view.status = Some(*status);
+                        if peer_newly_online {
+                            view.refresh_hosted_sessions(true, cx);
+                        }
                         if show_forwards && changing {
                             view.refresh_forward_directory(cx);
                         }
@@ -497,6 +526,7 @@ impl Dashboard {
                 .into(),
             status: None,
             startup: Startup::default(),
+            session_keep_alive: SessionKeepAlive::default(),
             offline: None,
             busy: false,
             pending: VecDeque::new(),

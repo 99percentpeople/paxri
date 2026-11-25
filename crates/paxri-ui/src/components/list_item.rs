@@ -12,13 +12,9 @@ pub struct ListItem {
 }
 
 pub(super) fn list_title(text: impl Into<SharedString>) -> Div {
-    let title = single_line(div())
+    single_line(div())
         .font_weight(FontWeight::SEMIBOLD)
-        .child(text.into());
-    // Desktop GPUI can measure ellipsized text at zero width inside a flex column.
-    #[cfg(target_os = "android")]
-    let title = title.text_ellipsis();
-    title
+        .child(text.into())
 }
 
 impl ListItem {
@@ -91,10 +87,6 @@ impl ListItem {
 
     pub fn button(mut self, ui: Ui, id: impl Into<ElementId>, label: SharedString) -> Button {
         self.body = single_line(self.body);
-        #[cfg(target_os = "android")]
-        {
-            self.body = self.body.text_ellipsis();
-        }
         let button = ui
             .button(ButtonVariant::Ghost, id, self)
             .row()
@@ -112,6 +104,7 @@ impl RenderOnce for ListItem {
             let detail = Ui::new(window, cx)
                 .muted(text)
                 .min_w_0()
+                .overflow_hidden()
                 .text_xs()
                 .font_weight(FontWeight::NORMAL);
             let detail = match self.detail_icon {

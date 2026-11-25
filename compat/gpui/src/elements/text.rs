@@ -2,12 +2,13 @@ use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine, WrappedLineLayout,
+    TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine, WrappedLineLayout, px,
     register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use smallvec::SmallVec;
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     mem,
     ops::Range,
@@ -46,10 +47,10 @@ impl Element for &'static str {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self)
+        text_layout.prepaint(bounds, SharedString::from(*self), window, cx)
     }
 
     fn paint(
@@ -112,10 +113,10 @@ impl Element for SharedString {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         text_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        text_layout.prepaint(bounds, self.as_ref())
+        text_layout.prepaint(bounds, self.clone(), window, cx)
     }
 
     fn paint(
@@ -279,10 +280,10 @@ impl Element for StyledText {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        self.layout.prepaint(bounds, &self.text)
+        self.layout.prepaint(bounds, self.text.clone(), window, cx)
     }
 
     fn paint(
@@ -316,8 +317,79 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    truncate_width: Option<Pixels>,
+    runs: Rc<[TextRun]>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
+}
+
+fn shape_text_for_layout(
+    text: SharedString,
+    runs: &[TextRun],
+    text_style: &TextStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+    wrap_width: Option<Pixels>,
+    truncate_width: Option<Pixels>,
+    truncation_suffix: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<(usize, SmallVec<[WrappedLine; 1]>, Size<Pixels>)> {
+    let rounding_tolerance = px(0.5 / window.scale_factor());
+    let (text, runs, pre_shaped): (
+        SharedString,
+        Cow<'_, [TextRun]>,
+        Option<SmallVec<[WrappedLine; 1]>>,
+    ) = if let Some(truncate_width) = truncate_width {
+        if let Some(unclipped) = window
+            .text_system()
+            .shape_text(text.clone(), font_size, runs, None, None)
+            .log_err()
+            && unclipped
+                .iter()
+                .all(|line| line.size(line_height).width <= truncate_width + rounding_tolerance)
+        {
+            let reuse =
+                (wrap_width.is_none() && text_style.line_clamp.is_none()).then_some(unclipped);
+            (text, Cow::Borrowed(runs), reuse)
+        } else {
+            let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+            let mut truncated_runs = runs.to_vec();
+            let truncated = line_wrapper.truncate_line(
+                text,
+                truncate_width,
+                truncation_suffix,
+                &mut truncated_runs,
+            );
+            (truncated, Cow::Owned(truncated_runs), None)
+        }
+    } else {
+        (text, Cow::Borrowed(runs), None)
+    };
+    let len = text.len();
+
+    let lines = match pre_shaped {
+        Some(lines) => lines,
+        None => window
+            .text_system()
+            .shape_text(
+                text,
+                font_size,
+                &runs,
+                wrap_width,            // Wrap if we know the width.
+                text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+            )
+            .log_err()?,
+    };
+
+    let mut size: Size<Pixels> = Size::default();
+    for line in &lines {
+        let line_size = line.size(line_height);
+        size.height += line_size.height;
+        size.width = size.width.max(line_size.width).ceil();
+    }
+
+    Some((len, lines, size))
 }
 
 impl TextLayout {
@@ -334,10 +406,10 @@ impl TextLayout {
             .line_height
             .to_pixels(font_size.into(), window.rem_size());
 
-        let mut runs = if let Some(runs) = runs {
-            runs
+        let runs: Rc<[TextRun]> = if let Some(runs) = runs {
+            runs.into()
         } else {
-            vec![text_style.to_run(text.len())]
+            vec![text_style.to_run(text.len())].into()
         };
 
         window.request_measured_layout(Default::default(), {
@@ -371,59 +443,45 @@ impl TextLayout {
                     };
 
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
-                    && text_layout.size.is_some()
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                    && let Some(size) = text_layout.size
+                    && wrap_width == text_layout.wrap_width
+                    && truncate_width == text_layout.truncate_width
                 {
-                    return text_layout.size.unwrap();
+                    return size;
                 }
 
-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-                let text = if let Some(truncate_width) = truncate_width {
-                    line_wrapper.truncate_line(
-                        text.clone(),
-                        truncate_width,
-                        &truncation_suffix,
-                        &mut runs,
-                    )
-                } else {
-                    text.clone()
-                };
-                let len = text.len();
-
-                let Some(lines) = window
-                    .text_system()
-                    .shape_text(
-                        text,
-                        font_size,
-                        &runs,
-                        wrap_width,            // Wrap if we know the width.
-                        text_style.line_clamp, // Limit the number of lines if line_clamp is set.
-                    )
-                    .log_err()
-                else {
+                let Some((len, lines, size)) = shape_text_for_layout(
+                    text.clone(),
+                    &runs,
+                    &text_style,
+                    font_size,
+                    line_height,
+                    wrap_width,
+                    truncate_width,
+                    &truncation_suffix,
+                    window,
+                    cx,
+                ) else {
                     element_state.0.borrow_mut().replace(TextLayoutInner {
                         lines: Default::default(),
                         len: 0,
                         line_height,
                         wrap_width,
+                        truncate_width,
+                        runs: runs.clone(),
                         size: Some(Size::default()),
                         bounds: None,
                     });
                     return Size::default();
                 };
 
-                let mut size: Size<Pixels> = Size::default();
-                for line in &lines {
-                    let line_size = line.size(line_height);
-                    size.height += line_size.height;
-                    size.width = size.width.max(line_size.width).ceil();
-                }
-
                 element_state.0.borrow_mut().replace(TextLayoutInner {
                     lines,
                     len,
                     line_height,
                     wrap_width,
+                    truncate_width,
+                    runs: runs.clone(),
                     size: Some(size),
                     bounds: None,
                 });
@@ -433,7 +491,82 @@ impl TextLayout {
         })
     }
 
-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
+    fn prepaint(
+        &self,
+        bounds: Bounds<Pixels>,
+        text: SharedString,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let text_style = window.text_style();
+        let retruncate = {
+            let element_state = self.0.borrow();
+            let element_state = element_state
+                .as_ref()
+                .with_context(|| format!("measurement has not been performed on {text}"))
+                .unwrap();
+            if let Some(TextOverflow::Truncate(ref suffix)) = text_style.text_overflow
+                && bounds.size.width > px(0.)
+            {
+                let effective_width = match text_style.line_clamp {
+                    Some(max_lines) => bounds.size.width * max_lines,
+                    None => bounds.size.width,
+                };
+                let rounding_tolerance = px(0.5 / window.scale_factor());
+                let current_width = element_state
+                    .lines
+                    .iter()
+                    .map(|line| line.size(element_state.line_height).width)
+                    .fold(px(0.), Pixels::max);
+                let overflows_bounds = current_width > effective_width + rounding_tolerance;
+                let over_truncated = element_state
+                    .truncate_width
+                    .is_some_and(|w| w + rounding_tolerance < effective_width);
+                if overflows_bounds || over_truncated {
+                    Some((
+                        effective_width,
+                        suffix.clone(),
+                        element_state.wrap_width,
+                        element_state.line_height,
+                        element_state.runs.clone(),
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some((effective_width, suffix, wrap_width, line_height, runs)) = retruncate {
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+                Some(bounds.size.width)
+            } else {
+                wrap_width
+            };
+            if let Some((len, lines, size)) = shape_text_for_layout(
+                text.clone(),
+                &runs,
+                &text_style,
+                font_size,
+                line_height,
+                wrap_width,
+                Some(effective_width),
+                &suffix,
+                window,
+                cx,
+            ) {
+                let mut element_state = self.0.borrow_mut();
+                let element_state = element_state.as_mut().unwrap();
+                element_state.len = len;
+                element_state.lines = lines;
+                element_state.wrap_width = wrap_width;
+                element_state.truncate_width = Some(effective_width);
+                element_state.size = Some(size);
+            }
+        }
+
         let mut element_state = self.0.borrow_mut();
         let element_state = element_state
             .as_mut()

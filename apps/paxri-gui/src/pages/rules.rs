@@ -2,13 +2,13 @@ use crate::{
     Dashboard, Input,
     components::{
         ButtonVariant::Primary, Dialog, DialogContent, DialogMode, DialogSuccess, Ui, form_row,
-        heading,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, Direction, Forward, PeerForward, Status};
 use paxri_ui::components::{
     Icon, ListState, ListView,
+    directory::count_summary,
     forwarding::{NARROW_WIDTH, device_select, direction_select, endpoint_labels, parse_endpoints},
 };
 
@@ -269,14 +269,18 @@ impl Dashboard {
                 )
             })
             .collect();
+        let subtitle = if s.peer_forwards.is_none() && total == 0 && !s.peers.is_empty() {
+            "Loading…".to_owned()
+        } else {
+            count_summary(rows.len(), total, active, "rule", "rules")
+        };
+        let page = page
+            .py_2()
+            .child(ui.page_heading(Icon::Forward, "Port forwarding", subtitle))
+            .child(ui.separator());
         let mut table = ui
             .section()
-            .child(heading("Port forwarding"))
-            .child(
-                filters
-                    .toolbar(&devices, |v| &mut v.forward_filters, cx)
-                    .results(rows.len(), total),
-            );
+            .child(filters.toolbar(&devices, |v| &mut v.forward_filters, cx));
         let mut failures = Vec::new();
         if let Some(directory) = &s.peer_forwards {
             for (peer, error) in &directory.errors {

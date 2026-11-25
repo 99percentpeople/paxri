@@ -134,9 +134,9 @@ pub fn heading(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Clip painted glyphs without rewriting the UTF-8 text or its native font runs.
+/// Keep text on a single line and truncate overflow with an ellipsis.
 pub fn single_line<E: Styled>(element: E) -> E {
-    element.min_w_0().whitespace_nowrap().overflow_hidden()
+    element.min_w_0().truncate()
 }
 
 pub fn row() -> Div {

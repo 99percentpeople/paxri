@@ -1,11 +1,13 @@
 use super::{DevicesPane, overview};
 use crate::{
     Dashboard, Workspace,
-    components::{Ui, heading},
+    components::{Icon, Ui},
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Status, terminal::managed::Request};
-use paxri_ui::components::directory::{DeviceOption, SessionLocation, session_list_notice};
+use paxri_ui::components::directory::{
+    DeviceOption, SessionLocation, count_summary, session_list_notice,
+};
 use paxri_ui::components::{DropdownContent, ListView};
 use std::time::Duration;
 
@@ -174,14 +176,15 @@ impl Dashboard {
                 ));
             }
         }
+        let filtered = filters.has_selections() || !query.is_empty();
+        let subtitle = if initial_request && total == 0 {
+            "Loading…".to_owned()
+        } else {
+            count_summary(rows.len(), total, filtered, "session", "sessions")
+        };
         let section = ui
             .section()
-            .child(heading("Sessions"))
-            .child(
-                filters
-                    .controls(&devices, |v| &mut v.session_filters, cx)
-                    .results(rows.len(), total),
-            )
+            .child(filters.controls(&devices, |v| &mut v.session_filters, cx))
             .when(!rows.is_empty() && !failed.is_empty(), |section| {
                 section.child(ui.muted(format!("Couldn’t refresh sessions on {}.", failed.join(", "))))
             })
@@ -190,6 +193,13 @@ impl Dashboard {
                 |d, state| d.child(state.render(ui)),
             )
             .when(!rows.is_empty(), |page| page.child(ListView::new().children(rows)));
-        (overview().child(section), launcher)
+        (
+            overview()
+                .py_2()
+                .child(ui.page_heading(Icon::Terminal, "Sessions", subtitle))
+                .child(ui.separator())
+                .child(section),
+            launcher,
+        )
     }
 }

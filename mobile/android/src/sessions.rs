@@ -446,6 +446,56 @@ impl Mobile {
         cx.notify();
     }
 
+    pub(super) fn sessions_subtitle(&self, cx: &App) -> Option<String> {
+        let filters = &self.session_filters;
+        let query = filters.query(cx);
+        let mut total = 0;
+        let mut shown = 0;
+        let mut initial_request = false;
+        for (peer, p) in &self.peers {
+            let available = self.presence.online(peer) && p.supports_shell();
+            if available && filters.scope.device.as_ref().is_none_or(|v| v == peer) {
+                initial_request |=
+                    self.listing_peers.contains_key(peer) && !self.hosted.contains_key(peer);
+            }
+            let hosted = self
+                .hosted
+                .get(peer)
+                .filter(|_| available)
+                .into_iter()
+                .flatten()
+                .copied();
+            let local = self.sessions.values().filter(|s| &s.peer == peer).map(|s| {
+                (
+                    s.key,
+                    s.title.read(cx).label(&s.name),
+                    !matches!(s.state, SessionState::Ended(_)),
+                    s.attachment.session,
+                )
+            });
+            let entries = named_session_entries(
+                p.name.clone().into(),
+                peer,
+                &self.session_names,
+                hosted,
+                local,
+            );
+            total += entries.len();
+            for (key, (title, state, _)) in entries {
+                if filters.matches(&query, peer, &p.name, &title, key.number, state) {
+                    shown += 1;
+                }
+            }
+        }
+        if (self.starting_network || initial_request) && total == 0 {
+            return Some("Loading…".into());
+        }
+        let filtered = filters.has_selections() || !query.is_empty();
+        Some(paxri_ui::components::directory::count_summary(
+            shown, total, filtered, "session", "sessions",
+        ))
+    }
+
     pub(super) fn sessions_page(&self, ui: Ui, cx: &Context<Self>) -> Div {
         let filters = &self.session_filters;
         let query = filters.query(cx);
@@ -549,11 +599,7 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .child(
-                filters
-                    .controls(&devices, |v| &mut v.session_filters, cx)
-                    .results(rows.len(), total),
-            )
+            .child(filters.controls(&devices, |v| &mut v.session_filters, cx))
             .when(!rows.is_empty() && !failed.is_empty(), |d| {
                 d.child(ui.muted(format!(
                     "Couldn’t refresh sessions on {}.",

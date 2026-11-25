@@ -128,6 +128,45 @@ impl Mobile {
         }
     }
 
+    pub(super) fn forwards_subtitle(&self, cx: &App) -> Option<String> {
+        let filters = &self.forward_filters;
+        let query = filters.query(cx);
+        let mut total = 0;
+        let mut shown = 0;
+        let mut pending = false;
+        for (id, peer) in &self.peers {
+            let Some(entry) = self.forwards.entries.get(id) else {
+                continue;
+            };
+            if let Some(rules) = &entry.rules {
+                total += rules.len();
+            }
+            if filters
+                .scope
+                .device
+                .as_ref()
+                .is_some_and(|selected| selected != id)
+            {
+                continue;
+            }
+            pending |= entry.request.is_some() && entry.rules.is_none();
+            if let Some(rules) = &entry.rules {
+                for (key, rule) in rules {
+                    if filters.matches(id, key, rule, &peer.name, &query) {
+                        shown += 1;
+                    }
+                }
+            }
+        }
+        if (self.starting_network || pending) && total == 0 {
+            return Some("Loading…".into());
+        }
+        let filtered = filters.has_selections() || !query.is_empty();
+        Some(paxri_ui::components::directory::count_summary(
+            shown, total, filtered, "rule", "rules",
+        ))
+    }
+
     pub(super) fn forward_list(&self, ui: Ui, window: &Window, cx: &Context<Self>) -> Div {
         let filters = &self.forward_filters;
         let query = filters.query(cx);
@@ -208,7 +247,6 @@ impl Mobile {
                 }
             }
         }
-        let shown = rows.len();
         if rows.is_empty() {
             let selected = filters
                 .scope
@@ -260,11 +298,7 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
-            .child(
-                filters
-                    .toolbar(&options, |v| &mut v.forward_filters, cx)
-                    .results(shown, total),
-            )
+            .child(filters.toolbar(&options, |v| &mut v.forward_filters, cx))
             .child(body)
     }
 }

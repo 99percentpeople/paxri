@@ -11,7 +11,7 @@ use paxri_ui::settings::{controls::theme_cards, shortcuts};
 use gpui::{prelude::*, *};
 use paxri_config::gui::TabPlacement;
 use paxri_cli::gateway::Action;
-use paxri_config::startup::Startup;
+use paxri_config::startup::{GatewayChange, SessionKeepAlive, Startup};
 use paxri_control::{Command, GuiChange};
 
 impl Dashboard {
@@ -116,6 +116,23 @@ impl Dashboard {
             )
         };
         group.setting(catalog::STARTUP, policy);
+        group.setting(
+            catalog::SESSION_KEEP_ALIVE,
+            ui.setting_choice(
+                "gateway-session-keep-alive",
+                self.session_keep_alive,
+                SessionKeepAlive::ALL,
+                SessionKeepAlive::label,
+                cx.listener(|view, choice: &SessionKeepAlive, _, cx| {
+                    view.send(
+                        Command::SetGateway {
+                            change: GatewayChange::SessionKeepAlive(*choice),
+                        },
+                        cx,
+                    )
+                }),
+            ),
+        );
 
         let toggle = ui
             .button(

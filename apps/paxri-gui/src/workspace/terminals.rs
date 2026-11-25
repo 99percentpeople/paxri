@@ -223,8 +223,16 @@ impl Dashboard {
                 if let Err(e) = self.session_titles.retain(&sessions.title_scope, |k| k != key) {
                     eprintln!("Removing session title: {e}");
                 }
-            } else if terminal.is_running() && let Err(e) = self.session_titles.set(&sessions.title_scope, key, terminal.title.read(cx)) {
-                eprintln!("Saving session title: {e}");
+            } else if terminal.is_running() {
+                if let Err(e) =
+                    self.session_titles
+                        .set(&sessions.title_scope, key, terminal.title.read(cx))
+                {
+                    eprintln!("Saving session title: {e}");
+                }
+                if !sessions.hosted.contains(&key) {
+                    sessions.hosted.push(key);
+                }
             }
             sessions.open.remove(&key);
         }

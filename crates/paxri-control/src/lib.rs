@@ -79,6 +79,9 @@ pub enum Command {
     SetNative {
         change: paxri_config::NativeChange,
     },
+    SetGateway {
+        change: paxri_config::startup::GatewayChange,
+    },
     SetGui {
         change: GuiChange,
     },
@@ -206,6 +209,8 @@ pub struct Status {
     pub user_managed: bool,
     #[serde(default)]
     pub startup: paxri_config::startup::Startup,
+    #[serde(default)]
+    pub session_keep_alive: paxri_config::startup::SessionKeepAlive,
     #[serde(default)]
     pub config_path: Option<PathBuf>,
     #[serde(default)]

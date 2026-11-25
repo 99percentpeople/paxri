@@ -221,7 +221,7 @@ impl RenderOnce for Button {
             ButtonLayout::Circular => root.size(TOUCH_TARGET).rounded_full(),
             ButtonLayout::Floating => root.size(px(if cfg!(target_os = "android") { 56. } else { 48. })).rounded_full().shadow_md(),
             ButtonLayout::Row => row_layout(root),
-            ButtonLayout::Field => root.w_full().px(SPACE_3).justify_between(),
+            ButtonLayout::Field => root.w_full().min_w_0().overflow_hidden().px(SPACE_3).justify_between(),
             ButtonLayout::Card => root.w_full().min_w_0().h_auto().p(SPACE_2),
         };
         root.border_1()
