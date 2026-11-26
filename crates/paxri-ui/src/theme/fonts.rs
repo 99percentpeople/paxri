@@ -2,8 +2,8 @@ use super::TerminalAppearance;
 use gpui::{Font, FontFeatures, Global, SharedString, TextSystem, font, px};
 
 pub const FONT_SIZE: f32 = 15.;
-pub const TERMINAL_SYMBOL_FAMILY: &str = "paxri Terminal Fallback";
-pub const TERMINAL_SYMBOL_FONT: &[u8] = include_bytes!("../../fonts/terminal-fallback.ttf");
+pub const TERMINAL_SYMBOL_FAMILY: &str = "paxri Terminal Symbols";
+pub const TERMINAL_SYMBOL_FONT: &[u8] = include_bytes!("../../fonts/terminal-symbols.ttf");
 
 #[derive(Clone, Copy)]
 pub struct CellSize {

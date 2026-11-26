@@ -40,10 +40,10 @@ def main():
                 bundle.write(binaries / name, name)
             for name, data in runtime_files(binaries / "paxri-gateway.exe", ROOT / "target/conpty").items():
                 bundle.writestr(name, data)
-            bundle.write(ROOT / "packaging/windows/ConPTY-LICENSE.txt", "ConPTY-LICENSE.txt")
-            bundle.write(ROOT / "crates/paxri-ui/fonts/OFL.txt", "licenses/terminal-fallback.txt")
-            bundle.write(ROOT / "README.md", "README.md")
-            bundle.write(ROOT / "docs/installation.md", "installation.md")
+            bundle.write(ROOT / "packaging/windows/ConPTY-LICENSE.txt", "licenses/conpty.txt")
+            bundle.write(ROOT / "crates/paxri-ui/fonts/OFL.txt", "licenses/terminal-symbols-ofl.txt")
+            bundle.write(ROOT / "README.md", "docs/README.md")
+            bundle.write(ROOT / "docs/installation.md", "docs/installation.md")
         staged.replace(archive)
     finally:
         staged.unlink(missing_ok=True)

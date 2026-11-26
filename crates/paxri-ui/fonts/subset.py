@@ -1,4 +1,4 @@
-"""Generate the terminal fallback from Cascadia Mono PL Regular v2407.24 using fontTools."""
+"""Generate the terminal symbols font from Cascadia Mono PL Regular v2407.24 using fontTools."""
 from pathlib import Path
 import sys
 
@@ -27,9 +27,9 @@ if __name__ == "__main__":
     subsetter = subset.Subsetter(options=options)
     subsetter.populate(unicodes=[cp for lo, hi in RANGES for cp in range(lo, hi + 1)])
     subsetter.subset(font)
-    family = "paxri Terminal Fallback"
-    names = {1: family, 3: "paxri-TerminalFallback-1", 4: family, 6: "PaxriTerminalFallback"}
+    family = "paxri Terminal Symbols"
+    names = {1: family, 3: "paxri-TerminalSymbols-1", 4: family, 6: "PaxriTerminalSymbols"}
     for record in font["name"].names:
         if record.nameID in names:
             record.string = names[record.nameID].encode(record.getEncoding())
-    font.save(Path(__file__).with_name("terminal-fallback.ttf"))
+    font.save(Path(__file__).with_name("terminal-symbols.ttf"))
