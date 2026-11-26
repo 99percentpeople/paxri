@@ -257,9 +257,9 @@ pub fn parse(input: &str) -> Result<Config, String> {
         return Err("device_name requires a non-empty, single-line name".into());
     }
     if let Some(relay) = &config.native.relay_url
-        && (!matches!(relay.scheme(), "https" | "http") || relay.host().is_none())
+        && let Err(error) = validate_relay_url(relay.as_str())
     {
-        return Err("native.relay_url requires an HTTP(S) URL with a host".into());
+        return Err(format!("native.relay_url: {error}"));
     }
     for (name, peer) in &config.peers {
         if peer.endpoint_id.len() != 64 || !peer.endpoint_id.bytes().all(|c| c.is_ascii_hexdigit())
@@ -308,6 +308,17 @@ pub fn parse(input: &str) -> Result<Config, String> {
         }
     }
     Ok(config)
+}
+
+/// A custom relay must be an HTTP(S) URL with a host, on every client.
+pub fn validate_relay_url(url: &str) -> Result<(), String> {
+    let relay: Url = url
+        .parse()
+        .map_err(|_| format!("{url:?} is not a valid URL"))?;
+    if !matches!(relay.scheme(), "http" | "https") || relay.host().is_none() {
+        return Err("relay URL requires an HTTP(S) URL with a host".into());
+    }
+    Ok(())
 }
 
 fn valid_target(target: &str) -> bool {

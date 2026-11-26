@@ -45,6 +45,9 @@ pub type Peers = BTreeMap<String, Peer>;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct SavedDevices {
+    // Overrides automatic public relay selection until the app restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay_url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pending_unpairs: BTreeMap<String, PendingUnpair>,
     // Device IDs are the top-level keys in existing peers.json files.
@@ -114,7 +117,8 @@ fn config(devices: &SavedDevices) -> Result<Arc<Config>> {
         })
         .collect();
     Ok(Arc::new(serde_json::from_value(serde_json::json!({
-        "version": 1, "native": {"upnp": false}, "peers": entries, "pending_unpairs": devices.pending_unpairs
+        "version": 1, "native": {"upnp": false, "relay_url": devices.relay_url},
+        "peers": entries, "pending_unpairs": devices.pending_unpairs
     }))?))
 }
 
@@ -400,6 +404,29 @@ impl Client {
 
     pub async fn list(&self) -> Peers {
         self.devices.lock().await.peers.clone()
+    }
+
+    /// Returns the saved relay URL, or an empty string for automatic selection.
+    pub async fn relay_url(&self) -> String {
+        self.devices
+            .lock()
+            .await
+            .relay_url
+            .clone()
+            .unwrap_or_default()
+    }
+
+    pub async fn set_relay_url(self: &Arc<Self>, url: Option<String>) -> Result<()> {
+        if let Some(url) = url.as_deref() {
+            paxri_config::validate_relay_url(url)
+                .map_err(|error| anyhow::anyhow!("Relay URL {url:?}: {error}"))?;
+        }
+        let mut devices = self.devices.lock().await;
+        let mut next = devices.clone();
+        next.relay_url = url;
+        self.save(&next)?;
+        *devices = next;
+        Ok(())
     }
 
     pub async fn pair(&self, invite: Invitation, mut cancel: oneshot::Receiver<()>) -> Result<Option<Peers>> {

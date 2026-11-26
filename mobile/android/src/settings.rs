@@ -159,6 +159,12 @@ impl Mobile {
         }
 
         let mut groups = vec![device, appearance, terminal];
+        let mut network = SettingsGroup::new(catalog::NETWORK);
+        network.setting(
+            catalog::RELAY,
+            paxri_ui::settings::controls::setting_field(self.relay_input.clone()),
+        );
+        groups.push(network);
         if selected == Some(catalog::TERMINAL_CONTROLS) {
             let view = cx.entity().downgrade();
             let change = move |change, _: &mut Window, cx: &mut App| {

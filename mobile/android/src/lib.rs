@@ -58,6 +58,7 @@ enum Update {
     Ready(Arc<Client>, Peers),
     Error(String),
     Devices(Peers),
+    RelayUrl(String),
     Paired(Result<Option<Peers>, String>),
     PairCode(String),
     Composing {
@@ -91,6 +92,7 @@ enum Update {
         result: Result<Vec<paxri_core::connection::PeerConnection>, String>,
     },
     ForwardChanged(String, Result<(), String>),
+    RelayChanged(Result<(), String>),
     ForwardRules(
         String,
         u64,
@@ -174,6 +176,7 @@ struct Mobile {
     drawer: Drawer,
     modal: Option<Modal>,
     name_input: Entity<paxri_ui::components::input::Input>,
+    relay_input: Entity<paxri_ui::components::input::Input>,
     keybar: Arc<KeybarSettings>,
     key_editor: Option<keybar::Editor>,
     terminal_settings: paxri_ui::settings::terminal::TerminalSettings,
@@ -272,6 +275,8 @@ impl Mobile {
                 }
                 if field == this.name_input {
                     this.commit_device_name(cx);
+                } else if field == this.relay_input {
+                    this.commit_relay_url(cx);
                 }
                 this.editing_input = None;
                 gpui_mobile::set_text_input_callback(None);
@@ -337,6 +342,23 @@ impl Mobile {
             Self::start_input(s);
         }
         self.sync_back(cx);
+        cx.notify();
+    }
+
+    fn commit_relay_url(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.relay_input.read(cx).is_composing() {
+            return;
+        }
+        let url = self.relay_input.read(cx).text().trim().to_owned();
+        let updates = self.updates.clone();
+        self.rt.spawn(async move {
+            let saved = (!url.is_empty()).then_some(url);
+            let result = client.set_relay_url(saved).await.map_err(|e| format!("{e:#}"));
+            let _ = updates.send(Update::RelayChanged(result)).await;
+        });
         cx.notify();
     }
 
@@ -891,6 +913,21 @@ impl Mobile {
                     }
                 }
             }
+            Update::RelayUrl(url) => {
+                self.relay_input
+                    .update(cx, |input, cx| input.set_text(&url, cx));
+            }
+            Update::RelayChanged(Ok(())) => {
+                let url = self.relay_input.read(cx).text().trim().to_owned();
+                Toast::show(if url.is_empty() {
+                    "Using automatic public relay selection"
+                } else {
+                    "Relay saved. It is used after the app restarts."
+                }, self.window, cx);
+            }
+            Update::RelayChanged(Err(error)) => {
+                Toast::show(format!("Saving relay URL: {error}"), self.window, cx);
+            }
             Update::ForwardChanged(owner, result) => {
                 self.rule_form.saving = false;
                 if let Page::ForwardEdit {
@@ -1078,6 +1115,8 @@ fn android_main(android: AndroidApp) {
             let event = match result {
                 Ok(c) => {
                     let peers = c.list().await;
+                    let relay = c.relay_url().await;
+                    let _ = events.send(Update::RelayUrl(relay)).await;
                     Update::Ready(c, peers)
                 }
                 Err(e) => Update::Error(format!("{e:#}")),
@@ -1125,12 +1164,17 @@ fn android_main(android: AndroidApp) {
                 let names = DEVICE_NAME.borrow().clone();
                 let name_input = paxri_ui::components::input::Input::setting(&names.system, cx);
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
+                let relay_input = paxri_ui::components::input::Input::setting(
+                    "Automatic public relay",
+                    cx,
+                );
                 use gpui_mobile::KeyboardType;
                 let device_filters = DeviceFilters::new("Search devices…", cx);
                 let forward_filters = ForwardFilters::for_forwards(cx);
                 let session_filters = SessionFilters::new("Search sessions…", cx);
                 let mut inputs = vec![
                     (name_input.clone(), KeyboardType::Default),
+                    (relay_input.clone(), KeyboardType::Default),
                     (forward_filters.search.clone(), KeyboardType::Default),
                     (device_filters.search.clone(), KeyboardType::Default),
                     (session_filters.search.clone(), KeyboardType::Default),
@@ -1154,6 +1198,7 @@ fn android_main(android: AndroidApp) {
                 }
                 Mobile {
                     name_input,
+                    relay_input,
                     terminal_zoom: load_terminal_zoom(&android),
                     session_names: paxri_ui::terminal::title::SessionTitles::open(
                         android
