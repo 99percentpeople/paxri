@@ -1,22 +1,20 @@
-use gpui::{App, FallbackFontClass, FontFallbacks, SharedString};
+use crate::bridge;
+use gpui::{App, FallbackFontClass, Font as GpuiFont, FontFallbacks, font};
 use ndk::font::{Font, FontMatcher};
 use paxri_ui::theme::fonts::{Face, MonospaceFonts, TERMINAL_SYMBOL_FAMILY, TERMINAL_SYMBOL_FONT};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    ffi::CString,
     fs,
     path::PathBuf,
 };
 use ttf_parser::{Face as FontFile, name_id};
 
-fn matched_family(matched: &Font, files: &mut HashMap<PathBuf, Vec<u8>>) -> Option<String> {
-    let path = matched.path();
-    if !files.contains_key(path) {
-        files.insert(path.to_owned(), fs::read(path).ok()?);
-    }
-    let font = FontFile::parse(files.get(path)?, matched.collection_index() as u32).ok()?;
+fn family_name(bytes: &[u8], collection_index: u32) -> Option<String> {
+    let face = FontFile::parse(bytes, collection_index).ok()?;
     for id in [name_id::TYPOGRAPHIC_FAMILY, name_id::FAMILY] {
-        let names = || font.names().into_iter().filter(|n| n.name_id == id);
+        let names = || face.names().into_iter().filter(|n| n.name_id == id);
         if let Some(name) = names()
             .filter(|n| n.language_id == 0x409)
             .chain(names())
@@ -28,12 +26,103 @@ fn matched_family(matched: &Font, files: &mut HashMap<PathBuf, Vec<u8>>) -> Opti
     None
 }
 
-pub(super) fn init(cx: &mut App) -> SharedString {
+fn matched_family(
+    matched: &Font,
+    existing: &[String],
+    files: &mut HashMap<PathBuf, Vec<u8>>,
+    loaded: &mut HashSet<PathBuf>,
+) -> Option<String> {
+    let path = matched.path();
+    let index = matched.collection_index() as u32;
+    if let Some(bytes) = files.get(path) {
+        return family_name(bytes, index);
+    }
+    let bytes = fs::read(path).ok()?;
+    let name = family_name(&bytes, index)?;
+    loaded.insert(path.to_owned());
+    if !existing.iter().any(|known| known == &name) {
+        files.insert(path.to_owned(), bytes);
+    }
+    Some(name)
+}
+
+fn noto_cjk_for_locales(locales: &str) -> Option<&'static str> {
+    for raw in locales.split(',') {
+        let tag = raw.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        let mut parts = tag.split(['-', '_']);
+        let Some(lang) = parts.next() else { continue };
+        if lang.eq_ignore_ascii_case("ja") {
+            return Some("Noto Sans CJK JP");
+        }
+        if lang.eq_ignore_ascii_case("ko") {
+            return Some("Noto Sans CJK KR");
+        }
+        if lang.eq_ignore_ascii_case("zh") {
+            let rest: Vec<_> = parts.collect();
+            if rest.iter().any(|part| part.eq_ignore_ascii_case("hk")) {
+                return Some("Noto Sans CJK HK");
+            }
+            if rest.iter().any(|part| {
+                part.eq_ignore_ascii_case("hant")
+                    || part.eq_ignore_ascii_case("tw")
+                    || part.eq_ignore_ascii_case("mo")
+            }) {
+                return Some("Noto Sans CJK TC");
+            }
+            return Some("Noto Sans CJK SC");
+        }
+    }
+    None
+}
+
+fn push_unique(target: &mut Vec<String>, candidate: Option<String>, available: &[String]) {
+    if let Some(name) = candidate
+        && available.contains(&name)
+        && !target.contains(&name)
+    {
+        target.push(name);
+    }
+}
+
+pub(super) fn init(cx: &mut App) -> GpuiFont {
     let text = cx.text_system();
+    let existing = text.all_font_names();
     let mut matcher = FontMatcher::new();
+    let locales = bridge::system_locales();
+    if let Some(tags) = locales.as_deref()
+        && let Ok(c_tags) = CString::new(tags)
+    {
+        matcher.set_locales(&c_tags);
+    }
+
     let mut system_files = HashMap::<PathBuf, Vec<u8>>::new();
+    let mut loaded = HashSet::<PathBuf>::new();
     let ui = matcher.match_font(c"sans-serif", &[u16::from(b'M')], None);
-    let ui_family = matched_family(&ui, &mut system_files);
+    let ui_family = matched_family(&ui, &existing, &mut system_files, &mut loaded);
+
+    // Match Android's locale-specific Hanzi fallback so unified CJK characters
+    // follow the system script (e.g. Simplified Chinese) instead of TTC face 0 (JP).
+    let han = ['中' as u16];
+    let cjk_ui = matched_family(
+        &matcher.match_font(c"sans-serif", &han, None),
+        &existing,
+        &mut system_files,
+        &mut loaded,
+    );
+    let cjk_mono = matched_family(
+        &matcher.match_font(c"monospace", &han, None),
+        &existing,
+        &mut system_files,
+        &mut loaded,
+    );
+    let noto_cjk = locales
+        .as_deref()
+        .and_then(noto_cjk_for_locales)
+        .map(str::to_owned);
+
     let mut system_families = Vec::new();
     let mut preferred = None;
     // Ask Android for its actual monospace and its fallback runs for the exact
@@ -58,7 +147,7 @@ pub(super) fn init(cx: &mut App) -> SharedString {
     while !remaining.is_empty() {
         let mut count = 0;
         let matched = matcher.match_font(c"monospace", remaining, Some(&mut count));
-        if let Some(name) = matched_family(&matched, &mut system_files) {
+        if let Some(name) = matched_family(&matched, &existing, &mut system_files, &mut loaded) {
             if remaining.len() == console.len() {
                 preferred = Some(name.clone());
             }
@@ -82,12 +171,13 @@ pub(super) fn init(cx: &mut App) -> SharedString {
             .to_lowercase()
             .contains("mono")
             && !system_files.contains_key(&path)
+            && !loaded.contains(&path)
             && let Ok(bytes) = fs::read(&path)
         {
+            loaded.insert(path.clone());
             system_files.insert(path, bytes);
         }
     }
-    let mut loaded: HashSet<_> = system_files.keys().cloned().collect();
     let mut fonts: Vec<_> = system_files.into_values().map(Cow::Owned).collect();
     fonts.push(Cow::Borrowed(TERMINAL_SYMBOL_FONT));
     if let Err(error) = text.add_fonts(fonts) {
@@ -96,22 +186,46 @@ pub(super) fn init(cx: &mut App) -> SharedString {
     let available = text.all_font_names();
     system_families.retain(|name| available.contains(name));
     let preferred = preferred.filter(|name| available.contains(name));
+
+    let mut ui_fallbacks = Vec::new();
+    push_unique(&mut ui_fallbacks, cjk_ui.clone(), &available);
+    push_unique(&mut ui_fallbacks, noto_cjk.clone(), &available);
+
+    let mut mono_cjk_fallbacks = Vec::new();
+    push_unique(&mut mono_cjk_fallbacks, cjk_mono, &available);
+    push_unique(&mut mono_cjk_fallbacks, cjk_ui, &available);
+    push_unique(&mut mono_cjk_fallbacks, noto_cjk, &available);
+
+    log::info!(
+        "Android fonts: locales={:?} ui={:?} ui_fallbacks={:?} mono_default={:?} mono_cjk={:?}",
+        locales,
+        ui_family,
+        ui_fallbacks,
+        preferred,
+        mono_cjk_fallbacks
+    );
+
     let make_face = |name: &str| {
         let mut face = Face::measure(name.to_owned().into(), text);
-        let fallbacks = system_families
+        let mut fallbacks = Vec::new();
+        for family in system_families
             .iter()
             .map(String::as_str)
             .chain([TERMINAL_SYMBOL_FAMILY])
-            .filter(|&family| family != name)
-            .map(str::to_owned)
-            .collect();
+            .chain(mono_cjk_fallbacks.iter().map(String::as_str))
+        {
+            if family != name && !fallbacks.iter().any(|existing| existing == family) {
+                fallbacks.push(family.to_owned());
+            }
+        }
         face.font.fallbacks = Some(FontFallbacks::from_fonts(fallbacks));
         face
     };
     let installed: Vec<_> = available
         .iter()
         .filter(|name| {
-            name.to_lowercase().contains("mono") || Some(*name) == preferred.as_ref()
+            let lower = name.to_lowercase();
+            (lower.contains("mono") && !lower.contains("cjk")) || Some(*name) == preferred.as_ref()
         })
         .map(|name| make_face(name))
         .collect();
@@ -147,8 +261,17 @@ pub(super) fn init(cx: &mut App) -> SharedString {
         }
     })
     .detach();
-    ui_family
+
+    let ui_name = ui_family
         .filter(|name| available.contains(name))
-        .unwrap_or_else(|| ".SystemUIFont".to_owned())
-        .into()
+        .unwrap_or_else(|| ".SystemUIFont".to_owned());
+    let mut ui_font = font(ui_name);
+    let ui_fallbacks: Vec<_> = ui_fallbacks
+        .into_iter()
+        .filter(|name| name != ui_font.family.as_ref())
+        .collect();
+    if !ui_fallbacks.is_empty() {
+        ui_font.fallbacks = Some(FontFallbacks::from_fonts(ui_fallbacks));
+    }
+    ui_font
 }

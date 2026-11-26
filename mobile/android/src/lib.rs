@@ -138,7 +138,7 @@ enum Modal {
 struct Mobile {
     android: AndroidApp,
     window: AnyWindowHandle,
-    ui_font: SharedString,
+    ui_font: Font,
     terminal_zoom: f32,
     font: TerminalFont,
     selection_handles: Option<(u64, [i32; 5], bool)>,

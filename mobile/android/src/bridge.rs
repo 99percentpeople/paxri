@@ -298,6 +298,32 @@ pub(crate) enum ActivityAction<'a> {
     TerminalBell,
 }
 
+pub(crate) fn system_locales() -> Option<String> {
+    gpui_mobile::android::jni::with_env(|env| {
+        let list = env
+            .call_static_method(
+                jni_str!("android/os/LocaleList"),
+                jni_str!("getDefault"),
+                jni_sig!("()Landroid/os/LocaleList;"),
+                &[],
+            )
+            .and_then(|value| value.l())
+            .map_err(|e| e.to_string())?;
+        let tags = env
+            .call_method(
+                &list,
+                jni_str!("toLanguageTags"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )
+            .and_then(|value| value.l())
+            .map_err(|e| e.to_string())?;
+        Ok(gpui_mobile::android::jni::get_string(env, &tags))
+    })
+    .ok()
+    .filter(|tags| !tags.is_empty())
+}
+
 pub(crate) fn load_terminal_zoom(app: &AndroidApp) -> f32 {
     gpui_mobile::android::jni::with_env(|env| {
         let raw = app.activity_as_ptr().cast();
