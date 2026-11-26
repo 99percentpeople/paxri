@@ -689,32 +689,35 @@ def check_shared_forwards(root, call, start, rule_state, target_port):
     call("host", "forward", "resume", "pull", "--owner", "first")
     resumed_pull = rule_state("first", "pull", lambda r: r["bound"])["bound"]
     assert greeting(resumed_pull) == b"ready\n"
-    # Rebind a local rule to a different interface on the same port and rename it locally.
+    # Rebind a local rule to a different interface on the same port and update its display name.
     pull_port = resumed_pull.rsplit(":", 1)[1]
     call("first", "forward", "edit", "pull", "--peer", "host", "--listen", f"0.0.0.0:{pull_port}", "--target", address)
     assert rule_state("first", "pull", lambda r: r["bound"] == f"0.0.0.0:{pull_port}")["bound"] == f"0.0.0.0:{pull_port}"
     assert greeting(f"127.0.0.1:{pull_port}") == b"ready\n"
-    call("first", "forward", "edit", "pull", "--rename", "pull-renamed", "--peer", "host", "--listen", f"0.0.0.0:{pull_port}", "--target", address)
-    assert "pull" not in json.loads(call("first", "status", "--json"))["forwards"]
-    assert rule_state("first", "pull-renamed", lambda r: r["bound"] == f"0.0.0.0:{pull_port}")["bound"] == f"0.0.0.0:{pull_port}"
+    call("first", "forward", "edit", "pull", "--name", "Web UI", "--peer", "host", "--listen", f"0.0.0.0:{pull_port}", "--target", address)
+    assert json.loads(call("first", "status", "--json"))["forwards"]["pull"]["name"] == "Web UI"
+    assert rule_state("first", "pull", lambda r: r["bound"] == f"0.0.0.0:{pull_port}")["bound"] == f"0.0.0.0:{pull_port}"
     assert greeting(f"127.0.0.1:{pull_port}") == b"ready\n"
-    # Rename and flip direction from the other endpoint, keeping its view of the two addresses.
-    call("host", "forward", "edit", "pull-renamed", "--rename", "pull", "--owner", "first", "--listen", "0", "--target", address)
+    # Update display name and flip direction from the other endpoint, keeping its view of the two addresses.
+    call("host", "forward", "edit", "pull", "--name", "Shared Web", "--owner", "first", "--listen", "0", "--target", address)
     edited = rule_state("first", "pull", lambda r: r["direction"] == "remote" and r["bound"])
-    assert "pull-renamed" not in directory("host")["first"]
+    assert edited["name"] == "Shared Web"
     assert directory("host")["first"]["pull"]["direction"] == "local"
+    assert directory("host")["first"]["pull"]["name"] == "Shared Web"
     assert greeting(edited["bound"]) == b"ready\n"
     call("host", "forward", "remove", "pull", "--owner", "first")
     assert "pull" not in directory("host")["first"]
     assert "pull" in json.loads(call("second", "status", "--json"))["forwards"]
 
-    # One host target can be reverse-forwarded to the same listen port on multiple different peers,
-    # while the same receiving host cannot reuse a listen port.
+    # One host target can be reverse-forwarded to the same listen port on multiple different peers
+    # with the exact same display name, while the same receiving host cannot reuse a listen port.
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         shared_port = reserve.getsockname()[1]
-    call("host", "forward", "add", "web-first", "--remote", "--peer", "first", "--listen", str(shared_port), "--target", address)
-    call("host", "forward", "add", "web-second", "--remote", "--peer", "second", "--listen", str(shared_port), "--target", address)
+    call("host", "forward", "add", "web-first", "--name", "web", "--remote", "--peer", "first", "--listen", str(shared_port), "--target", address)
+    call("host", "forward", "add", "web-second", "--name", "web", "--remote", "--peer", "second", "--listen", str(shared_port), "--target", address)
+    host_forwards = json.loads(call("host", "status", "--json"))["forwards"]
+    assert host_forwards["web-first"]["name"] == "web" and host_forwards["web-second"]["name"] == "web"
     # Wait for first to release or test port conflict on the same receiving peer:
     try:
         call("host", "forward", "add", "web-first-dup", "--remote", "--peer", "first", "--listen", str(shared_port), "--target", address)

@@ -209,6 +209,8 @@ impl Direction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Forward {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub listen: SocketAddr,
     pub peer: String,
     #[serde(default)]
@@ -271,14 +273,21 @@ pub fn parse(input: &str) -> Result<Config, String> {
         Remote(String),
     }
     let mut seen_ports = std::collections::BTreeSet::new();
-    for (name, forward) in &mut config.forwards {
+    for (id, forward) in &mut config.forwards {
+        if let Some(name) = &forward.name
+            && (name.trim().is_empty() || name.len() > 128 || name.chars().any(char::is_control))
+        {
+            return Err(format!(
+                "forwards.{id}.name requires a non-empty, single-line name"
+            ));
+        }
         let Some(peer) = config.peers.get(&forward.peer) else {
             return Err(format!(
-                "forwards.{name} refers to unknown peer {}",
+                "forwards.{id} refers to unknown peer {}",
                 forward.peer
             ));
         };
-        forward.target = tcp_target(&forward.target).map_err(|e| format!("forwards.{name}: {e}"))?;
+        forward.target = tcp_target(&forward.target).map_err(|e| format!("forwards.{id}: {e}"))?;
         let port = forward.listen.port();
         if port != 0 {
             let host = match forward.direction {
@@ -288,10 +297,10 @@ pub fn parse(input: &str) -> Result<Config, String> {
             if !seen_ports.insert((host, port)) {
                 return Err(match forward.direction {
                     Direction::Local => format!(
-                        "forwards.{name}: listen port {port} is already used on this device"
+                        "forwards.{id}: listen port {port} is already used on this device"
                     ),
                     Direction::Remote => format!(
-                        "forwards.{name}: listen port {port} is already forwarded on {}",
+                        "forwards.{id}: listen port {port} is already forwarded on {}",
                         forward.peer
                     ),
                 });

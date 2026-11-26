@@ -18,7 +18,7 @@ use paxri_ui::components::{
 struct RuleForm {
     dashboard: Entity<Dashboard>,
     owner: Option<String>,
-    original_name: Option<String>,
+    rule_id: Option<String>,
     name: Entity<Input>,
     original_peer: Option<String>,
     peer: String,
@@ -64,7 +64,7 @@ impl Dashboard {
     pub(super) fn open_rule(
         &mut self,
         owner: Option<&str>,
-        name: Option<&str>,
+        id: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -72,11 +72,11 @@ impl Dashboard {
             return;
         }
         let Some(status) = &self.status else { return };
-        let rule = name.and_then(|id| match owner {
+        let rule = id.and_then(|id| match owner {
             Some(peer) => status.peer_forwards.as_ref()?.rules.get(peer)?.get(id),
             None => status.forwards.get(id),
         });
-        if name.is_some() && rule.is_none() {
+        if id.is_some() && rule.is_none() {
             return;
         }
         let Some(peer) = rule
@@ -86,16 +86,12 @@ impl Dashboard {
         else {
             return;
         };
-        let name_placeholder = if name.is_some() {
-            "e.g. web"
-        } else {
-            "e.g. web (optional)"
-        };
+        let initial_name = rule.and_then(|r| r.name.as_deref()).unwrap_or("");
         let form = RuleForm {
             dashboard: cx.entity(),
             owner: owner.map(str::to_owned),
-            original_name: name.map(str::to_owned),
-            name: Input::new(name.unwrap_or(""), name_placeholder, cx),
+            rule_id: id.map(str::to_owned),
+            name: Input::new(initial_name, "e.g. web (optional)", cx),
             original_peer: rule.map(|r| r.peer.clone()),
             peer: peer.clone(),
             listen: Input::new(rule.map_or("", |r| &r.listen), "8080", cx),
@@ -114,7 +110,7 @@ impl Dashboard {
             window,
             cx,
             DialogMode::Modal,
-            if name.is_some() {
+            if id.is_some() {
                 "Edit forwarding rule"
             } else {
                 "New forwarding rule"
@@ -140,33 +136,24 @@ impl RuleForm {
             Err(error) => return Dialog::show_error(window, error, cx),
         };
         let entered_name = self.name.read(cx).text().trim().to_owned();
-        let (name, new_name) = match &self.original_name {
-            Some(original) => {
-                if entered_name.is_empty() {
-                    return Dialog::show_error(window, "Enter a rule name", cx);
-                }
-                let renamed = (entered_name != *original).then_some(entered_name);
-                (original.clone(), renamed)
-            }
-            None => (entered_name, None),
-        };
+        let name = (!entered_name.is_empty()).then_some(entered_name);
         let command = match &self.owner {
             Some(owner) => Command::ManagePeerForward {
                 owner: owner.clone(),
                 action: PeerForward::Edit {
+                    id: self.rule_id.clone().unwrap_or_default(),
                     name,
-                    new_name,
                     listen,
                     target,
                     direction: self.direction,
                 },
             },
             None => Command::SaveForward {
-                name,
-                new_name,
-                edit: self.original_name.is_some(),
+                id: self.rule_id.clone().unwrap_or_default(),
+                edit: self.rule_id.is_some(),
                 expected_peer: self.original_peer.clone(),
                 rule: Forward {
+                    name,
                     peer: self.peer.clone(),
                     listen,
                     target,
@@ -357,13 +344,14 @@ impl Dashboard {
         }
         let rows: Vec<_> = rows
             .into_iter()
-            .map(|(owner, name, rule)| {
+            .map(|(owner, id, rule)| {
                 let owner = owner.map(String::as_str);
                 let display_name = s.peer_display_name(&rule.peer);
-                let actions = self.port_actions(name, owner, rule, display_name, cx);
+                let title = rule.display_name(id);
+                let actions = self.port_actions(id, &title, owner, rule, display_name, cx);
                 ui.forwarding_row(
-                    format!("{owner:?}/{name}"),
-                    name,
+                    format!("{owner:?}/{id}"),
+                    &title,
                     rule,
                     display_name,
                     narrow,

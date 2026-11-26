@@ -23,42 +23,24 @@ pub(super) async fn serve(
     forwarding::reply(&mut stream, result).await
 }
 
-fn peer_rule_name(state: &Gateway, id: &str, requested: &str) -> Result<String> {
-    if requested.is_empty() {
-        return Ok(String::new());
+fn normalize_name(name: Option<String>) -> Result<Option<String>> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
     anyhow::ensure!(
-        crate::settings::valid_forward_name(requested),
+        crate::settings::valid_forward_name(trimmed),
         "Invalid rule name"
     );
-    let owned_by_peer = |name: &str| {
-        state
-            .config
-            .forwards
-            .get(name)
-            .is_some_and(|rule| {
-                state.config.peers[&rule.peer]
-                    .endpoint_id
-                    .eq_ignore_ascii_case(id)
-            })
-    };
-    if owned_by_peer(requested) {
-        anyhow::bail!("Forward {requested} already exists");
-    }
-    if !state.config.forwards.contains_key(requested) {
-        return Ok(requested.to_owned());
-    }
-    // Another peer already uses this rule name on the gateway; disambiguate without colliding.
-    let name = (2..)
-        .map(|n| format!("{requested}-{n}"))
-        .find(|candidate| !state.config.forwards.contains_key(candidate))
-        .expect("available forward ID");
-    Ok(name)
+    Ok(Some(trimmed.to_owned()))
 }
 
 async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<forwarding::Rules> {
     anyhow::ensure!(state.config.is_paired(id), "Peer is not paired");
-    let name = match &action {
+    let rule_id = match &action {
         PeerForward::List => return Ok(state.forward_status(Some(id))),
         PeerForward::Create {
             name,
@@ -66,7 +48,7 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
             target,
             direction,
         } => {
-            let name = peer_rule_name(state, id, name)?;
+            let name = normalize_name(name.clone())?;
             let (peer, _) = state
                 .config
                 .peers
@@ -75,11 +57,11 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
                 .context("Peer is not paired")?;
             state
                 .change_settings(Command::SaveForward {
-                    name,
-                    new_name: None,
+                    id: String::new(),
                     edit: false,
                     expected_peer: None,
                     rule: Forward {
+                        name,
                         peer: peer.clone(),
                         listen: *listen,
                         target: target.clone(),
@@ -89,15 +71,15 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
                 .await?;
             return Ok(state.forward_status(Some(id)));
         }
-        PeerForward::Edit { name, .. }
-        | PeerForward::Remove { name }
-        | PeerForward::SetEnabled { name, .. } => name,
+        PeerForward::Edit { id, .. }
+        | PeerForward::Remove { id }
+        | PeerForward::SetEnabled { id, .. } => id,
     };
     // Derive the other endpoint from the saved rule and authenticated transport identity.
     let peer = state
         .config
         .forwards
-        .get(name)
+        .get(rule_id)
         .filter(|rule| {
             state.config.peers[&rule.peer]
                 .endpoint_id
@@ -108,23 +90,20 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
         .clone();
     match action {
         PeerForward::Edit {
+            id,
             name,
-            new_name,
             listen,
             target,
             direction,
         } => {
-            let new_name = match new_name {
-                Some(next) if next != name => Some(peer_rule_name(state, id, &next)?),
-                _ => None,
-            };
+            let name = normalize_name(name)?;
             state
                 .change_settings(Command::SaveForward {
-                    name,
-                    new_name,
+                    id,
                     edit: true,
                     expected_peer: Some(peer.clone()),
                     rule: Forward {
+                        name,
                         peer,
                         listen,
                         target,
@@ -133,13 +112,13 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
                 })
                 .await?;
         }
-        PeerForward::SetEnabled { name, enabled } => {
-            state.set_forward(&name, enabled, Some(&peer)).await?
+        PeerForward::SetEnabled { id, enabled } => {
+            state.set_forward(&id, enabled, Some(&peer)).await?
         }
-        PeerForward::Remove { name } => {
+        PeerForward::Remove { id } => {
             state
                 .change_settings(Command::RemoveForward {
-                    name,
+                    id,
                     expected_peer: Some(peer),
                 })
                 .await?

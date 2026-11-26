@@ -64,26 +64,31 @@ fn forwarding_discovery_respects_advertised_support_and_legacy_peers() {
 fn listen_ports_are_unique_per_receiving_host_while_targets_can_be_shared() {
     let a = "aa".repeat(32);
     let b = "bb".repeat(32);
-    // One local service (8080) can be reverse-forwarded to port 8080 on multiple different peers.
+    // One local service (8080) can be reverse-forwarded to port 8080 on multiple different peers
+    // using the same display name or no display name at all.
     let shared_target_reverse = format!(
         r#"version = 1
 [peers.first]
 endpoint_id = "{a}"
 [peers.second]
 endpoint_id = "{b}"
-[forwards.web-a]
+[forwards.7a9c1f3e]
+name = "web"
 peer = "first"
 direction = "remote"
 listen = "127.0.0.1:8080"
 target = "8080"
-[forwards.web-b]
+[forwards.b42e8d10]
+name = "web"
 peer = "second"
 direction = "remote"
 listen = "127.0.0.1:8080"
 target = "8080"
 "#
     );
-    assert!(parse(&shared_target_reverse).is_ok());
+    let parsed = parse(&shared_target_reverse).unwrap();
+    assert_eq!(parsed.forwards["7a9c1f3e"].name.as_deref(), Some("web"));
+    assert_eq!(parsed.forwards["b42e8d10"].name.as_deref(), Some("web"));
 
     // The same receiving peer cannot bind the same listen port twice.
     let dup_remote = format!(

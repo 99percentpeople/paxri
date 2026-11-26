@@ -42,7 +42,7 @@ impl ForwardFilters {
     pub fn matches(
         &self,
         device: &str,
-        name: &str,
+        id: &str,
         rule: &ForwardStatus,
         display_name: &str,
         query: &str,
@@ -68,10 +68,11 @@ impl ForwardFilters {
             Direction::Local => "forward",
             Direction::Remote => "reverse",
         };
+        let label = rule.display_name(id);
         contains_terms(
             query,
             format!(
-                "{name} {display_name} {} {} {} {} {direction} {state} {}",
+                "{id} {label} {display_name} {} {} {} {} {direction} {state} {}",
                 rule.peer,
                 rule.listen,
                 rule.bound.as_deref().unwrap_or(""),

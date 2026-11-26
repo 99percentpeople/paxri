@@ -157,24 +157,15 @@ impl SettingsFile {
         match change {
             Command::SetDeviceName { name } => paxri_config::file::edit_device_name(&mut doc, name.as_deref()),
             Command::SaveForward {
-                name,
-                new_name,
+                id,
                 edit,
                 rule: forward,
                 ..
             } => {
-                ensure!(valid_forward_name(name), "Enter a valid rule name");
-                let target_name = if *edit {
-                    match new_name.as_deref() {
-                        Some(next) if next != name.as_str() => {
-                            ensure!(valid_forward_name(next), "Enter a valid rule name");
-                            next
-                        }
-                        _ => name.as_str(),
-                    }
-                } else {
-                    name.as_str()
-                };
+                ensure!(valid_forward_name(id), "Enter a valid rule ID");
+                if let Some(name) = &forward.name {
+                    ensure!(valid_forward_name(name), "Enter a valid rule name");
+                }
                 if !doc.contains_key("forwards") {
                     doc["forwards"] = Table::new().into();
                 }
@@ -183,31 +174,26 @@ impl SettingsFile {
                     .context("invalid forwards table")?;
                 if *edit {
                     ensure!(
-                        forwards.contains_key(name),
-                        "Forward {name} no longer exists"
+                        forwards.contains_key(id),
+                        "Forward {id} no longer exists"
                     );
-                    if target_name != name.as_str() {
-                        ensure!(
-                            !forwards.contains_key(target_name),
-                            "Forward {target_name} already exists"
-                        );
-                        let item = forwards
-                            .remove(name)
-                            .context("Forward no longer exists")?;
-                        forwards.insert(target_name, item);
-                    }
                 } else {
                     ensure!(
-                        !forwards.contains_key(name),
-                        "Forward {name} already exists"
+                        !forwards.contains_key(id),
+                        "Forward {id} already exists"
                     );
-                    forwards.insert(name, Table::new().into());
+                    forwards.insert(id, Table::new().into());
                 }
                 let rule = forwards
-                    .get_mut(target_name)
+                    .get_mut(id)
                     .unwrap()
                     .as_table_like_mut()
                     .context("invalid forward rule")?;
+                if let Some(name) = &forward.name {
+                    rule.insert("name", value(name));
+                } else {
+                    rule.remove("name");
+                }
                 rule.insert("listen", value(forward.listen.to_string()));
                 rule.insert("peer", value(&forward.peer));
                 if forward.direction == Direction::Remote {
@@ -217,13 +203,13 @@ impl SettingsFile {
                 }
                 rule.insert("target", value(&forward.target));
             }
-            Command::RemoveForward { name, .. } => {
+            Command::RemoveForward { id, .. } => {
                 ensure!(
                     doc.get_mut("forwards")
                         .and_then(|v| v.as_table_like_mut())
-                        .and_then(|v| v.remove(name))
+                        .and_then(|v| v.remove(id))
                         .is_some(),
-                    "Unknown forward {name}"
+                    "Unknown forward {id}"
                 );
             }
             _ => anyhow::bail!("Expected a settings change"),
@@ -341,11 +327,11 @@ mod tests {
             text: original,
         };
         let mut rule = Command::SaveForward {
-            name: "Web UI".into(),
-            new_name: None,
+            id: "web-ui".into(),
             expected_peer: None,
             edit: false,
             rule: paxri_config::Forward {
+                name: Some("Web UI".into()),
                 direction: Direction::Local,
                 listen: "[::1]:0".parse()?,
                 peer: "lab".into(),
@@ -353,24 +339,19 @@ mod tests {
             },
         };
         let (text, cfg) = file.prepare(&rule)?;
-        assert_eq!(cfg.forwards["Web UI"].peer, "lab");
+        assert_eq!(cfg.forwards["web-ui"].peer, "lab");
+        assert_eq!(cfg.forwards["web-ui"].name.as_deref(), Some("Web UI"));
         assert!(text.contains("# paired manually"));
         file.persist(text)?;
         assert!(file.prepare(&rule).is_err());
-        if let Command::SaveForward {
-            new_name,
-            edit,
-            rule,
-            ..
-        } = &mut rule
-        {
+        if let Command::SaveForward { edit, rule, .. } = &mut rule {
             *edit = true;
-            *new_name = Some("SSH".into());
+            rule.name = Some("SSH".into());
             rule.target = "22".into();
         }
         let (text, cfg) = file.prepare(&rule)?;
-        assert!(!cfg.forwards.contains_key("Web UI"));
-        assert_eq!(cfg.forwards["SSH"].target, "127.0.0.1:22");
+        assert_eq!(cfg.forwards["web-ui"].name.as_deref(), Some("SSH"));
+        assert_eq!(cfg.forwards["web-ui"].target, "127.0.0.1:22");
         file.persist(text)?;
         for name in [Some("Lab PC".to_owned()), None] {
             let (text, cfg) = file.prepare(&Command::SetDeviceName { name: name.clone() })?;
@@ -378,7 +359,7 @@ mod tests {
             file.persist(text)?;
         }
         let (text, cfg) = file.prepare(&Command::RemoveForward {
-            name: "SSH".into(),
+            id: "web-ui".into(),
             expected_peer: None,
         })?;
         assert!(cfg.forwards.is_empty());

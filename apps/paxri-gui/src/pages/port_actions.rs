@@ -9,14 +9,15 @@ use paxri_ui::components::forwarding::{RuleAction, RuleMenu};
 impl Dashboard {
     pub(super) fn port_actions(
         &self,
-        name: &str,
+        id: &str,
+        title: &str,
         owner: Option<&str>,
         rule: &ForwardStatus,
         display_name: &str,
         cx: &Context<Self>,
     ) -> RuleMenu {
         let dashboard = cx.entity();
-        let key = name.to_owned();
+        let key = id.to_owned();
         let peer = rule.peer.clone();
         let remote = owner.map(str::to_owned);
         let prompt = format!(
@@ -24,8 +25,8 @@ impl Dashboard {
             rule.route_for(display_name)
         );
         RuleMenu::new(
-            format!("rule-actions-{owner:?}/{name}"),
-            name,
+            format!("rule-actions-{owner:?}/{id}"),
+            title,
             rule.enabled(),
             move |action, w, cx| match action {
                 RuleAction::Edit => dashboard.update(cx, |v, cx| {
@@ -39,12 +40,12 @@ impl Dashboard {
                         Some(owner) => Command::ManagePeerForward {
                             owner: owner.clone(),
                             action: PeerForward::SetEnabled {
-                                name: key.clone(),
+                                id: key.clone(),
                                 enabled,
                             },
                         },
                         None => Command::SetForward {
-                            name: key.clone(),
+                            id: key.clone(),
                             expected_peer: Some(peer.clone()),
                             enabled,
                         },
@@ -52,7 +53,7 @@ impl Dashboard {
                     v.send(command, cx);
                 }),
                 RuleAction::Remove => {
-                    let name = key.clone();
+                    let id = key.clone();
                     let peer = peer.clone();
                     let remote = remote.clone();
                     let prompt = prompt.clone();
@@ -65,7 +66,7 @@ impl Dashboard {
                         dashboard.clone(),
                         None,
                         move |_, ui, cx| {
-                            let name = name.clone();
+                            let id = id.clone();
                             let peer = peer.clone();
                             let remote = remote.clone();
                             DialogContent::new(prompt.clone(), "Cancel").action(
@@ -74,10 +75,10 @@ impl Dashboard {
                                         let command = match &remote {
                                             Some(owner) => Command::ManagePeerForward {
                                                 owner: owner.clone(),
-                                                action: PeerForward::Remove { name: name.clone() },
+                                                action: PeerForward::Remove { id: id.clone() },
                                             },
                                             None => Command::RemoveForward {
-                                                name: name.clone(),
+                                                id: id.clone(),
                                                 expected_peer: Some(peer.clone()),
                                             },
                                         };

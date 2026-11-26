@@ -18,30 +18,25 @@ pub enum ForwardAction {
         json: bool,
     },
     Add(Rule),
-    Edit(EditRule),
+    Edit(Rule),
     Remove {
-        name: String,
+        id: String,
     },
     Pause {
-        name: String,
+        id: String,
     },
     Resume {
-        name: String,
+        id: String,
     },
-}
-
-#[derive(Args)]
-pub struct EditRule {
-    #[command(flatten)]
-    rule: Rule,
-    /// Rename the rule while updating its settings
-    #[arg(long)]
-    rename: Option<String>,
 }
 
 #[derive(Args)]
 pub struct Rule {
-    name: String,
+    /// Unique rule ID
+    id: String,
+    /// Optional display name (duplicates allowed; pass empty string to clear on edit)
+    #[arg(long)]
+    name: Option<String>,
     /// Paired device name, full ID or unique ID prefix
     #[arg(long)]
     peer: Option<String>,
@@ -77,15 +72,18 @@ impl ForwardAction {
         }
         if let Some(owner) = owner {
             let action = match self {
-                Self::Edit(EditRule { rule: args, rename }) => {
+                Self::Edit(args) => {
                     anyhow::ensure!(
                         args.peer.is_none(),
                         "A peer-owned rule already belongs to this pairing. Omit --peer."
                     );
-                    let new_name = rename.filter(|next| next != &args.name);
+                    let name = args
+                        .name
+                        .map(|n| n.trim().to_owned())
+                        .filter(|n| !n.is_empty());
                     PeerForward::Edit {
-                        name: args.name,
-                        new_name,
+                        id: args.id,
+                        name,
                         target: args.target,
                         listen: args.listen,
                         direction: if args.remote {
@@ -95,9 +93,9 @@ impl ForwardAction {
                         },
                     }
                 }
-                Self::Remove { name } => PeerForward::Remove { name },
-                Self::Pause { name } | Self::Resume { name } => {
-                    PeerForward::SetEnabled { name, enabled }
+                Self::Remove { id } => PeerForward::Remove { id },
+                Self::Pause { id } | Self::Resume { id } => {
+                    PeerForward::SetEnabled { id, enabled }
                 }
                 Self::Add(_) => anyhow::bail!("Create a rule with --peer and omit --owner"),
                 Self::List { .. } => unreachable!(),
@@ -113,75 +111,55 @@ impl ForwardAction {
             println!("Updated forwarding rules on {owner}.");
             return Ok(());
         }
-        let (name, command) = match self {
+        let (id, command) = match self {
             Self::List { .. } => unreachable!(),
-            Self::Add(args) => {
+            Self::Add(args) | Self::Edit(args) => {
+                let name = args
+                    .name
+                    .map(|n| n.trim().to_owned())
+                    .filter(|n| !n.is_empty());
                 let rule = Forward {
-                    listen: args.listen,
-                    peer: args.peer.context("Specify the paired device with --peer")?,
-                    target: args.target,
-                    direction: if args.remote {
-                        Direction::Remote
-                    } else {
-                        Direction::Local
-                    },
-                };
-                (
-                    args.name.clone(),
-                    Command::SaveForward {
-                        name: args.name,
-                        new_name: None,
-                        expected_peer: None,
-                        edit,
-                        rule,
-                    },
-                )
-            }
-            Self::Edit(EditRule { rule: args, rename }) => {
-                let rule = Forward {
-                    listen: args.listen,
-                    peer: args.peer.context("Specify the paired device with --peer")?,
-                    target: args.target,
-                    direction: if args.remote {
-                        Direction::Remote
-                    } else {
-                        Direction::Local
-                    },
-                };
-                let new_name = rename.filter(|next| next != &args.name);
-                let display_name = new_name.clone().unwrap_or_else(|| args.name.clone());
-                (
-                    display_name,
-                    Command::SaveForward {
-                        name: args.name,
-                        new_name,
-                        expected_peer: None,
-                        edit,
-                        rule,
-                    },
-                )
-            }
-            Self::Remove { name } => (
-                name.clone(),
-                Command::RemoveForward {
                     name,
+                    listen: args.listen,
+                    peer: args.peer.context("Specify the paired device with --peer")?,
+                    target: args.target,
+                    direction: if args.remote {
+                        Direction::Remote
+                    } else {
+                        Direction::Local
+                    },
+                };
+                (
+                    args.id.clone(),
+                    Command::SaveForward {
+                        id: args.id,
+                        expected_peer: None,
+                        edit,
+                        rule,
+                    },
+                )
+            }
+            Self::Remove { id } => (
+                id.clone(),
+                Command::RemoveForward {
+                    id,
                     expected_peer: None,
                 },
             ),
-            Self::Resume { name } | Self::Pause { name } => (
-                name.clone(),
+            Self::Resume { id } | Self::Pause { id } => (
+                id.clone(),
                 Command::SetForward {
-                    name,
+                    id,
                     enabled,
                     expected_peer: None,
                 },
             ),
         };
         let status = request(ipc, command).await?;
-        if let Some(f) = status.forwards.get(&name) {
-            println!("{name}: {} ({})", f.route(), f.state());
+        if let Some(f) = status.forwards.get(&id) {
+            println!("{id}: {} ({})", f.route(), f.state());
         } else {
-            println!("Removed {name}");
+            println!("Removed {id}");
         }
         Ok(())
     }

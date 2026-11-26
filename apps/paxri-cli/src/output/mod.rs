@@ -104,17 +104,18 @@ pub(super) fn peer(snapshot: &PeerStatus) -> String {
 }
 
 fn forward_table(report: &mut Report, status: &Status) {
-    let local = status.forwards.iter().map(|(name, rule)| ("This device", name, rule));
+    let local = status.forwards.iter().map(|(id, rule)| ("This device", id, rule));
     let shared = status.peer_forwards.iter().flat_map(|d| &d.rules)
-        .flat_map(|(owner, rules)| rules.iter().map(move |(name, rule)| (owner.as_str(), name, rule)));
+        .flat_map(|(owner, rules)| rules.iter().map(move |(id, rule)| (owner.as_str(), id, rule)));
     let rows = local.chain(shared)
-        .map(|(owner, name, rule)| {
+        .map(|(owner, id, rule)| {
             let direction = match rule.direction {
                 Direction::Local => "Forward",
                 Direction::Remote => "Reverse",
             };
             [
-                name.clone(),
+                id.clone(),
+                rule.name.as_deref().unwrap_or("-").into(),
                 owner.to_owned(),
                 direction.into(),
                 rule.peer.clone(),
@@ -127,6 +128,7 @@ fn forward_table(report: &mut Report, status: &Status) {
     report.table(
         "Forwarding rules",
         [
+            "ID",
             "NAME",
             "OWNER",
             "DIRECTION",

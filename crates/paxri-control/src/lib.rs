@@ -55,15 +55,13 @@ pub enum Command {
         accept: bool,
     },
     SetForward {
-        name: String,
+        id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_peer: Option<String>,
         enabled: bool,
     },
     SaveForward {
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        new_name: Option<String>,
+        id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_peer: Option<String>,
         edit: bool,
@@ -71,7 +69,7 @@ pub enum Command {
         rule: Forward,
     },
     RemoveForward {
-        name: String,
+        id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_peer: Option<String>,
     },
@@ -119,6 +117,8 @@ struct Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ForwardStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub listen: String,
     pub bound: Option<String>,
     pub peer: String,
@@ -133,6 +133,23 @@ pub struct ForwardStatus {
 }
 
 impl ForwardStatus {
+    pub fn display_name(&self, id: &str) -> String {
+        if let Some(name) = self.name.as_deref().filter(|n| !n.is_empty()) {
+            return name.to_owned();
+        }
+        // Generated rule IDs are 8 lowercase hex digits; fall back to a port label when unnamed.
+        if id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            let port = self
+                .bound
+                .as_deref()
+                .unwrap_or(&self.listen)
+                .rsplit_once(':')
+                .map_or(id, |(_, port)| port);
+            return format!("tcp-{port}");
+        }
+        id.to_owned()
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled.unwrap_or(self.bound.is_some())
     }

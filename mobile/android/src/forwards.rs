@@ -209,17 +209,18 @@ impl Mobile {
                     }
                     let owner = id.clone();
                     let rule_key = key.clone();
+                    let title = rule.display_name(key);
                     let route = rule.route_for(name);
                     let view = cx.weak_entity();
                     let menu_id = format!("rule-actions-{id}/{key}");
                     let menu =
-                        RuleMenu::new(menu_id, key, rule.enabled(), move |action, _, cx| {
+                        RuleMenu::new(menu_id, &title, rule.enabled(), move |action, _, cx| {
                             let _ = view.update(cx, |v, cx| match action {
                                 RuleAction::Edit => v.open_rule(Some((&owner, &rule_key)), cx),
                                 RuleAction::SetEnabled(enabled) => v.send_forward(
                                     &owner,
                                     PeerForward::SetEnabled {
-                                        name: rule_key.clone(),
+                                        id: rule_key.clone(),
                                         enabled,
                                     },
                                     cx,
@@ -238,7 +239,7 @@ impl Mobile {
                         });
                     rows.push(ui.forwarding_row(
                         format!("{id}/{key}"),
-                        key,
+                        &title,
                         rule,
                         name,
                         narrow,
@@ -326,21 +327,18 @@ impl RuleForm {
         let (listen, target) = parse_endpoints(listen.read(cx).text(), target.read(cx).text())?;
         let direction = self.direction;
         let entered = name.read(cx).text().trim();
-        if let Some(original) = &self.existing {
-            if entered.is_empty() {
-                return Err("Enter a rule name".into());
-            }
-            let new_name = (entered != original.as_str()).then(|| entered.to_owned());
+        let name = (!entered.is_empty()).then(|| entered.to_owned());
+        if let Some(id) = &self.existing {
             Ok(PeerForward::Edit {
-                name: original.clone(),
-                new_name,
+                id: id.clone(),
+                name,
                 listen,
                 target,
                 direction,
             })
         } else {
             Ok(PeerForward::Create {
-                name: entered.to_owned(),
+                name,
                 listen,
                 target,
                 direction,
@@ -357,8 +355,8 @@ impl Mobile {
         if self.rule_form.saving {
             return;
         }
-        let (owner, name, rule) = match existing {
-            Some((owner, name)) => {
+        let (owner, id, rule) = match existing {
+            Some((owner, id)) => {
                 let Some(rules) = self
                     .forwards
                     .entries
@@ -367,8 +365,8 @@ impl Mobile {
                 else {
                     return;
                 };
-                let Some(rule) = rules.get(name) else { return };
-                (Some(owner.to_owned()), Some(name), Some(rule))
+                let Some(rule) = rules.get(id) else { return };
+                (Some(owner.to_owned()), Some(id), Some(rule))
             }
             None => {
                 if !self.can_add_rule(self.forward_filters.scope.device.as_deref()) {
@@ -382,13 +380,13 @@ impl Mobile {
                 (owner, None, None)
             }
         };
-        self.rule_form.existing = name.map(str::to_owned);
+        self.rule_form.existing = id.map(str::to_owned);
         self.rule_form.direction = rule
             .map_or(self.forward_filters.scope.direction.unwrap_or_default(), |r| {
                 r.direction
             });
         let values = [
-            name.unwrap_or_default(),
+            rule.and_then(|r| r.name.as_deref()).unwrap_or(""),
             rule.map_or("", |r| &r.listen),
             rule.map_or("", |r| &r.target),
         ];
@@ -416,19 +414,19 @@ impl Mobile {
         self.send_forward(&owner, action, cx);
     }
 
-    pub(super) fn remove_forward(&mut self, owner: &str, name: String, cx: &mut Context<Self>) {
+    pub(super) fn remove_forward(&mut self, owner: &str, id: String, cx: &mut Context<Self>) {
         if !matches!(self.page, Page::Forwards(_)) {
             return;
         }
         if self.presence.online(owner)
             && !self.forwards.entries.get(owner)
                 .and_then(|entry| entry.rules.as_ref())
-                .is_some_and(|rules| rules.contains_key(&name))
+                .is_some_and(|rules| rules.contains_key(&id))
         {
             Toast::show("Forwarding rule unavailable", self.window, cx);
             return;
         }
-        self.send_forward(owner, PeerForward::Remove { name }, cx);
+        self.send_forward(owner, PeerForward::Remove { id }, cx);
     }
 
     fn send_forward(&mut self, owner: &str, action: PeerForward, cx: &mut Context<Self>) {
