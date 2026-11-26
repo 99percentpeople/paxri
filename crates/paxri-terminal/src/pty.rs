@@ -66,6 +66,11 @@ impl Session {
             let _ = managed;
             pair.master.try_clone_reader()?
         };
+        // portable-pty's Unix writer sends "\n\x04" on Drop even in raw mode, which injects
+        // a newline into foreground TUIs (such as tmux sessions) when a PTY disconnects.
+        #[cfg(unix)]
+        let mut writer = unix::clone_master(&*pair.master)?;
+        #[cfg(not(unix))]
         let mut writer = pair.master.take_writer()?;
         let mut child = pair
             .slave
@@ -164,5 +169,67 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.input.close();
         self.sizes.close();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn dropping_session_does_not_inject_input_into_pty() {
+        let dir = std::env::temp_dir().join(format!(
+            "paxri-pty-drop-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let captured = dir.join("captured");
+        let done = dir.join("done");
+
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args([
+            "-c",
+            "stty raw -echo; (trap '' HUP; cat <&0 > \"$1\"; printf ok > \"$2\") & printf READY; exec sleep 60",
+            "_",
+        ]);
+        cmd.arg(&captured);
+        cmd.arg(&done);
+
+        let (session, output) = Session::spawn_managed(
+            cmd,
+            PtySize {
+                rows: 24,
+                cols: 80,
+                ..PtySize::default()
+            },
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        while !seen.windows(5).any(|w| w == b"READY") {
+            assert!(Instant::now() < deadline, "timed out waiting for PTY child");
+            if let Ok(Output::Bytes(bytes)) = output.recv_blocking() {
+                seen.extend(bytes);
+            }
+        }
+
+        drop(session);
+        // Drain output until the reader releases its duplicated master fd.
+        while output.recv_blocking().is_ok() {}
+
+        while !done.exists() {
+            assert!(Instant::now() < deadline, "timed out waiting for slave EOF");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let bytes = std::fs::read(&captured).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            bytes.is_empty(),
+            "unexpected bytes injected into PTY on disconnect: {bytes:?}"
+        );
     }
 }

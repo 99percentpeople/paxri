@@ -8,6 +8,15 @@ use std::{
     os::{fd::BorrowedFd, unix::net::UnixStream},
 };
 
+pub(super) fn clone_master(master: &dyn MasterPty) -> Result<File> {
+    let fd = master
+        .as_raw_fd()
+        .context("missing native PTY descriptor")?;
+    // SAFETY: master owns fd for the duration of the borrow. The caller owns its duplicate.
+    let file = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+    Ok(file.into())
+}
+
 pub(super) struct Reader {
     master: File,
     exited: UnixStream,
@@ -16,15 +25,11 @@ pub(super) struct Reader {
 
 impl Reader {
     pub(super) fn new(master: &dyn MasterPty) -> Result<(Self, UnixStream)> {
-        let fd = master
-            .as_raw_fd()
-            .context("missing native PTY descriptor")?;
-        // SAFETY: master owns fd for the duration of the borrow. The reader owns its duplicate.
-        let file = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+        let master = clone_master(master)?;
         let (exited, notify) = UnixStream::pair()?;
         Ok((
             Self {
-                master: file.into(),
+                master,
                 exited,
                 remaining_tail: 1024 * 1024,
             },
