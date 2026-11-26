@@ -63,7 +63,7 @@ impl ListState {
             .py_8()
             .gap_2()
             .child(icon)
-            .child(ui.muted(self.title).font_weight(FontWeight::MEDIUM))
+            .child(ui.muted(self.title).text_role(TextRole::Label))
             .when_some(self.detail, |body, detail| {
                 body.child(ui.muted(detail).max_w(px(360.)))
             })

@@ -34,7 +34,6 @@ impl RenderOnce for TerminalPreview {
             .flex()
             .flex_col()
             .w_full()
-            .max_w(px(520.))
             .p(theme::SPACE_3)
             .rounded(theme::CONTROL_RADIUS)
             .border_1()

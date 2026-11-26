@@ -180,7 +180,7 @@ pub fn category_button(
         .when(layout == super::SettingsLayout::Mobile, |row| {
             row.child(Icon::ChevronRight.draw(16.))
         })
-        .when_some(count, |d, n| d.child(ui.muted(n.to_string()).text_xs()));
+        .when_some(count, |d, n| d.child(ui.caption(n.to_string())));
     ui.button(Ghost, id, text)
         .row()
         .icon(icon)

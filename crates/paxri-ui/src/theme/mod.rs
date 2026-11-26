@@ -1,5 +1,7 @@
 //! Appearance shared by every workspace connected to this node.
 pub mod fonts;
+mod typography;
+pub use typography::{TextRole, TypographyExt};
 mod zoom;
 pub use zoom::Zoom;
 mod palette;

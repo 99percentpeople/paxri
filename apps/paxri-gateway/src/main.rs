@@ -62,6 +62,7 @@ impl Drop for LocalListener {
 enum Listener {
     Local(LocalListener),
     Remote(RemoteForward),
+    Failed(String),
 }
 
 impl Listener {
@@ -72,6 +73,10 @@ impl Listener {
                 error: None,
             },
             Self::Remote(r) => r.state(),
+            Self::Failed(error) => BindingState {
+                address: None,
+                error: Some(error.clone()),
+            },
         }
     }
     async fn stop(self) {
@@ -81,6 +86,7 @@ impl Listener {
                 let _ = (&mut l.task).await;
             }
             Self::Remote(r) => r.stop().await,
+            Self::Failed(_) => {}
         }
     }
     fn update_destination(&self, rule: &Forward) {
@@ -90,6 +96,7 @@ impl Listener {
                     .send_replace((rule.peer.clone(), rule.target.clone()));
             }
             Self::Remote(r) => r.set_target(rule.target.clone()),
+            Self::Failed(_) => {}
         }
     }
 }
@@ -178,7 +185,11 @@ impl Gateway {
             .get(name)
             .with_context(|| format!("unknown forward {name}"))?;
         if enabled {
-            if !self.listeners.contains_key(name) {
+            if !self
+                .listeners
+                .get(name)
+                .is_some_and(|listener| !matches!(listener, Listener::Failed(_)))
+            {
                 let listener = self.prepare_listener(name, rule).await?;
                 self.listeners.insert(name.to_owned(), listener);
             }
@@ -270,6 +281,16 @@ impl Gateway {
         {
             self.check_forward_peer(name, expected_peer.as_deref())?;
         }
+        if let Command::SaveForward {
+            name,
+            new_name,
+            edit,
+            ..
+        } = &mut change
+            && (!*edit || new_name.as_deref() == Some(name.as_str()))
+        {
+            *new_name = None;
+        }
         if let Command::SaveForward { name, edit: false, rule, .. } = &mut change
             && name.is_empty()
         {
@@ -283,8 +304,16 @@ impl Gateway {
         // Reserve any new port before saving. The active rule survives a bind or disk error.
         let mut replace = false;
         let mut socket = None;
-        if let Command::SaveForward { name, edit, .. } = &change {
-            let rule = &config.forwards[name];
+        let mut released_local = None;
+        if let Command::SaveForward {
+            name,
+            new_name,
+            edit,
+            ..
+        } = &change
+        {
+            let final_name = new_name.as_deref().unwrap_or(name.as_str());
+            let rule = &config.forwards[final_name];
             anyhow::ensure!(
                 !self.direct_only || config.peers[&rule.peer].ticket.is_some(),
                 "direct-only forwarding to {} requires a peer ticket",
@@ -292,6 +321,9 @@ impl Gateway {
             );
             replace = !edit
                 || self.listeners.get(name).is_some_and(|old| {
+                    if matches!(old, Listener::Failed(_)) {
+                        return true;
+                    }
                     let prior = &self.config.forwards[name];
                     prior.direction != rule.direction
                         || match rule.direction {
@@ -305,13 +337,58 @@ impl Gateway {
                         }
                 });
             if replace && rule.direction == Direction::Local {
-                socket = Some(Self::bind(name, rule).await?);
+                socket = Some(match Self::bind(final_name, rule).await {
+                    Ok(bound) => bound,
+                    Err(err)
+                        if *edit
+                            && err
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+                            && matches!(
+                                self.listeners.get(name),
+                                Some(Listener::Local(old))
+                                    if old.address.port() == rule.listen.port()
+                            ) =>
+                    {
+                        // Rebinding the same port on a different interface (e.g. 127.0.0.1 -> 0.0.0.0)
+                        // must release this rule's own listener first, restoring it on failure.
+                        let prior_rule = self.config.forwards[name].clone();
+                        let old = self.listeners.remove(name).expect("local listener");
+                        let prior_addr = old.state().address.unwrap_or(prior_rule.listen);
+                        old.stop().await;
+                        match Self::bind(final_name, rule).await {
+                            Ok(bound) => {
+                                released_local = Some((name.clone(), prior_rule, prior_addr));
+                                bound
+                            }
+                            Err(retry_err) => {
+                                if let Ok(restored) = TcpListener::bind(prior_addr).await
+                                    && let Ok(listener) = self.start_listener(restored, &prior_rule)
+                                {
+                                    self.listeners.insert(name.clone(), listener);
+                                }
+                                return Err(retry_err);
+                            }
+                        }
+                    }
+                    Err(err) => return Err(err),
+                });
             }
         }
-        self.file.persist(text)?;
+        if let Err(err) = self.file.persist(text) {
+            drop(socket);
+            if let Some((old_name, prior_rule, prior_addr)) = released_local
+                && let Ok(restored) = TcpListener::bind(prior_addr).await
+                && let Ok(listener) = self.start_listener(restored, &prior_rule)
+            {
+                self.listeners.insert(old_name, listener);
+            }
+            return Err(err);
+        }
         match change {
-            Command::SaveForward { name, .. } => {
-                let rule = &config.forwards[&name];
+            Command::SaveForward { name, new_name, .. } => {
+                let final_name = new_name.unwrap_or_else(|| name.clone());
+                let rule = &config.forwards[&final_name];
                 if replace {
                     if let Some(old) = self.listeners.remove(&name) {
                         old.stop().await;
@@ -320,9 +397,10 @@ impl Gateway {
                         Some(socket) => self.start_listener(socket, rule)?,
                         None => self.remote_listener(rule),
                     };
-                    self.listeners.insert(name, listener);
-                } else if let Some(listener) = self.listeners.get(&name) {
+                    self.listeners.insert(final_name, listener);
+                } else if let Some(listener) = self.listeners.remove(&name) {
                     listener.update_destination(rule);
+                    self.listeners.insert(final_name, listener);
                 }
             }
             Command::RemoveForward { name, .. } => {
@@ -810,7 +888,11 @@ async fn run(
         gateway.pairing.message = Some(format!("Pairing code unavailable: {e:#}"));
     }
     for name in config.forwards.keys() {
-        gateway.set_forward(name, true, None).await?;
+        if let Err(err) = gateway.set_forward(name, true, None).await {
+            let message = format!("{err:#}");
+            eprintln!("Starting forward {name}: {message}");
+            gateway.listeners.insert(name.clone(), Listener::Failed(message));
+        }
     }
     if options.user_managed
         && let Err(error) =

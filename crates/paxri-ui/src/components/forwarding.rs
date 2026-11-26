@@ -150,6 +150,25 @@ pub fn endpoint_labels(direction: Direction) -> (&'static str, &'static str) {
     }
 }
 
+pub fn direction_summary(direction: Direction, peer: &str) -> String {
+    match direction {
+        Direction::Local => format!(
+            "Opens a new port on this device to reach an existing service on {peer}."
+        ),
+        Direction::Remote => format!(
+            "Opens a new port on {peer} to reach an existing service on this device."
+        ),
+    }
+}
+
+pub fn direction_help(peer: &str) -> String {
+    format!(
+        "Forward: {}\nReverse: {}",
+        direction_summary(Direction::Local, peer),
+        direction_summary(Direction::Remote, peer),
+    )
+}
+
 pub fn direction_select(
     id: impl Into<ElementId>,
     direction: Direction,
@@ -231,7 +250,7 @@ impl Ui {
         };
         let endpoint = |column, host: &str, address: &str| {
             cell()
-                .child(ui.muted(host.to_owned()).text_xs())
+                .child(ui.caption(host.to_owned()))
                 .child(line(column, address))
         };
         let listen = f.bound.as_deref().unwrap_or(&f.listen);
@@ -251,7 +270,7 @@ impl Ui {
                 )
         } else {
             let fields = columns()
-                .child(cell().child(title).child(ui.muted(direction).text_xs()))
+                .child(cell().child(title).child(ui.caption(direction)))
                 .child(cell().child(line("peer", display_name)))
                 .child(endpoint("listen", source, listen))
                 .child(endpoint("target", destination, &f.target))
@@ -318,7 +337,7 @@ impl RenderOnce for RuleMenu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Direction, endpoint_labels, parse_endpoints};
+    use super::{Direction, direction_help, direction_summary, endpoint_labels, parse_endpoints};
 
     #[test]
     fn endpoint_labels_flip_with_direction_and_parse_defaults() {
@@ -330,6 +349,11 @@ mod tests {
             endpoint_labels(Direction::Remote),
             ("Listen on peer", "Target on this device")
         );
+        assert!(direction_summary(Direction::Local, "Lab").contains("existing service on Lab"));
+        assert!(direction_summary(Direction::Remote, "Lab").contains("new port on Lab"));
+        let help = direction_help("Lab");
+        assert!(help.contains("Forward: Opens a new port on this device"));
+        assert!(help.contains("\nReverse: Opens a new port on Lab"));
         let (listen, target) = parse_endpoints(" 8080 ", " 3000 ").unwrap();
         assert_eq!(listen.port(), 8080);
         assert_eq!(target, "127.0.0.1:3000");

@@ -9,6 +9,10 @@ use paxri_config::{Config, DevicePlatform, Direction};
 use paxri_control::Command;
 use toml_edit::{DocumentMut, Table, TableLike, value};
 
+pub(crate) fn valid_forward_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
+}
+
 pub(super) enum PeerUpdate<'a> {
     Address,
     Pair(Option<&'a str>),
@@ -154,14 +158,23 @@ impl SettingsFile {
             Command::SetDeviceName { name } => paxri_config::file::edit_device_name(&mut doc, name.as_deref()),
             Command::SaveForward {
                 name,
+                new_name,
                 edit,
                 rule: forward,
                 ..
             } => {
-                ensure!(
-                    !name.trim().is_empty() && !name.chars().any(char::is_control),
-                    "Enter a rule name"
-                );
+                ensure!(valid_forward_name(name), "Enter a valid rule name");
+                let target_name = if *edit {
+                    match new_name.as_deref() {
+                        Some(next) if next != name.as_str() => {
+                            ensure!(valid_forward_name(next), "Enter a valid rule name");
+                            next
+                        }
+                        _ => name.as_str(),
+                    }
+                } else {
+                    name.as_str()
+                };
                 if !doc.contains_key("forwards") {
                     doc["forwards"] = Table::new().into();
                 }
@@ -173,6 +186,16 @@ impl SettingsFile {
                         forwards.contains_key(name),
                         "Forward {name} no longer exists"
                     );
+                    if target_name != name.as_str() {
+                        ensure!(
+                            !forwards.contains_key(target_name),
+                            "Forward {target_name} already exists"
+                        );
+                        let item = forwards
+                            .remove(name)
+                            .context("Forward no longer exists")?;
+                        forwards.insert(target_name, item);
+                    }
                 } else {
                     ensure!(
                         !forwards.contains_key(name),
@@ -181,7 +204,7 @@ impl SettingsFile {
                     forwards.insert(name, Table::new().into());
                 }
                 let rule = forwards
-                    .get_mut(name)
+                    .get_mut(target_name)
                     .unwrap()
                     .as_table_like_mut()
                     .context("invalid forward rule")?;
@@ -319,6 +342,7 @@ mod tests {
         };
         let mut rule = Command::SaveForward {
             name: "Web UI".into(),
+            new_name: None,
             expected_peer: None,
             edit: false,
             rule: paxri_config::Forward {
@@ -333,12 +357,20 @@ mod tests {
         assert!(text.contains("# paired manually"));
         file.persist(text)?;
         assert!(file.prepare(&rule).is_err());
-        if let Command::SaveForward { edit, rule, .. } = &mut rule {
+        if let Command::SaveForward {
+            new_name,
+            edit,
+            rule,
+            ..
+        } = &mut rule
+        {
             *edit = true;
+            *new_name = Some("SSH".into());
             rule.target = "22".into();
         }
         let (text, cfg) = file.prepare(&rule)?;
-        assert_eq!(cfg.forwards["Web UI"].target, "127.0.0.1:22");
+        assert!(!cfg.forwards.contains_key("Web UI"));
+        assert_eq!(cfg.forwards["SSH"].target, "127.0.0.1:22");
         file.persist(text)?;
         for name in [Some("Lab PC".to_owned()), None] {
             let (text, cfg) = file.prepare(&Command::SetDeviceName { name: name.clone() })?;
@@ -346,7 +378,7 @@ mod tests {
             file.persist(text)?;
         }
         let (text, cfg) = file.prepare(&Command::RemoveForward {
-            name: "Web UI".into(),
+            name: "SSH".into(),
             expected_peer: None,
         })?;
         assert!(cfg.forwards.is_empty());

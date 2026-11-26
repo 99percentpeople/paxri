@@ -751,7 +751,7 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
             .when_some(self.number, |frame, (_, unit)| {
                 let frame = frame
                     .on_scroll_wheel(cx.listener(Self::number_wheel))
-                    .child(ui.muted(unit).text_xs().flex_none().whitespace_nowrap())
+                    .child(ui.caption(unit).flex_none().whitespace_nowrap())
                     .child(
                         div()
                             .w(px(24.))

@@ -111,7 +111,7 @@ impl Dashboard {
             } else {
                 "Restart the gateway through its service manager to apply saved changes."
             };
-            let mut note = row().child(ui.muted(message));
+            let mut note = row().w_full().child(ui.muted(message));
             if status.user_managed {
                 note = note.child(
                     ui.button(Secondary, "apply-network", "Restart gateway")
@@ -121,8 +121,7 @@ impl Dashboard {
             group.footer = Some(note.into_any_element());
         } else {
             group.footer = Some(
-                ui.muted("Network changes take effect at the next gateway start.")
-                    .text_xs()
+                ui.caption("Network changes take effect at the next gateway start.")
                     .pt(theme::SPACE_1)
                     .into_any_element(),
             );

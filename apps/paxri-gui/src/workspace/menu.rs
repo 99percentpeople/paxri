@@ -1,5 +1,8 @@
 use super::*;
-use crate::components::ButtonVariant::Ghost;
+use crate::{
+    components::ButtonVariant::Ghost,
+    theme::{TextRole, TypographyExt},
+};
 use paxri_control::DevicePlatform;
 use paxri_ui::components::{
     Dropdown, DropdownContent, DropdownState, DropdownTrigger, directory::SessionLocation,
@@ -77,7 +80,7 @@ impl RenderOnce for TabSessionLauncher {
                     Icon::device(group.platform)
                         .label(group.name)
                         .flex_auto()
-                        .font_weight(FontWeight::MEDIUM),
+                        .text_role(TextRole::Label),
                 )
                 .child(
                     div()
@@ -85,7 +88,7 @@ impl RenderOnce for TabSessionLauncher {
                         .flex()
                         .items_center()
                         .gap(px(3.))
-                        .text_xs()
+                        .text_role(TextRole::Caption)
                         .text_color(rgb(ui.colors.muted_foreground))
                         .child(Icon::Plus.draw(12.))
                         .child("New"),
@@ -112,7 +115,7 @@ impl RenderOnce for TabSessionLauncher {
                     .justify_between()
                     .gap_2()
                     .child(Icon::Terminal.label(session.title).flex_auto())
-                    .child(ui.muted(format!("#{}", key.number)).text_xs().flex_none());
+                    .child(ui.caption(format!("#{}", key.number)).flex_none());
                 menu = menu.item(
                     SharedString::from(format!("restore-{peer}-{}-{}", key.number, key.nonce)),
                     label,

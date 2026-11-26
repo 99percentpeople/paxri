@@ -368,10 +368,19 @@ impl Mobile {
             number_field(editor.height.clone()),
         );
         options.add("haptics", "Key vibration", "", "", setting_field(feedback));
-        let form = self
-            .settings_body("keybar-fields")
-            .child(div().id("keybar-rows").child(rows.render_rows(ui)))
-            .child(options.render_rows(ui));
+        let form = self.settings_body(
+            "keybar-fields",
+            Self::settings_column()
+                .child(
+                    div()
+                        .id("keybar-rows")
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(rows.render_rows(ui)),
+                )
+                .child(options.render_rows(ui)),
+        );
         div()
             .id("terminal-key-editor")
             .flex_1()

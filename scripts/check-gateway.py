@@ -685,16 +685,27 @@ def check_shared_forwards(root, call, start, rule_state, target_port):
     assert directory("host")["first"]["pull"]["enabled"] is False
     assert greeting(listeners["second"]) == b"ready\n"
     call("host", "forward", "resume", "pull", "--owner", "first")
-    assert greeting(rule_state("first", "pull", lambda r: r["bound"])["bound"]) == b"ready\n"
-    # Change the direction from the other endpoint, keeping its view of the two addresses.
-    call("host", "forward", "edit", "pull", "--owner", "first", "--listen", "0", "--target", address)
+    resumed_pull = rule_state("first", "pull", lambda r: r["bound"])["bound"]
+    assert greeting(resumed_pull) == b"ready\n"
+    # Rebind a local rule to a different interface on the same port and rename it locally.
+    pull_port = resumed_pull.rsplit(":", 1)[1]
+    call("first", "forward", "edit", "pull", "--peer", "host", "--listen", f"0.0.0.0:{pull_port}", "--target", address)
+    assert rule_state("first", "pull", lambda r: r["bound"] == f"0.0.0.0:{pull_port}")["bound"] == f"0.0.0.0:{pull_port}"
+    assert greeting(f"127.0.0.1:{pull_port}") == b"ready\n"
+    call("first", "forward", "edit", "pull", "--rename", "pull-renamed", "--peer", "host", "--listen", f"0.0.0.0:{pull_port}", "--target", address)
+    assert "pull" not in json.loads(call("first", "status", "--json"))["forwards"]
+    assert rule_state("first", "pull-renamed", lambda r: r["bound"] == f"0.0.0.0:{pull_port}")["bound"] == f"0.0.0.0:{pull_port}"
+    assert greeting(f"127.0.0.1:{pull_port}") == b"ready\n"
+    # Rename and flip direction from the other endpoint, keeping its view of the two addresses.
+    call("host", "forward", "edit", "pull-renamed", "--rename", "pull", "--owner", "first", "--listen", "0", "--target", address)
     edited = rule_state("first", "pull", lambda r: r["direction"] == "remote" and r["bound"])
+    assert "pull-renamed" not in directory("host")["first"]
     assert directory("host")["first"]["pull"]["direction"] == "local"
     assert greeting(edited["bound"]) == b"ready\n"
     call("host", "forward", "remove", "pull", "--owner", "first")
     assert "pull" not in directory("host")["first"]
     assert "pull" in json.loads(call("second", "status", "--json"))["forwards"]
-    print("PASS: forward and reverse TCP, same-name rules on different owners, bilateral list/edit/pause/resume/remove, third-party and unpaired isolation")
+    print("PASS: forward and reverse TCP, same-name rules on different owners, bilateral list/edit/rename/pause/resume/remove, same-port rebind, third-party and unpaired isolation")
 
 
 def check_unpair(root, keys, call, start, wait, echo_port):
@@ -980,8 +991,16 @@ target="{refused_port}"
 
         process.kill()  # stale socket recovery after a crash, same key and rules
         process.wait(timeout=10)
-        _, restarted = start("client")
-        assert restarted["device_id"] == keys["client"]
+        with socket.socket() as blocker:
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            blocker.bind(("127.0.0.1", listen_port))
+            blocker.listen()
+            _, restarted = start("client")
+            assert restarted["device_id"] == keys["client"]
+            assert restarted["forwards"]["test"]["bound"] is None
+            assert "bind forward" in (restarted["forwards"]["test"]["error"] or "")
+        call("client", "forward", "resume", "test")
+        restarted = json.loads(call("client", "status", "--json"))
         with connect(restarted, "test") as conn, conn.makefile("rb") as replies:
             assert replies.readline() == b"ready\n"
         print("PASS: paired TCP forwarding, server greeting, 256 KiB after half-close, "

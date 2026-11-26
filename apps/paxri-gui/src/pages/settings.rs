@@ -66,7 +66,7 @@ impl Dashboard {
             "Gateway status",
             status_hint,
             &format!("runtime process {state}"),
-            actions().child(ui.status_badge(state, color)),
+            actions().justify_end().child(ui.status_badge(state, color)),
         );
 
         let actions_hint = if external {
@@ -312,6 +312,7 @@ impl Dashboard {
             self.name_field.render()
         } else {
             ui.muted("Connect to the gateway or select its node TOML with --config.")
+                .text_right()
         };
         SettingsGroup::device(field)
     }

@@ -48,7 +48,7 @@ impl Ui {
             .bg(rgb(self.colors.card))
             .text_color(rgb(self.colors.canvas.foreground))
             .shadow_lg()
-            .text_sm()
+            .text_role(TextRole::Body)
     }
 
     pub fn menu_item(

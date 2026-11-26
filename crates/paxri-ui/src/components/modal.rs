@@ -117,8 +117,7 @@ impl RenderOnce for ModalDialog {
                     .px_4()
                     .pt_4()
                     .pb_2()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(TextRole::Section)
                     .child(self.title),
             )
             .child(
@@ -130,7 +129,7 @@ impl RenderOnce for ModalDialog {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .text_sm()
+                    .text_role(TextRole::Body)
                     .child(self.body),
             )
             .child(

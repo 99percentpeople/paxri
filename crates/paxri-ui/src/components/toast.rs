@@ -1,5 +1,5 @@
 use super::Ui;
-use crate::theme::{CONTROL_RADIUS, SPACE_2, SPACE_3, SPACE_4};
+use crate::theme::{CONTROL_RADIUS, SPACE_2, SPACE_3, SPACE_4, TextRole, TypographyExt};
 use gpui::{prelude::*, *};
 use std::{collections::HashMap, time::Duration};
 
@@ -75,7 +75,7 @@ impl Toast {
                         .shadow_md()
                         .bg(rgb(colors.background))
                         .text_color(rgb(colors.foreground))
-                        .text_sm()
+                        .text_role(TextRole::Body)
                         .child(message.clone()),
                 ),
         )

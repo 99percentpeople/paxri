@@ -119,10 +119,9 @@ impl Dashboard {
             ));
         }
         let mut content = div()
-            .w_full()
+            .flex_1()
             .min_w_0()
-            .max_w(px(840.))
-            .mx_auto()
+            .max_w(paxri_ui::settings::MAX_WIDTH)
             .flex()
             .flex_col()
             .gap(SPACE_4)
@@ -169,7 +168,8 @@ impl Dashboard {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .max_w(px(760.))
+                    .max_w(paxri_ui::settings::MAX_WIDTH)
+                    .when(!compact, |d| d.px(SPACE_4))
                     .child(editor.search.clone()),
             );
         DockPanel::fill(
@@ -182,7 +182,7 @@ impl Dashboard {
                 .child(DockPanel::scroll(
                     "settings-scroll",
                     editor.scroll.clone(),
-                    content,
+                    div().w_full().flex().justify_center().child(content),
                 )),
         )
         .with_navigation(navigation)

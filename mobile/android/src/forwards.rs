@@ -4,8 +4,8 @@ use paxri_ui::components::{
     ButtonVariant::Ghost,
     Icon, ListState, ListView,
     forwarding::{
-        NARROW_WIDTH, RuleAction, RuleMenu, device_select, direction_select, endpoint_labels,
-        parse_endpoints,
+        NARROW_WIDTH, RuleAction, RuleMenu, device_select, direction_select, direction_summary,
+        endpoint_labels, parse_endpoints,
     },
     input::Input,
 };
@@ -325,19 +325,24 @@ impl RuleForm {
         let [name, listen, target] = &self.inputs;
         let (listen, target) = parse_endpoints(listen.read(cx).text(), target.read(cx).text())?;
         let direction = self.direction;
-        if let Some(name) = &self.existing {
+        let entered = name.read(cx).text().trim();
+        if let Some(original) = &self.existing {
+            if entered.is_empty() {
+                return Err("Enter a rule name".into());
+            }
+            let new_name = (entered != original.as_str()).then(|| entered.to_owned());
             Ok(PeerForward::Edit {
-                name: name.clone(),
+                name: original.clone(),
+                new_name,
                 listen,
                 target,
                 direction,
             })
         } else {
-            let name = name.read(cx).text().trim();
-            let name = if name.is_empty() {
+            let name = if entered.is_empty() {
                 format!("tcp-{}", listen.port())
             } else {
-                name.to_owned()
+                entered.to_owned()
             };
             Ok(PeerForward::Create {
                 name,
@@ -536,11 +541,7 @@ impl Mobile {
             );
             fields.field("Device", devices);
         }
-        if let Some(key) = &form.existing {
-            fields.field("Rule name", key.clone());
-        } else {
-            fields.field("Rule name", name.clone());
-        }
+        fields.field("Rule name", name.clone());
         let direction = direction_select(
             "forward-direction",
             form.direction,
@@ -550,21 +551,22 @@ impl Mobile {
             }),
         );
         let (listen_label, target_label) = endpoint_labels(form.direction);
+        let peer_name = owner
+            .and_then(|id| self.peers.get(id))
+            .map_or("the peer", |p| p.name.as_str());
         fields.field("Direction", direction);
         fields.field(listen_label, listen.clone());
         fields.field(target_label, target.clone());
-        let page = self
-            .settings_body("forward-edit-page")
-            .child(fields.render_rows(ui));
+        let mut page = Self::settings_column()
+            .child(fields.render_rows(ui))
+            .child(ui.muted(direction_summary(form.direction, peer_name)));
         if form.saving {
-            return page.child(ui.muted("Saving…"));
+            page = page.child(ui.muted("Saving…"));
+        } else if owner.is_some_and(|id| !self.presence.online(id)) {
+            page = page.child(ui.muted("Device offline."));
+        } else if form.existing.is_none() && !self.can_add_rule(None) {
+            page = page.child(ui.muted("No connected devices can create forwarding rules."));
         }
-        if owner.is_some_and(|id| !self.presence.online(id)) {
-            return page.child(ui.muted("Device offline."));
-        }
-        if form.existing.is_none() && !self.can_add_rule(None) {
-            return page.child(ui.muted("No connected devices can create forwarding rules."));
-        }
-        page
+        self.settings_body("forward-edit-page", page)
     }
 }

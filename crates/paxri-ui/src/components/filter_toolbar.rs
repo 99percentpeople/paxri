@@ -147,7 +147,7 @@ impl RenderOnce for FilterToolbar {
             .gap_1()
             .child(bar)
             .when_some(summary, |root, text| {
-                root.child(ui.muted(text).text_xs().px_1())
+                root.child(ui.caption(text).px_1())
             })
     }
 }

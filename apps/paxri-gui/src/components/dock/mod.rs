@@ -8,7 +8,7 @@ use super::{Ui, focus::workspace_keyboard};
 use paxri_ui::components::ScrollArea;
 use crate::{
     chrome,
-    theme::{BUTTON_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4},
+    theme::{BUTTON_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TextRole, TypographyExt},
 };
 use gpui::{prelude::*, *};
 pub(crate) use navigation::DockNavigation;
@@ -165,8 +165,7 @@ impl<K: Clone + PartialEq + 'static> RenderOnce for DockLayout<K> {
                     .flex()
                     .items_center()
                     .px(SPACE_3)
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(TextRole::Subtitle)
                     .child(self.title);
                 if let Some(nav) = navigation {
                     self.tabs = self.tabs.sidebar_content(nav);

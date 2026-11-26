@@ -1,5 +1,8 @@
 //! Client-drawn window frames shared by workspaces and device terminals.
-use crate::components::{Icon, Ui};
+use crate::{
+    components::{Icon, Ui},
+    theme::{TextRole, TypographyExt},
+};
 use gpui::{prelude::*, *};
 
 pub(super) const TITLEBAR_HEIGHT: f32 = 40.;
@@ -299,8 +302,7 @@ pub(crate) fn dialog_titlebar(title: &'static str, ui: Ui) -> Div {
         .items_center()
         .min_w_0()
         .pl_4()
-        .text_sm()
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_role(TextRole::Subtitle)
         .child(title);
     #[cfg(not(windows))]
     let label = label.on_mouse_down(MouseButton::Left, |_, w, cx| {

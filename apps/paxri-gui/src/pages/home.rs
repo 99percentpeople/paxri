@@ -106,10 +106,10 @@ impl Dashboard {
                         d.child(self.paired_devices(ui, s, cx))
                     })
                     .when_some(status.filter(|s| !s.pairing.pending_unpairs.is_empty()), |d, s| {
-                        d.child(ui.muted(format!(
+                        d.child(ui.caption(format!(
                             "Awaiting unpair confirmation: {}",
                             s.pairing.pending_unpairs.join(", ")
-                        )).text_xs())
+                        )))
                     }),
             )
             .when(status.is_some() && (self.devices_pane.is_some() || requests > 0), |sidebar| {
@@ -152,7 +152,7 @@ impl Dashboard {
             }
             (_, Some(status)) => (overview()
                 .child(ui.device_heading(
-                    Some(ui.muted("This device").text_xs().flex_none()),
+                    Some(ui.caption("This device").flex_none()),
                     self.local_name.clone(),
                     DevicePlatform::current(),
                     Some((
@@ -256,8 +256,7 @@ impl Dashboard {
                     }),
             )
             .child(
-                ui.muted("Pairing allows both devices to open terminals and copy files.")
-                    .text_xs(),
+                ui.caption("Pairing allows both devices to open terminals and copy files."),
             )
             .child(ui.separator())
             .child(heading("Pending devices"))
@@ -366,7 +365,7 @@ impl Dashboard {
                     v.send_from_dialog(Command::RefreshPairingCode, w, DialogSuccess::KeepOpen, cx);
                 })),
         );
-        ui.labeled("Your pairing code", code).min_w_0()
+        ui.labeled("Your pairing code", code).min_w_0().flex_none()
     }
 }
 

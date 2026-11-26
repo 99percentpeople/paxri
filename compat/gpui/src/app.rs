@@ -2311,6 +2311,30 @@ pub struct AnyDrag {
     pub cursor_style: Option<CursorStyle>,
 }
 
+/// What a tooltip is anchored to when positioned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TooltipAnchor {
+    /// Positioned relative to the pointer location (default).
+    #[default]
+    Cursor,
+    /// Positioned relative to the hovered element's bounding box.
+    Element,
+}
+
+/// Preferred placement of a tooltip relative to its anchor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TooltipPlacement {
+    /// Centered below the anchor, flipping above if clipped.
+    #[default]
+    Bottom,
+    /// Centered above the anchor, flipping below if clipped.
+    Top,
+    /// Centered to the left of the anchor, flipping right if clipped.
+    Left,
+    /// Centered to the right of the anchor, flipping left if clipped.
+    Right,
+}
+
 /// Contains state associated with a tooltip. You'll only need this struct if you're implementing
 /// tooltip behavior on a custom element. Otherwise, use [Div::tooltip](crate::Interactivity::tooltip).
 #[derive(Clone)]
@@ -2320,6 +2344,18 @@ pub struct AnyTooltip {
 
     /// The absolute position of the mouse when the tooltip was deployed.
     pub mouse_position: Point<Pixels>,
+
+    /// The absolute bounds of the hovered element (used when `anchor == TooltipAnchor::Element`).
+    pub anchor_bounds: Option<Bounds<Pixels>>,
+
+    /// Whether the tooltip is positioned relative to the pointer or the hovered element.
+    pub anchor: TooltipAnchor,
+
+    /// Preferred placement relative to `anchor`.
+    pub placement: TooltipPlacement,
+
+    /// Distance between the anchor and the tooltip along the primary axis.
+    pub offset: Pixels,
 
     /// Given the bounds of the tooltip, checks whether the tooltip should still be visible and
     /// updates its state accordingly. This is needed atop the hovered element's mouse move handler

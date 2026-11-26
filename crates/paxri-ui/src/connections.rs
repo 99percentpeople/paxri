@@ -1,5 +1,6 @@
 //! Live connection paths and recent traffic and latency samples for device details.
 use crate::components::{Ui, heading, single_line, tooltip};
+use crate::theme::{TextRole, TypographyExt};
 use gpui::{prelude::*, *};
 use lyon_path::LineJoin;
 use paxri_core::{
@@ -129,7 +130,7 @@ impl ConnectionHistory {
                 (_, Some(bytes)) => format!("{}/s", format_bytes(bytes)),
             };
             let label = metric.label();
-            let title = ui.muted(label).text_xs();
+            let title = ui.caption(label);
             let hint = match total {
                 Some(bytes) => format!(
                     "{} {} on this connection",
@@ -160,8 +161,7 @@ impl ConnectionHistory {
                             .child(
                                 div()
                                     .min_w(px(58.))
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_role(TextRole::Label)
                                     .whitespace_nowrap()
                                     .flex_none()
                                     .child(value),
@@ -424,7 +424,7 @@ impl ConnectionHistory {
                     div()
                         .flex_none()
                         .whitespace_nowrap()
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_role(TextRole::Label)
                         .child(path.path.label()),
                 )
                 .when_some(path.address.as_ref(), |r, address| {
@@ -443,7 +443,7 @@ impl ConnectionHistory {
                 .child(route)
                 .child(self.metrics(peer_id, path, ui))
                 .when(!streams.is_empty(), |d| {
-                    d.child(ui.muted(streams).text_xs())
+                    d.child(ui.caption(streams))
                 });
             list = list.when(i > 0, |d| d.child(ui.separator())).child(details);
         }

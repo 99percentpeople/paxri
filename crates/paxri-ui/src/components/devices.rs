@@ -26,7 +26,7 @@ impl Ui {
                     .flex()
                     .flex_col()
                     .child(single_line(div()).child(name))
-                    .when_some(status, |labels, status| labels.child(self.muted(status).text_xs())),
+                    .when_some(status, |labels, status| labels.child(self.caption(status))),
             )
     }
 
@@ -37,8 +37,7 @@ impl Ui {
         subtitle: impl Into<SharedString>,
     ) -> Div {
         let title = single_line(div())
-            .text_2xl()
-            .font_weight(FontWeight::SEMIBOLD)
+            .text_role(TextRole::PageTitle)
             .child(title.into());
         let detail = single_line(self.muted(subtitle.into())).w_full();
         div()
@@ -74,8 +73,7 @@ impl Ui {
             None => self.muted(platform.label()).into_any_element(),
         };
         let title = single_line(div())
-            .text_2xl()
-            .font_weight(FontWeight::SEMIBOLD)
+            .text_role(TextRole::PageTitle)
             .id("device-heading")
             .tooltip(tooltip(name.clone()))
             .child(name);
@@ -149,7 +147,7 @@ impl Ui {
         let label = format!("{title}: {count}").into();
         ListItem::new(title)
             .leading(icon.draw(18.))
-            .trailing(div().flex().items_center().gap_2().text_sm()
+            .trailing(div().flex().items_center().gap_2().text_role(TextRole::Body)
                 .text_color(rgb(self.colors.muted_foreground)).child(count).child(Icon::ChevronRight.draw(14.)))
             .button(self, id, label)
     }

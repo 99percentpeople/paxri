@@ -8,7 +8,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
-    net::TcpStream,
     sync::{oneshot, watch},
     task::JoinHandle,
     time::{sleep, timeout},
@@ -63,7 +62,7 @@ impl Routes {
             .filter(|(id, _)| id == peer)
             .map(|(_, target)| target.borrow().clone())
             .context("peer has no active reverse listener with this ID")?;
-        let mut tcp = timeout(Duration::from_secs(6), TcpStream::connect(&target)).await??;
+        let mut tcp = paxri_core::connect_tcp(&target).await?;
         copy_bidirectional(&mut tcp, &mut stream).await?;
         Ok(())
     }

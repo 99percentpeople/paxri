@@ -9,13 +9,17 @@ use paxri_control::{Command, Direction, Forward, PeerForward, Status};
 use paxri_ui::components::{
     Icon, ListState, ListView,
     directory::count_summary,
-    forwarding::{NARROW_WIDTH, device_select, direction_select, endpoint_labels, parse_endpoints},
+    forwarding::{
+        NARROW_WIDTH, device_select, direction_help, direction_select, endpoint_labels,
+        parse_endpoints,
+    },
 };
 
 struct RuleForm {
     dashboard: Entity<Dashboard>,
     owner: Option<String>,
-    name: Option<String>,
+    original_name: Option<String>,
+    name: Entity<Input>,
     original_peer: Option<String>,
     peer: String,
     listen: Entity<Input>,
@@ -82,10 +86,16 @@ impl Dashboard {
         else {
             return;
         };
+        let name_placeholder = if name.is_some() {
+            "e.g. web"
+        } else {
+            "e.g. web (optional)"
+        };
         let form = RuleForm {
             dashboard: cx.entity(),
             owner: owner.map(str::to_owned),
-            name: name.map(str::to_owned),
+            original_name: name.map(str::to_owned),
+            name: Input::new(name.unwrap_or(""), name_placeholder, cx),
             original_peer: rule.map(|r| r.peer.clone()),
             peer: peer.clone(),
             listen: Input::new(rule.map_or("", |r| &r.listen), "8080", cx),
@@ -109,7 +119,7 @@ impl Dashboard {
             } else {
                 "New forwarding rule"
             },
-            size(px(520.), px(290.)),
+            size(px(520.), px(376.)),
             model,
             Some(focus),
             RuleForm::render_form,
@@ -129,12 +139,23 @@ impl RuleForm {
             Ok(endpoints) => endpoints,
             Err(error) => return Dialog::show_error(window, error, cx),
         };
-        let name = self.name.clone().unwrap_or_default();
+        let entered_name = self.name.read(cx).text().trim().to_owned();
+        let (name, new_name) = match &self.original_name {
+            Some(original) => {
+                if entered_name.is_empty() {
+                    return Dialog::show_error(window, "Enter a rule name", cx);
+                }
+                let renamed = (entered_name != *original).then_some(entered_name);
+                (original.clone(), renamed)
+            }
+            None => (entered_name, None),
+        };
         let command = match &self.owner {
             Some(owner) => Command::ManagePeerForward {
                 owner: owner.clone(),
                 action: PeerForward::Edit {
                     name,
+                    new_name,
                     listen,
                     target,
                     direction: self.direction,
@@ -142,7 +163,8 @@ impl RuleForm {
             },
             None => Command::SaveForward {
                 name,
-                edit: self.name.is_some(),
+                new_name,
+                edit: self.original_name.is_some(),
                 expected_peer: self.original_peer.clone(),
                 rule: Forward {
                     peer: self.peer.clone(),
@@ -203,6 +225,15 @@ impl RuleForm {
                 cx.notify();
             }),
         );
+        let peer_target = self.owner.as_deref().unwrap_or(&self.peer);
+        let peer_label = if peer_target.is_empty() {
+            "the peer"
+        } else {
+            dashboard
+                .status
+                .as_ref()
+                .map_or(peer_target, |status| status.peer_display_name(peer_target))
+        };
         let (listen_label, target_label) = endpoint_labels(self.direction);
         let body = div()
             .flex()
@@ -211,8 +242,14 @@ impl RuleForm {
             .child(
                 form_row()
                     .child(device)
-                    .child(ui.labeled("Direction", modes)),
+                    .child(ui.labeled_with_tip(
+                        "direction-help",
+                        "Direction",
+                        direction_help(peer_label),
+                        modes,
+                    )),
             )
+            .child(form_row().child(ui.labeled("Rule name", self.name.clone())))
             .child(
                 form_row()
                     .child(ui.labeled(listen_label, self.listen.clone()))

@@ -1,5 +1,6 @@
 //! A focus-scoped control for recording a hardware key combination.
 use super::{ButtonVariant, DropdownContent, Icon, Ui, tooltip};
+use crate::theme::{TextRole, TypographyExt};
 use crate::terminal::keys::modifier_mask;
 use gpui::{prelude::*, *};
 use paxri_config::shortcuts::{Shortcut, modifier_labels};
@@ -148,7 +149,7 @@ impl ShortcutRecorder {
 fn keycap(label: &str, ui: Ui) -> Div {
     div()
         .flex_none()
-        .text_xs()
+        .text_role(TextRole::Caption)
         .px_1()
         .rounded_sm()
         .border_1()

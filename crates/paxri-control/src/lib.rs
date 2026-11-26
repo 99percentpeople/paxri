@@ -63,6 +63,8 @@ pub enum Command {
     SaveForward {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_peer: Option<String>,
         edit: bool,
         #[serde(flatten)]

@@ -1,5 +1,9 @@
 //! TCP forwarding over authenticated reliable streams. Transport types stay in the adapter.
-use std::{io::ErrorKind, time::Duration};
+use std::{
+    io::ErrorKind,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use paxri_config::{Config, DevicePlatform, tcp_target};
@@ -98,6 +102,30 @@ pub async fn forward(
     Ok(())
 }
 
+/// Connect to a validated TCP target. When an IPv4 loopback target refuses a connection,
+/// retry IPv6 loopback on the same port so bare-port rules reach IPv6-only local services.
+pub async fn connect_tcp(target: &str) -> std::io::Result<TcpStream> {
+    match timeout(TARGET_CONNECT, TcpStream::connect(target)).await {
+        Ok(Ok(tcp)) => Ok(tcp),
+        Ok(Err(err)) if err.kind() == ErrorKind::ConnectionRefused => {
+            if let Ok(SocketAddr::V4(addr)) = target.parse::<SocketAddr>()
+                && *addr.ip() == Ipv4Addr::LOCALHOST
+            {
+                let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, addr.port()));
+                if let Ok(Ok(tcp)) = timeout(TARGET_CONNECT, TcpStream::connect(v6)).await {
+                    return Ok(tcp);
+                }
+            }
+            Err(err)
+        }
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(std::io::Error::new(
+            ErrorKind::TimedOut,
+            "target connect timed out",
+        )),
+    }
+}
+
 async fn accept_tcp(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     mut target: impl AsyncRead + AsyncWrite + Unpin,
@@ -178,15 +206,45 @@ async fn serve_services(
     };
     let code = match target {
         Err(_) => "INVALID_REQUEST",
-        Ok(address) => match timeout(TARGET_CONNECT, TcpStream::connect(address)).await {
-            Ok(Ok(tcp)) => return accept_tcp(&mut stream, tcp).await,
-            Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => "TARGET_REFUSED",
-            Ok(Err(e)) if e.kind() == ErrorKind::TimedOut => "TARGET_TIMEOUT",
-            Ok(Err(_)) => "TARGET_UNREACHABLE",
-            Err(_) => "TARGET_TIMEOUT",
+        Ok(address) => match connect_tcp(&address).await {
+            Ok(tcp) => return accept_tcp(&mut stream, tcp).await,
+            Err(e) if e.kind() == ErrorKind::ConnectionRefused => "TARGET_REFUSED",
+            Err(e) if e.kind() == ErrorKind::TimedOut => "TARGET_TIMEOUT",
+            Err(_) => "TARGET_UNREACHABLE",
         },
     };
     write_frame(&mut stream, &Answer::Error { code: code.into() }).await?;
     stream.shutdown().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn connect_tcp_falls_back_to_ipv6_loopback_for_ipv4_loopback_target() {
+        let Ok(listener) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        // Ensure IPv4 loopback on the same port is actually closed so the fallback path runs.
+        if TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await.is_ok() {
+            return;
+        }
+        let target = format!("127.0.0.1:{port}");
+        let (client, accepted) = tokio::join!(connect_tcp(&target), listener.accept());
+        assert!(client.is_ok(), "IPv6 loopback fallback failed: {client:?}");
+        assert!(accepted.is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_reports_refused_when_loopback_port_is_closed() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let err = connect_tcp(&format!("127.0.0.1:{port}")).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+    }
 }

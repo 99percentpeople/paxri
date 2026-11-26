@@ -17,6 +17,7 @@
 
 use crate::{
     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
+    TooltipAnchor, TooltipPlacement,
     DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
     Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
     KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
@@ -1670,7 +1671,8 @@ impl Interactivity {
                     }
                     if let Some(active_tooltip) = element_state.active_tooltip.as_ref() {
                         if self.tooltip_builder.is_some() {
-                            self.tooltip_id = set_tooltip_on_window(active_tooltip, window);
+                            self.tooltip_id =
+                                set_tooltip_on_window(active_tooltip, Some(bounds), window);
                         } else {
                             // If there is no longer a tooltip builder, remove the active tooltip.
                             element_state.active_tooltip.take();
@@ -2654,14 +2656,18 @@ pub(crate) fn clear_active_tooltip_if_not_hoverable(
 
 pub(crate) fn set_tooltip_on_window(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    anchor_bounds: Option<Bounds<Pixels>>,
     window: &mut Window,
 ) -> Option<TooltipId> {
-    let tooltip = match active_tooltip.borrow().as_ref() {
+    let mut tooltip = match active_tooltip.borrow().as_ref() {
         None => return None,
         Some(ActiveTooltip::WaitingForShow { .. }) => return None,
         Some(ActiveTooltip::Visible { tooltip, .. }) => tooltip.clone(),
         Some(ActiveTooltip::WaitingForHide { tooltip, .. }) => tooltip.clone(),
     };
+    if let Some(bounds) = anchor_bounds {
+        tooltip.anchor_bounds = Some(bounds);
+    }
     Some(window.set_tooltip(tooltip))
 }
 
@@ -2774,13 +2780,21 @@ fn handle_tooltip_mouse_move(
                 async move |cx| {
                     cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
                     cx.update(|window, cx| {
+                        window.take_tooltip_placement();
                         let new_tooltip =
                             build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
+                                let (anchor, placement, offset) = window
+                                    .take_tooltip_placement()
+                                    .unwrap_or((TooltipAnchor::Cursor, TooltipPlacement::Bottom, px(18.)));
                                 let active_tooltip = active_tooltip.clone();
                                 ActiveTooltip::Visible {
                                     tooltip: AnyTooltip {
                                         view,
                                         mouse_position: window.mouse_position(),
+                                        anchor_bounds: None,
+                                        anchor,
+                                        placement,
+                                        offset,
                                         check_visible_and_update: Rc::new(
                                             move |tooltip_bounds, window, cx| {
                                                 handle_tooltip_check_visible_and_update(

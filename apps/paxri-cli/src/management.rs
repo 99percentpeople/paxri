@@ -18,7 +18,7 @@ pub enum ForwardAction {
         json: bool,
     },
     Add(Rule),
-    Edit(Rule),
+    Edit(EditRule),
     Remove {
         name: String,
     },
@@ -28,6 +28,15 @@ pub enum ForwardAction {
     Resume {
         name: String,
     },
+}
+
+#[derive(Args)]
+pub struct EditRule {
+    #[command(flatten)]
+    rule: Rule,
+    /// Rename the rule while updating its settings
+    #[arg(long)]
+    rename: Option<String>,
 }
 
 #[derive(Args)]
@@ -68,13 +77,15 @@ impl ForwardAction {
         }
         if let Some(owner) = owner {
             let action = match self {
-                Self::Edit(args) => {
+                Self::Edit(EditRule { rule: args, rename }) => {
                     anyhow::ensure!(
                         args.peer.is_none(),
                         "A peer-owned rule already belongs to this pairing. Omit --peer."
                     );
+                    let new_name = rename.filter(|next| next != &args.name);
                     PeerForward::Edit {
                         name: args.name,
+                        new_name,
                         target: args.target,
                         listen: args.listen,
                         direction: if args.remote {
@@ -104,7 +115,7 @@ impl ForwardAction {
         }
         let (name, command) = match self {
             Self::List { .. } => unreachable!(),
-            Self::Add(args) | Self::Edit(args) => {
+            Self::Add(args) => {
                 let rule = Forward {
                     listen: args.listen,
                     peer: args.peer.context("Specify the paired device with --peer")?,
@@ -119,6 +130,31 @@ impl ForwardAction {
                     args.name.clone(),
                     Command::SaveForward {
                         name: args.name,
+                        new_name: None,
+                        expected_peer: None,
+                        edit,
+                        rule,
+                    },
+                )
+            }
+            Self::Edit(EditRule { rule: args, rename }) => {
+                let rule = Forward {
+                    listen: args.listen,
+                    peer: args.peer.context("Specify the paired device with --peer")?,
+                    target: args.target,
+                    direction: if args.remote {
+                        Direction::Remote
+                    } else {
+                        Direction::Local
+                    },
+                };
+                let new_name = rename.filter(|next| next != &args.name);
+                let display_name = new_name.clone().unwrap_or_else(|| args.name.clone());
+                (
+                    display_name,
+                    Command::SaveForward {
+                        name: args.name,
+                        new_name,
                         expected_peer: None,
                         edit,
                         rule,

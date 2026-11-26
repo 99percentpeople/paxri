@@ -44,6 +44,7 @@ pub enum Icon {
     Bell,
     Plus,
     Forward,
+    Info,
 }
 
 impl Icon {
@@ -358,6 +359,7 @@ impl Icon {
                 &[(6.3, 13.4), (7.1, 14.3), (8., 14.5), (8.9, 14.3), (9.7, 13.4)],
             ],
             Self::Plus => &[&[(8., 2.5), (8., 13.5)], &[(2.5, 8.), (13.5, 8.)]],
+            Self::Info => &[&[(8., 7.2), (8., 11.7)]],
         };
         canvas(
             |_, _, _| (),
@@ -367,6 +369,25 @@ impl Icon {
                 if self == Self::Stop {
                     window.paint_quad(quad(
                         bounds, px(size / 2.), transparent_black(), px(1.5), color,
+                        BorderStyle::default(),
+                    ));
+                }
+                if self == Self::Info {
+                    window.paint_quad(quad(
+                        bounds, px(size / 2.), transparent_black(), px(1.25 * scale), color,
+                        BorderStyle::default(),
+                    ));
+                    let dot_size = px(1.85 * scale);
+                    let dot_origin = point(
+                        bounds.origin.x + px(8. * scale) - dot_size / 2.,
+                        bounds.origin.y + px(4.7 * scale) - dot_size / 2.,
+                    );
+                    window.paint_quad(quad(
+                        Bounds::new(dot_origin, gpui::size(dot_size, dot_size)),
+                        dot_size / 2.,
+                        color,
+                        px(0.),
+                        transparent_black(),
                         BorderStyle::default(),
                     ));
                 }

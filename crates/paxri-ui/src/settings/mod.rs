@@ -4,9 +4,11 @@ pub mod controls;
 pub mod terminal;
 pub mod shortcuts;
 use crate::components::{Icon, Ui, actions, row};
-use crate::theme::{SPACE_1, SPACE_2, SPACE_3, SPACE_4};
+use crate::theme::{SPACE_1, SPACE_2, SPACE_3, SPACE_4, TextRole, TypographyExt};
 use catalog::page_for;
 use gpui::{prelude::*, *};
+
+pub const MAX_WIDTH: Pixels = px(840.);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsLayout {
@@ -102,15 +104,16 @@ impl SettingRow {
         let title = actions()
             .child(
                 div()
-                    .text_sm()
+                    .text_role(TextRole::Subtitle)
                     .whitespace_nowrap()
-                    .font_weight(FontWeight::SEMIBOLD)
                     .child(self.title),
             )
-            .when_some(self.path, |d, path| d.child(ui.muted(path).text_xs()));
+            .when_some(self.path, |d, path| d.child(ui.caption(path)));
         let copy = div()
+            .min_w_0()
             .max_w_full()
             .flex_1()
+            .flex_basis(px(220.))
             .flex()
             .flex_col()
             .gap(SPACE_1)
@@ -119,16 +122,25 @@ impl SettingRow {
                 d.child(ui.muted(self.description))
             });
 
-        let control = div().min_w_0().max_w(px(440.)).flex_initial();
+        let control = div()
+            .min_w_0()
+            .max_w(px(440.))
+            .flex_initial()
+            .flex()
+            .justify_end()
+            .ml_auto();
         let header = row()
             .w_full()
             .gap_x(SPACE_3)
             .gap_y(SPACE_2)
             .child(copy)
-            .child(control.ml_auto().child(self.control));
+            .child(control.child(self.control));
         div()
+            .w_full()
             .min_w_0()
             .flex_none()
+            .flex()
+            .flex_col()
             .py(if cfg!(target_os = "android") {
                 SPACE_3
             } else {
@@ -139,7 +151,15 @@ impl SettingRow {
             })
             .child(header)
             .when_some(self.details, |row, details| {
-                row.child(div().mt(SPACE_3).child(details))
+                row.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .mt(SPACE_3)
+                        .flex()
+                        .flex_col()
+                        .child(details),
+                )
             })
     }
 }
@@ -247,6 +267,7 @@ impl SettingsGroup {
                 ElementId::from("settings-table"),
                 self.section.table.label(),
             ))
+            .w_full()
             .min_w_0()
             .flex()
             .flex_col()
@@ -256,12 +277,11 @@ impl SettingsGroup {
                         .pb(SPACE_2)
                         .child(
                             div()
-                                .text_lg()
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_role(TextRole::Section)
                                 .child(self.section.title),
                         )
                         .when(self.section.table != page.table, |heading| {
-                            heading.child(ui.muted(self.section.table.label()).text_xs())
+                            heading.child(ui.caption(self.section.table.label()))
                         }),
                 )
             })
@@ -275,8 +295,7 @@ impl SettingsGroup {
                     div()
                         .when(index > 0 || has_intro, |d| d.pt(SPACE_4))
                         .pb(SPACE_2)
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_role(TextRole::Subtitle)
                         .child(heading),
                 );
                 last_subsection = Some(heading);
@@ -335,14 +354,14 @@ impl SettingsPage {
         let title = actions()
             .child(
                 div()
-                    .text_2xl()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(TextRole::PageTitle)
                     .child(section.title),
             )
             .when_some(section.table.heading_label(), |heading, label| {
-                heading.child(ui.muted(label).text_xs())
+                heading.child(ui.caption(label))
             });
         div()
+            .w_full()
             .min_w_0()
             .flex()
             .flex_col()

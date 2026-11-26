@@ -47,9 +47,28 @@ pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
 }
 
 impl Mobile {
-    pub(super) fn settings_body(&self, id: impl Into<ElementId>) -> paxri_ui::components::ScrollArea {
-        paxri_ui::components::ScrollArea::new(id, div().flex().flex_col().p_4().gap_2())
-            .with_handle(self.settings_scroll.clone())
+    pub(super) fn settings_column() -> Div {
+        div()
+            .flex_1()
+            .min_w_0()
+            .max_w(paxri_ui::settings::MAX_WIDTH)
+            .flex()
+            .flex_col()
+            .gap_2()
+    }
+
+    pub(super) fn settings_body(
+        &self,
+        id: impl Into<ElementId>,
+        content: impl IntoElement,
+    ) -> paxri_ui::components::ScrollArea {
+        paxri_ui::components::ScrollArea::new(
+            id,
+            div()
+                .p_4()
+                .child(div().w_full().flex().justify_center().child(content)),
+        )
+        .with_handle(self.settings_scroll.clone())
     }
 
     pub(super) fn commit_device_name(&mut self, cx: &mut App) {
@@ -104,11 +123,14 @@ impl Mobile {
                 let _ = view.update(cx, |view, cx| view.change_gui(change, cx));
             };
             return self
-                .settings_body((
-                    ElementId::from("settings"),
-                    SharedString::from(catalog::SHORTCUTS.title),
-                ))
-                .child(paxri_ui::settings::shortcuts::group(ui, cx, change).render_rows(ui))
+                .settings_body(
+                    (
+                        ElementId::from("settings"),
+                        SharedString::from(catalog::SHORTCUTS.title),
+                    ),
+                    Self::settings_column()
+                        .child(paxri_ui::settings::shortcuts::group(ui, cx, change).render_rows(ui)),
+                )
                 .into_any_element();
         }
         let device = SettingsGroup::device(paxri_ui::settings::controls::setting_field(
@@ -147,10 +169,7 @@ impl Mobile {
             groups.push(SettingsGroup::new(catalog::TERMINAL_CONTROLS));
         }
         let pages = SettingsPage::collect(groups);
-        let mut body = self.settings_body((
-            ElementId::from("settings"),
-            SharedString::from(selected.map(|section| section.title).unwrap_or("categories")),
-        ));
+        let mut body = Self::settings_column();
         for page in pages {
             let section = page.section;
             if selected.is_none() {
@@ -204,6 +223,13 @@ impl Mobile {
                     })),
                 );
         }
-        body.into_any_element()
+        self.settings_body(
+            (
+                ElementId::from("settings"),
+                SharedString::from(selected.map(|section| section.title).unwrap_or("categories")),
+            ),
+            body,
+        )
+        .into_any_element()
     }
 }

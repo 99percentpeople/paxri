@@ -27,12 +27,17 @@ pub mod forwarding;
 mod tooltip;
 mod toast;
 pub use toast::Toast;
-use crate::theme::{self, CONTROL_RADIUS, Palette, SPACE_1, SPACE_2, SPACE_3, SPACE_4};
+use crate::theme::{
+    self, CONTROL_RADIUS, Palette, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TextRole, TypographyExt,
+};
 pub use button::{Button, ButtonVariant, FLOATING_ACTION_CLEARANCE, floating_corner};
 use gpui::{prelude::*, *};
 pub use icons::Icon;
 pub use list_item::ListItem;
-pub use tooltip::tooltip;
+pub use tooltip::{
+    TOOLTIP_CURSOR_OFFSET, TOOLTIP_ELEMENT_OFFSET, TooltipAnchor, TooltipOptions, TooltipPlacement,
+    tooltip, tooltip_at, tooltip_with,
+};
 #[derive(Clone, Copy)]
 pub struct Ui {
     pub colors: &'static Palette,
@@ -65,7 +70,14 @@ impl Ui {
 
     pub fn muted(self, text: impl Into<SharedString>) -> Div {
         div()
-            .text_sm()
+            .text_role(TextRole::Body)
+            .text_color(rgb(self.colors.muted_foreground))
+            .child(text.into())
+    }
+
+    pub fn caption(self, text: impl Into<SharedString>) -> Div {
+        div()
+            .text_role(TextRole::Caption)
             .text_color(rgb(self.colors.muted_foreground))
             .child(text.into())
     }
@@ -78,6 +90,43 @@ impl Ui {
             .flex_1()
             .min_w(px(165.))
             .child(self.muted(label))
+            .child(control)
+    }
+
+    pub fn labeled_with_tip(
+        self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        tip: impl Into<SharedString>,
+        control: impl IntoElement,
+    ) -> Div {
+        let heading = div()
+            .flex()
+            .items_center()
+            .gap(SPACE_1)
+            .child(self.muted(label))
+            .child(
+                div()
+                    .id(id)
+                    .size(px(14.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .text_color(rgb(self.colors.muted_foreground))
+                    .hover(|s| s.text_color(rgb(self.colors.canvas.foreground)))
+                    .cursor_default()
+                    .tooltip(tooltip(tip.into()))
+                    .child(Icon::Info.draw(14.)),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap(SPACE_1)
+            .flex_1()
+            .min_w(px(165.))
+            .child(heading)
             .child(control)
     }
 
@@ -104,7 +153,7 @@ impl Ui {
             .py(SPACE_2)
             .bg(rgb(self.colors.alert.background))
             .text_color(rgb(self.colors.alert.foreground))
-            .text_sm()
+            .text_role(TextRole::Body)
             .child(message.into())
     }
 
@@ -120,8 +169,7 @@ impl Ui {
             .border_1()
             .border_color(rgb(self.colors.border))
             .bg(rgb(self.colors.card))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
+            .text_role(TextRole::Badge)
             .child(div().size(px(7.)).rounded_full().bg(rgb(dot)))
             .child(label)
     }
@@ -129,8 +177,7 @@ impl Ui {
 
 pub fn heading(text: impl Into<SharedString>) -> Div {
     div()
-        .text_lg()
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_role(TextRole::Section)
         .child(text.into())
 }
 

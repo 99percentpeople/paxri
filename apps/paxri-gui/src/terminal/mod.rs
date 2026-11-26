@@ -10,7 +10,7 @@ mod touch;
 pub(crate) use paxri_ui::terminal::title::TabTitle;
 
 use crate::components::{ScrollMetrics, ScrollSource, Scrollbar, Ui};
-use crate::theme::{CONTROL_RADIUS, SPACE_2, Zoom};
+use crate::theme::{CONTROL_RADIUS, SPACE_2, TextRole, TypographyExt, Zoom};
 use crate::theme::fonts::{CellSize, MonospaceFonts};
 use alacritty_terminal::{grid::Scroll, term::TermMode};
 use emulator::{Emulator, GridSize};
@@ -539,7 +539,7 @@ impl Render for Terminal {
                         .items_center()
                         .bg(rgb(ui.colors.canvas.background))
                         .text_color(rgb(ui.colors.canvas.foreground))
-                        .child(div().flex_1().text_sm().child(error)),
+                        .child(div().flex_1().text_role(TextRole::Body).child(error)),
                 )
             })
             .child(
@@ -575,7 +575,7 @@ impl Render for Terminal {
                             .border_color(rgb(ui.colors.border))
                             .bg(rgb(ui.colors.card))
                             .text_color(rgb(ui.colors.canvas.foreground))
-                            .text_xs()
+                            .text_role(TextRole::Caption)
                             .truncate()
                             .shadow_sm()
                             .child(link.uri);

@@ -2,6 +2,7 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+    TooltipAnchor, TooltipPlacement,
     AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
     Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
@@ -36,7 +37,6 @@ use std::{
     any::{Any, TypeId},
     borrow::Cow,
     cell::{Cell, RefCell},
-    cmp,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -846,6 +846,7 @@ pub struct Window {
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
+    next_tooltip_layout: Option<(TooltipAnchor, TooltipPlacement, Pixels)>,
     next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
@@ -1230,6 +1231,7 @@ impl Window {
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
+            next_tooltip_layout: None,
             dirty_views: FxHashSet::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
@@ -2098,39 +2100,17 @@ impl Window {
                 continue;
             };
             let mut element = tooltip_request.tooltip.view.clone().into_any();
-            let mouse_position = tooltip_request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
-
-            let mut tooltip_bounds =
-                Bounds::new(mouse_position + point(px(1.), px(1.)), tooltip_size);
-            let window_bounds = Bounds {
-                origin: Point::default(),
-                size: self.viewport_size(),
-            };
-
-            if tooltip_bounds.right() > window_bounds.right() {
-                let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
-                if new_x >= Pixels::ZERO {
-                    tooltip_bounds.origin.x = new_x;
-                } else {
-                    tooltip_bounds.origin.x = cmp::max(
-                        Pixels::ZERO,
-                        tooltip_bounds.origin.x - tooltip_bounds.right() - window_bounds.right(),
-                    );
-                }
-            }
-
-            if tooltip_bounds.bottom() > window_bounds.bottom() {
-                let new_y = mouse_position.y - tooltip_bounds.size.height - px(1.);
-                if new_y >= Pixels::ZERO {
-                    tooltip_bounds.origin.y = new_y;
-                } else {
-                    tooltip_bounds.origin.y = cmp::max(
-                        Pixels::ZERO,
-                        tooltip_bounds.origin.y - tooltip_bounds.bottom() - window_bounds.bottom(),
-                    );
-                }
-            }
+            let origin = place_tooltip(
+                tooltip_size,
+                self.viewport_size(),
+                tooltip_request.tooltip.anchor,
+                tooltip_request.tooltip.anchor_bounds,
+                tooltip_request.tooltip.mouse_position,
+                tooltip_request.tooltip.placement,
+                tooltip_request.tooltip.offset,
+            );
+            let tooltip_bounds = Bounds::new(origin, tooltip_size);
 
             // It's possible for an element to have an active tooltip while not being painted (e.g.
             // via the `visible_on_hover` method). Since mouse listeners are not active in this
@@ -2366,6 +2346,22 @@ impl Window {
             hitbox_id: None,
             style,
         })
+    }
+
+    /// Sets the anchor, placement, and gap for the tooltip currently being built.
+    pub fn set_tooltip_placement(
+        &mut self,
+        anchor: TooltipAnchor,
+        placement: TooltipPlacement,
+        offset: Pixels,
+    ) {
+        self.next_tooltip_layout = Some((anchor, placement, offset));
+    }
+
+    pub(crate) fn take_tooltip_placement(
+        &mut self,
+    ) -> Option<(TooltipAnchor, TooltipPlacement, Pixels)> {
+        self.next_tooltip_layout.take()
     }
 
     /// Sets a tooltip to be rendered for the upcoming frame. This method should only be called
@@ -5108,4 +5104,95 @@ pub fn outline(
         border_color: border_color.into(),
         border_style,
     }
+}
+
+const TOOLTIP_VIEWPORT_MARGIN: Pixels = px(8.);
+
+fn clamp_tooltip_axis(value: Pixels, size: Pixels, limit: Pixels, margin: Pixels) -> Pixels {
+    let max = (limit - size - margin).max(Pixels::ZERO);
+    let min = margin.min(max);
+    value.clamp(min, max)
+}
+
+/// Compute the top-left origin for a tooltip given its anchor mode, element bounds, pointer
+/// position, preferred placement, and gap.
+pub fn place_tooltip(
+    tooltip_size: Size<Pixels>,
+    window_size: Size<Pixels>,
+    anchor: TooltipAnchor,
+    anchor_bounds: Option<Bounds<Pixels>>,
+    mouse_position: Point<Pixels>,
+    placement: TooltipPlacement,
+    offset: Pixels,
+) -> Point<Pixels> {
+    let margin = TOOLTIP_VIEWPORT_MARGIN;
+    let (target, leading_offset) = match (anchor, anchor_bounds) {
+        (TooltipAnchor::Element, Some(bounds)) => (bounds, offset),
+        _ => {
+            // Standard pointers extend downward/rightward from the hotspot, so leading edges
+            // above/left of the hotspot need less gap than trailing edges below/right.
+            let leading = (offset / 2.).max(px(8.)).min(offset);
+            (Bounds::new(mouse_position, size(Pixels::ZERO, Pixels::ZERO)), leading)
+        }
+    };
+
+    let centered_x = target.center().x - tooltip_size.width / 2.;
+    let centered_y = target.center().y - tooltip_size.height / 2.;
+    let below_y = target.bottom() + offset;
+    let above_y = target.top() - tooltip_size.height - leading_offset;
+    let right_x = target.right() + offset;
+    let left_x = target.left() - tooltip_size.width - leading_offset;
+
+    let fits_below = below_y + tooltip_size.height <= window_size.height - margin;
+    let fits_above = above_y >= margin;
+    let fits_right = right_x + tooltip_size.width <= window_size.width - margin;
+    let fits_left = left_x >= margin;
+
+    let (x, y) = match placement {
+        TooltipPlacement::Bottom => {
+            let y = if fits_below {
+                below_y
+            } else if fits_above || target.top() > window_size.height - target.bottom() {
+                above_y
+            } else {
+                below_y
+            };
+            (centered_x, y)
+        }
+        TooltipPlacement::Top => {
+            let y = if fits_above {
+                above_y
+            } else if fits_below || window_size.height - target.bottom() > target.top() {
+                below_y
+            } else {
+                above_y
+            };
+            (centered_x, y)
+        }
+        TooltipPlacement::Left => {
+            let x = if fits_left {
+                left_x
+            } else if fits_right || window_size.width - target.right() > target.left() {
+                right_x
+            } else {
+                left_x
+            };
+            (x, centered_y)
+        }
+        TooltipPlacement::Right => {
+            let x = if fits_right {
+                right_x
+            } else if fits_left || target.left() > window_size.width - target.right() {
+                left_x
+            } else {
+                right_x
+            };
+            (x, centered_y)
+        }
+    };
+
+    point(
+        clamp_tooltip_axis(x, tooltip_size.width, window_size.width, margin),
+        clamp_tooltip_axis(y, tooltip_size.height, window_size.height, margin),
+    )
 }

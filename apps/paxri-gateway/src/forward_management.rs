@@ -34,7 +34,7 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
             direction,
         } => {
             anyhow::ensure!(
-                !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control),
+                crate::settings::valid_forward_name(name),
                 "Invalid rule name"
             );
             let (peer, _) = state
@@ -46,6 +46,7 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
             state
                 .change_settings(Command::SaveForward {
                     name: name.clone(),
+                    new_name: None,
                     edit: false,
                     expected_peer: None,
                     rule: Forward {
@@ -78,13 +79,21 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
     match action {
         PeerForward::Edit {
             name,
+            new_name,
             listen,
             target,
             direction,
         } => {
+            if let Some(next) = &new_name {
+                anyhow::ensure!(
+                    crate::settings::valid_forward_name(next),
+                    "Invalid rule name"
+                );
+            }
             state
                 .change_settings(Command::SaveForward {
                     name,
+                    new_name,
                     edit: true,
                     expected_peer: Some(peer.clone()),
                     rule: Forward {

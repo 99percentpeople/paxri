@@ -13,7 +13,7 @@ pub struct ListItem {
 
 pub(super) fn list_title(text: impl Into<SharedString>) -> Div {
     single_line(div())
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_role(TextRole::Subtitle)
         .child(text.into())
 }
 
@@ -81,7 +81,7 @@ impl ListItem {
             .items_center()
             .border_1()
             .border_color(transparent_black())
-            .text_sm()
+            .text_role(TextRole::Body)
             .child(self)
     }
 
@@ -102,11 +102,9 @@ impl RenderOnce for ListItem {
         let slot = |item| div().flex_none().flex().items_center().child(item);
         let body = self.body.when_some(self.detail, |body, text| {
             let detail = Ui::new(window, cx)
-                .muted(text)
+                .caption(text)
                 .min_w_0()
-                .overflow_hidden()
-                .text_xs()
-                .font_weight(FontWeight::NORMAL);
+                .overflow_hidden();
             let detail = match self.detail_icon {
                 Some(icon) => div()
                     .min_w_0()

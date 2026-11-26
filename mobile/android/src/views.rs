@@ -7,6 +7,7 @@ use paxri_ui::components::{
 };
 use paxri_ui::connections::presence_detail;
 use paxri_ui::terminal::display;
+use paxri_ui::theme::{TextRole, TypographyExt};
 
 fn app_bar_height(window: &Window) -> f32 {
     // Keep room for both title lines when the system accessibility text size increases.
@@ -201,13 +202,12 @@ impl Mobile {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_role(TextRole::Title)
                                     .child(title),
                             ),
                     )
                     .when_some(subtitle, |labels, subtitle| {
-                        labels.child(ui.muted(subtitle).text_xs().truncate())
+                        labels.child(ui.caption(subtitle).truncate())
                     }),
             )
             .children(end)
@@ -606,7 +606,7 @@ impl Mobile {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                    .child(div().text_role(TextRole::Label).child(name.clone()))
                     .child(ui.muted(route.clone()));
                 ModalDialog::new(
                     "remove-forward-modal",
