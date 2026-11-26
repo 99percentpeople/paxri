@@ -294,6 +294,11 @@ impl Client {
         self.transport.refresh_presence();
     }
 
+    pub async fn reconnect(&self, id: &str) -> Result<Vec<PeerConnection>> {
+        self.transport.reconnect_peer(id).await?;
+        Ok(self.transport.connections().remove(id).unwrap_or_default())
+    }
+
     pub fn watch_peer(&self, id: Option<&str>, list_interval: Option<Duration>) {
         let page = ViewedPage {
             peer: id.map(str::to_owned),
@@ -402,10 +407,13 @@ impl Client {
         ensure!(id != self.transport.id(), "Choose another device’s invitation");
         ensure!(!self.devices.lock().await.peers.contains_key(&id), "Device already paired");
         let attempt = uuid::Uuid::new_v4().simple().to_string();
+        let local = self
+            .transport
+            .contact(crate::DEVICE_NAME.borrow().effective());
         let mut pending = tokio::select! {
             biased;
             _ = &mut cancel => return Ok(None),
-            result = self.transport.request_private_pairing(&invite, &attempt) => result?,
+            result = self.transport.start_pairing(&invite, &local, &attempt) => result?,
         };
         let answer = tokio::select! {
             biased;
@@ -451,10 +459,10 @@ impl Client {
             Peer {
                 name: peer.name.clone(),
                 last_status_change_ms: Some(unix_time_ms()),
-                capabilities: peer.capabilities,
-                platform: peer.platform.unwrap_or_default(),
+                capabilities: Some(peer.capabilities),
+                platform: peer.platform,
                 ticket: peer.ticket.clone(),
-                generation: peer.supports_unpair.then_some(attempt),
+                generation: Some(attempt),
             },
         );
         self.save(&next)?;
@@ -631,58 +639,26 @@ impl Client {
             "This device does not host an interactive shell"
         );
         use paxri_terminal::managed::{self, AttachmentEvent, Request};
-        let heartbeat = self
-            .transport
-            .subscribe_device_info()
-            .borrow()
-            .get(id)
-            .is_some_and(|info| info.capabilities.terminal_heartbeat);
-        let (mut stream, _) = managed::request(session.clone(), action).await?;
+        let (mut stream, _) = managed::request(session, action).await?;
         let history = timeout(Duration::from_secs(15), managed::read_history(&mut stream))
             .await
             .context("Terminal history timed out")??;
-        let (Request::Attach(key, _) | Request::Create(key, _)) = action else {
+        let (Request::Attach(..) | Request::Create(..)) = action else {
             bail!("Invalid interactive terminal request");
         };
-        let check_hosted = || async {
-            let (_, hosted) = timeout(
-                Duration::from_secs(8),
-                managed::request(session.clone(), Request::List),
-            )
-            .await
-            .context("Gateway did not acknowledge terminal check")??;
-            ensure!(hosted.contains(&key), "Session has ended on the gateway");
-            Ok::<(), anyhow::Error>(())
-        };
-        if !heartbeat {
-            check_hosted().await?;
-        }
         if matches!(action, Request::Attach(..)) || !history.is_empty() {
             out.send(Update::Output(attachment_id, history, true)).await?;
         }
 
         let out = &out;
-        let attachment = managed::attachment(stream, input, heartbeat, |event| async move {
+        managed::attachment(stream, input, true, |event| async move {
             out.send(match event {
                 AttachmentEvent::Ready => Update::Connected(attachment_id),
                 AttachmentEvent::Output(bytes) => Update::Output(attachment_id, bytes, false),
             })
             .await?;
             Ok(())
-        });
-        // Existing gateways can still confirm a round trip on the same QUIC connection.
-        let legacy_probe = async {
-            if heartbeat {
-                return std::future::pending().await;
-            }
-            loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                check_hosted().await?;
-            }
-        };
-        tokio::select! {
-            result = attachment => result,
-            result = legacy_probe => result,
-        }
+        })
+        .await
     }
 }

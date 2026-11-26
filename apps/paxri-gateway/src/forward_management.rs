@@ -23,6 +23,39 @@ pub(super) async fn serve(
     forwarding::reply(&mut stream, result).await
 }
 
+fn peer_rule_name(state: &Gateway, id: &str, requested: &str) -> Result<String> {
+    if requested.is_empty() {
+        return Ok(String::new());
+    }
+    anyhow::ensure!(
+        crate::settings::valid_forward_name(requested),
+        "Invalid rule name"
+    );
+    let owned_by_peer = |name: &str| {
+        state
+            .config
+            .forwards
+            .get(name)
+            .is_some_and(|rule| {
+                state.config.peers[&rule.peer]
+                    .endpoint_id
+                    .eq_ignore_ascii_case(id)
+            })
+    };
+    if owned_by_peer(requested) {
+        anyhow::bail!("Forward {requested} already exists");
+    }
+    if !state.config.forwards.contains_key(requested) {
+        return Ok(requested.to_owned());
+    }
+    // Another peer already uses this rule name on the gateway; disambiguate without colliding.
+    let name = (2..)
+        .map(|n| format!("{requested}-{n}"))
+        .find(|candidate| !state.config.forwards.contains_key(candidate))
+        .expect("available forward ID");
+    Ok(name)
+}
+
 async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<forwarding::Rules> {
     anyhow::ensure!(state.config.is_paired(id), "Peer is not paired");
     let name = match &action {
@@ -33,10 +66,7 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
             target,
             direction,
         } => {
-            anyhow::ensure!(
-                crate::settings::valid_forward_name(name),
-                "Invalid rule name"
-            );
+            let name = peer_rule_name(state, id, name)?;
             let (peer, _) = state
                 .config
                 .peers
@@ -45,7 +75,7 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
                 .context("Peer is not paired")?;
             state
                 .change_settings(Command::SaveForward {
-                    name: name.clone(),
+                    name,
                     new_name: None,
                     edit: false,
                     expected_peer: None,
@@ -84,12 +114,10 @@ async fn apply(state: &mut Gateway, id: &str, action: PeerForward) -> Result<for
             target,
             direction,
         } => {
-            if let Some(next) = &new_name {
-                anyhow::ensure!(
-                    crate::settings::valid_forward_name(next),
-                    "Invalid rule name"
-                );
-            }
+            let new_name = match new_name {
+                Some(next) if next != name => Some(peer_rule_name(state, id, &next)?),
+                _ => None,
+            };
             state
                 .change_settings(Command::SaveForward {
                     name,

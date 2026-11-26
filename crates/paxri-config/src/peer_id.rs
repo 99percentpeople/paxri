@@ -61,6 +61,82 @@ pub fn resolve<'a, T>(
     Ok(first)
 }
 
+/// Resolve a full device ID or unique hexadecimal prefix against an ID-keyed map.
+pub fn resolve_id<'a, T>(
+    items: &'a BTreeMap<String, T>,
+    selector: &str,
+    label: impl Fn(&T) -> &str,
+) -> Result<(&'a String, &'a T)> {
+    ensure!(
+        !selector.is_empty()
+            && selector.len() <= ID_LEN
+            && selector.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Invalid device ID {selector:?}"
+    );
+    ensure!(
+        selector.len() >= MIN_PREFIX,
+        "Device ID prefixes need at least {MIN_PREFIX} hex digits"
+    );
+    let mut matches = items.iter().filter(|(id, _)| {
+        is_device_id(id)
+            && id
+                .as_bytes()
+                .get(..selector.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(selector.as_bytes()))
+    });
+    let Some(first) = matches.next() else {
+        bail!("No device matches ID {selector:?}");
+    };
+    if let Some(second) = matches.next() {
+        let all: Vec<_> = [first, second].into_iter().chain(matches).collect();
+        let prefixes = unique_prefixes(all.iter().map(|(id, _)| id.as_str()));
+        let descriptions = all
+            .into_iter()
+            .map(|(id, value)| {
+                let short = prefixes
+                    .get(&id.to_ascii_lowercase())
+                    .map_or(default_prefix(id), String::as_str);
+                format!("{} ({short})", label(value))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "Ambiguous device ID {selector:?} matches {descriptions}. Use a longer unique prefix."
+        );
+    }
+    Ok(first)
+}
+
+/// Shortest unique lowercase prefixes (at least 8 hex digits) for a set of full device IDs.
+pub fn unique_prefixes<'a>(ids: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, String> {
+    let mut ordered: Vec<String> = ids
+        .into_iter()
+        .filter(|id| is_device_id(id))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    ordered.sort_unstable();
+    ordered.dedup();
+    let mut lengths = vec![DISPLAY_PREFIX; ordered.len()];
+    for (i, pair) in ordered.windows(2).enumerate() {
+        let shared = pair[0]
+            .bytes()
+            .zip(pair[1].bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let need = (shared + 1).min(ID_LEN);
+        lengths[i] = lengths[i].max(need);
+        lengths[i + 1] = lengths[i + 1].max(need);
+    }
+    ordered
+        .into_iter()
+        .zip(lengths)
+        .map(|(id, len)| {
+            let prefix = id[..len].to_owned();
+            (id, prefix)
+        })
+        .collect()
+}
+
 /// Prefixes that can be copied directly from the device list. Two aliases for
 /// the same key must be addressed by name, so neither gets an ID shortcut.
 pub fn short_ids(peers: &BTreeMap<String, String>) -> BTreeMap<&str, String> {
@@ -175,5 +251,35 @@ mod tests {
         assert!(short_ids(&peers).is_empty());
         assert!(resolve(&peers, &id, String::as_str).is_err());
         assert_eq!(resolve(&peers, "beta", String::as_str).unwrap().0, "beta");
+    }
+
+    #[test]
+    fn resolve_id_and_unique_prefixes_match_pending_requests() {
+        let a = key("deadbeef01");
+        let b = key("deadbeef02");
+        let c = key("1234567890");
+        let items = BTreeMap::from([
+            (a.clone(), "Phone"),
+            (b.clone(), "Laptop"),
+            (c.clone(), "Tablet"),
+        ]);
+        let prefixes = unique_prefixes(items.keys().map(String::as_str));
+        assert_eq!(prefixes[&a], "deadbeef01");
+        assert_eq!(prefixes[&b], "deadbeef02");
+        assert_eq!(prefixes[&c], "12345678");
+        assert_eq!(resolve_id(&items, "1234", |n| n).unwrap().0, &c);
+        assert_eq!(resolve_id(&items, "DEADBEEF02", |n| n).unwrap().0, &b);
+        assert_eq!(resolve_id(&items, &a.to_uppercase(), |n| n).unwrap().0, &a);
+        let ambiguous = resolve_id(&items, "deadbeef", |n| n)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            ambiguous.contains("Ambiguous")
+                && ambiguous.contains("Phone (deadbeef01)")
+                && ambiguous.contains("Laptop (deadbeef02)")
+        );
+        for invalid in ["", "123", "zzzz", "not-hex", &"a".repeat(65), "0000"] {
+            assert!(resolve_id(&items, invalid, |n| n).is_err(), "{invalid}");
+        }
     }
 }

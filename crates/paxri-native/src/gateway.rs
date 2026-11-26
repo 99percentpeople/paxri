@@ -51,6 +51,24 @@ impl NativeTransport {
             .with_context(|| format!("{peer} is offline"))
     }
 
+    pub async fn reconnect_peer(&self, peer: &str) -> Result<NativeSession> {
+        let address = self
+            .peers
+            .read()
+            .expect("peer map")
+            .get(peer)
+            .cloned()
+            .context("unknown peer")?;
+        let result = async {
+            let session = self.connections.reconnect(&self.endpoint, address).await?;
+            paxri_core::peer_platform(self, peer).await?;
+            Ok(session)
+        }
+        .await;
+        self.refresh_presence();
+        result
+    }
+
     pub fn endpoint_online(&self, id: &str) -> bool {
         id.parse().ok().is_some_and(|id| self.connections.live(id).is_some())
     }
@@ -122,29 +140,28 @@ impl NativeTransport {
     }
 
     pub fn remember_contact(&self, peer: &pairing::Contact) {
-        if let Some(capabilities) = peer.capabilities {
-            // An established session may already have supplied a newer snapshot.
-            self.connections.peer_info.send_if_modified(|known| {
-                let std::collections::btree_map::Entry::Vacant(entry) = known.entry(peer.id().to_string()) else {
-                    return false;
-                };
-                entry.insert(DeviceInfo {
-                    device_name: (peer.platform == Some(DevicePlatform::Android)).then(|| peer.name.clone()),
-                    platform: peer.platform.unwrap_or_default(),
-                    capabilities,
-                });
-                true
+        // An established session may already have supplied a newer snapshot.
+        self.connections.peer_info.send_if_modified(|known| {
+            let std::collections::btree_map::Entry::Vacant(entry) =
+                known.entry(peer.id().to_string())
+            else {
+                return false;
+            };
+            entry.insert(DeviceInfo {
+                device_name: (peer.platform == DevicePlatform::Android).then(|| peer.name.clone()),
+                platform: peer.platform,
+                capabilities: peer.capabilities,
             });
-        }
+            true
+        });
     }
 
     pub fn contact(&self, name: String) -> pairing::Contact {
         pairing::Contact {
             name,
             ticket: EndpointTicket::new(self.endpoint.addr()),
-            supports_unpair: true,
-            platform: Some(DevicePlatform::current()),
-            capabilities: Some(self.connections.local_info.borrow().capabilities),
+            platform: DevicePlatform::current(),
+            capabilities: self.connections.local_info.borrow().capabilities,
         }
     }
 

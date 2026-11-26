@@ -265,14 +265,38 @@ pub fn parse(input: &str) -> Result<Config, String> {
             return Err(format!("peers.{name}.endpoint_id requires 64 hex digits"));
         }
     }
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum ListenHost {
+        Local,
+        Remote(String),
+    }
+    let mut seen_ports = std::collections::BTreeSet::new();
     for (name, forward) in &mut config.forwards {
-        if !config.peers.contains_key(&forward.peer) {
+        let Some(peer) = config.peers.get(&forward.peer) else {
             return Err(format!(
                 "forwards.{name} refers to unknown peer {}",
                 forward.peer
             ));
-        }
+        };
         forward.target = tcp_target(&forward.target).map_err(|e| format!("forwards.{name}: {e}"))?;
+        let port = forward.listen.port();
+        if port != 0 {
+            let host = match forward.direction {
+                Direction::Local => ListenHost::Local,
+                Direction::Remote => ListenHost::Remote(peer.endpoint_id.to_ascii_lowercase()),
+            };
+            if !seen_ports.insert((host, port)) {
+                return Err(match forward.direction {
+                    Direction::Local => format!(
+                        "forwards.{name}: listen port {port} is already used on this device"
+                    ),
+                    Direction::Remote => format!(
+                        "forwards.{name}: listen port {port} is already forwarded on {}",
+                        forward.peer
+                    ),
+                });
+            }
+        }
     }
     Ok(config)
 }

@@ -208,10 +208,13 @@ impl Ui {
         self,
         id: impl Into<ElementId>,
         name: &str,
+        reconnect: impl Fn(&mut Window, &mut App) + 'static,
         unpair: impl Fn(&mut Window, &mut App) + 'static,
     ) -> ActionsMenu {
-        let menu =
-            DropdownContent::new().item("unpair-device", Icon::Trash.label("Unpair device"), unpair);
+        let menu = DropdownContent::new()
+            .item("reconnect-device", Icon::Refresh.label("Reconnect"), reconnect)
+            .separator()
+            .item("unpair-device", Icon::Trash.label("Unpair device"), unpair);
         let menu = self.actions_menu(id, format!("Actions for {name}").into(), menu);
         #[cfg(target_os = "android")]
         let menu = menu.circular_trigger();

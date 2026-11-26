@@ -514,6 +514,33 @@ async fn check_peer<'a>(
     Ok((state, name))
 }
 
+async fn reconnect_peer<'a>(
+    gateway: &'a Mutex<Gateway>,
+    selector: &str,
+) -> Result<(tokio::sync::MutexGuard<'a, Gateway>, String)> {
+    let (transport, name, expected_id) = {
+        let state = gateway.lock().await;
+        let (name, peer) = state.config.resolve_peer(selector)?;
+        (state.transport.clone(), name.clone(), peer.endpoint_id.clone())
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        transport.reconnect_peer(&name),
+    )
+    .await
+    .with_context(|| format!("Reconnecting to {name} timed out"))??;
+    let state = gateway.lock().await;
+    anyhow::ensure!(
+        state
+            .config
+            .peers
+            .get(&name)
+            .is_some_and(|p| p.endpoint_id == expected_id),
+        "Pairing changed while reconnecting to {name}"
+    );
+    Ok((state, name))
+}
+
 async fn handle_client(
     mut socket: ControlStream,
     gateway: Arc<Mutex<Gateway>>,
@@ -603,8 +630,10 @@ async fn handle_client(
                 } => result,
             }
         }
-        Command::CheckPeer { peer } => {
-            let snapshot = check_peer(&gateway, &peer).await.map(|(mut state, _)| state.status());
+        Command::ReconnectPeer { peer } => {
+            let snapshot = reconnect_peer(&gateway, &peer)
+                .await
+                .map(|(mut state, _)| state.status());
             paxri_control::respond(&mut socket, snapshot).await
         }
         Command::SetNative { change } => {

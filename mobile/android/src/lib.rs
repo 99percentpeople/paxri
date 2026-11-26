@@ -85,6 +85,11 @@ enum Update {
     Hosted(String, Option<Vec<SessionKey>>),
     EndedHosted(String, SessionKey, Result<(), String>),
     Presence(Presence),
+    Reconnected {
+        id: String,
+        name: String,
+        result: Result<Vec<paxri_core::connection::PeerConnection>, String>,
+    },
     ForwardChanged(String, Result<(), String>),
     ForwardRules(
         String,
@@ -155,6 +160,7 @@ struct Mobile {
     sessions: BTreeMap<u64, Session>,
     session_names: paxri_ui::terminal::title::SessionTitles,
     ending_hosted: BTreeSet<(String, SessionKey)>,
+    reconnecting: BTreeSet<String>,
     last_session_number: BTreeMap<String, usize>,
     hosted: BTreeMap<String, Vec<SessionKey>>,
     // Each in-flight list tracks sessions that ended after the request started.
@@ -390,6 +396,21 @@ impl Mobile {
         self.open_modal(Modal::RenameSession { peer, key, input }, cx);
         window.on_next_frame(move |w, cx| {
             focus_input.update(cx, |field, cx| field.edit_at_end(w, cx));
+        });
+    }
+
+    fn reconnect_device(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if !self.reconnecting.insert(id.clone()) {
+            return;
+        }
+        Toast::show(format!("Reconnecting to {name}…"), self.window, cx);
+        let updates = self.updates.clone();
+        self.rt.spawn(async move {
+            let result = client.reconnect(&id).await.map_err(|e| format!("{e:#}"));
+            let _ = updates.send(Update::Reconnected { id, name, result }).await;
         });
     }
 
@@ -896,6 +917,34 @@ impl Mobile {
                     return;
                 }
             }
+            Update::Reconnected { id, name, result } => {
+                self.reconnecting.remove(&id);
+                match result {
+                    Ok(paths) => {
+                        let label = self
+                            .peers
+                            .get(&id)
+                            .map_or(name.as_str(), |peer| peer.name.as_str());
+                        self.connection_history.record_peer(&id, &paths);
+                        self.presence.paths.insert(id.clone(), paths.clone());
+                        Toast::show(
+                            paxri_ui::connections::reconnect_toast(label, &paths),
+                            self.window,
+                            cx,
+                        );
+                        self.refresh_sessions();
+                        self.forwards.invalidate(&id);
+                        self.sync_forwards(true);
+                    }
+                    Err(error) => {
+                        Toast::show(
+                            format!("Could not reconnect to {name}: {error}"),
+                            self.window,
+                            cx,
+                        );
+                    }
+                }
+            }
             Update::Presence(snapshot) => {
                 self.hosted.retain(|peer, _| snapshot.online(peer));
                 self.connection_history.record(
@@ -1112,6 +1161,7 @@ fn android_main(android: AndroidApp) {
                             .map(|dir| dir.join("session-titles.json")),
                     ),
                     ending_hosted: BTreeSet::new(),
+                    reconnecting: BTreeSet::new(),
                     android,
                     window: window.window_handle(),
                     ui_font,

@@ -20,25 +20,11 @@ const MAX_FRAME: usize = 16 * 1024;
 pub struct Contact {
     pub name: String,
     pub ticket: EndpointTicket,
-    #[serde(default)]
-    pub supports_unpair: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform: Option<paxri_config::DevicePlatform>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<paxri_config::DeviceCapabilities>,
+    pub platform: paxri_config::DevicePlatform,
+    pub capabilities: paxri_config::DeviceCapabilities,
 }
 
 impl Contact {
-    fn undisclosed(id: EndpointId) -> Self {
-        Self {
-            name: format!("Device {}", paxri_config::peer_id::default_prefix(&id.to_string())),
-            ticket: EndpointTicket::new(iroh::EndpointAddr::new(id)),
-            supports_unpair: true,
-            platform: None,
-            capabilities: None,
-        }
-    }
-
     pub fn id(&self) -> EndpointId {
         self.ticket.endpoint_addr().id
     }
@@ -88,13 +74,6 @@ impl Invitation {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Request {
-    request_id: String,
-    token: String,
-    contact: Contact,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Decision {
     Accepted(Contact),
@@ -122,17 +101,16 @@ impl PendingApproval {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UnpairRequest {
-    pairing_id: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum PairRequest {
-    Join(Request),
-    // The explicit tag distinguishes a legacy pairing from a revocation without a generation.
-    Unpair { unpair: UnpairRequest },
+    Join {
+        request_id: String,
+        token: String,
+        contact: Contact,
+    },
+    Unpair {
+        pairing_id: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -176,11 +154,11 @@ impl PairingHandler {
         let (mut tx, mut rx) = timeout(CONNECT_TIMEOUT, conn.accept_bi()).await??;
         let bytes = timeout(CONNECT_TIMEOUT, rx.read_to_end(MAX_FRAME)).await??;
         let bytes = match serde_json::from_slice::<PairRequest>(&bytes)? {
-            PairRequest::Join(Request {
+            PairRequest::Join {
                 token,
                 contact,
                 request_id,
-            }) => {
+            } => {
                 contact.validate(conn.remote_id())?;
                 ensure!(
                     request_id.len() == 32 && request_id.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -202,12 +180,12 @@ impl PairingHandler {
                 };
                 serde_json::to_vec(&decision)?
             }
-            PairRequest::Unpair { unpair } => {
+            PairRequest::Unpair { pairing_id } => {
                 let (reply, response) = oneshot::channel();
                 self.incoming
                     .try_send(Incoming::Unpair {
                         authenticated_id: conn.remote_id().to_string(),
-                        pairing_id: unpair.pairing_id,
+                        pairing_id,
                         reply,
                     })
                     .map_err(|_| anyhow::anyhow!("Pairing is busy"))?;
@@ -243,9 +221,7 @@ impl NativeTransport {
             "Unpair address does not match the device"
         );
         let request = PairRequest::Unpair {
-            unpair: UnpairRequest {
-                pairing_id: pending.pairing_id.clone(),
-            },
+            pairing_id: pending.pairing_id.clone(),
         };
         timeout(std::time::Duration::from_secs(8), async {
             let conn = super::addresses::dial(&self.endpoint, dest.clone(), PROTOCOL).await?;
@@ -266,23 +242,20 @@ impl NativeTransport {
         local: &Contact,
         request_id: &str,
     ) -> Result<Decision> {
-        self.send_pairing_request(invite, local, request_id).await?.decision().await
+        self.start_pairing(invite, local, request_id)
+            .await?
+            .decision()
+            .await
     }
 
-    /// Device details and reachable addresses are exchanged over the paired session.
-    pub async fn request_private_pairing(
+    pub async fn start_pairing(
         &self,
         invite: &Invitation,
+        local: &Contact,
         request_id: &str,
     ) -> Result<PendingApproval> {
-        self.send_pairing_request(invite, &Contact::undisclosed(self.endpoint.id()), request_id).await
-    }
-
-    async fn send_pairing_request(
-        &self, invite: &Invitation, local: &Contact, request_id: &str,
-    ) -> Result<PendingApproval> {
         let dest = invite.ticket.endpoint_addr();
-        let bytes = serde_json::to_vec(&Request {
+        let bytes = serde_json::to_vec(&PairRequest::Join {
             request_id: request_id.into(),
             token: invite.token.clone(),
             contact: local.clone(),
@@ -303,35 +276,42 @@ impl NativeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paxri_config::DevicePlatform;
+    use paxri_config::{DeviceCapabilities, DevicePlatform};
 
     #[test]
-    fn private_pairing_request_only_identifies_the_authenticated_endpoint() -> Result<()> {
+    fn pairing_requests_carry_explicit_type_and_initiator_contact() -> Result<()> {
         let id = iroh::SecretKey::from_bytes(&[3; 32]).public();
-        let body = serde_json::to_value(Request {
+        let join = serde_json::to_value(PairRequest::Join {
             token: "invitation".into(),
             request_id: "attempt".into(),
-            contact: Contact::undisclosed(id),
+            contact: Contact {
+                name: "Phone".into(),
+                ticket: EndpointTicket::new(iroh::EndpointAddr::new(id)),
+                platform: DevicePlatform::Android,
+                capabilities: DeviceCapabilities::default(),
+            },
         })?;
-        let contact = &body["contact"];
-        assert_eq!(contact["name"], format!("Device {}", &id.to_string()[..8]));
-        assert!(contact.get("platform").is_none() && contact.get("capabilities").is_none());
-        let ticket: EndpointTicket = serde_json::from_value(contact["ticket"].clone())?;
-        assert_eq!(ticket.endpoint_addr().id, id);
-        assert!(ticket.endpoint_addr().is_empty());
+        assert_eq!(join["type"], "join");
+        assert_eq!(join["contact"]["name"], "Phone");
+        assert_eq!(join["contact"]["platform"], "android");
+
+        let unpair = serde_json::to_value(PairRequest::Unpair {
+            pairing_id: Some("gen".into()),
+        })?;
+        assert_eq!(unpair["type"], "unpair");
+        assert_eq!(unpair["pairing_id"], "gen");
         Ok(())
     }
 
     #[test]
-    fn contacts_accept_legacy_and_future_platforms() -> Result<()> {
+    fn contacts_validate_identity_and_platforms() -> Result<()> {
         let id = iroh::SecretKey::from_bytes(&[3; 32]).public();
         let mut message = serde_json::json!({
             "name": "Desktop",
-            "ticket": EndpointTicket::new(iroh::EndpointAddr::new(id))
+            "ticket": EndpointTicket::new(iroh::EndpointAddr::new(id)),
+            "platform": "linux",
+            "capabilities": DeviceCapabilities::default(),
         });
-        let legacy: Contact = serde_json::from_value(message.clone())?;
-        assert_eq!(legacy.platform, None);
-        legacy.validate(id)?;
         for platform in [
             DevicePlatform::Android,
             DevicePlatform::Windows,
@@ -341,7 +321,8 @@ mod tests {
         ] {
             message["platform"] = platform.as_str().into();
             let contact: Contact = serde_json::from_value(message.clone())?;
-            assert_eq!(contact.platform, Some(platform));
+            assert_eq!(contact.platform, platform);
+            contact.validate(id)?;
             assert_eq!(
                 serde_json::to_value(contact)?["platform"],
                 platform.as_str()
@@ -349,7 +330,7 @@ mod tests {
         }
         message["platform"] = "future-os".into();
         let contact: Contact = serde_json::from_value(message)?;
-        assert_eq!(contact.platform, Some(DevicePlatform::Unknown));
+        assert_eq!(contact.platform, DevicePlatform::Unknown);
         assert!(
             contact
                 .validate(iroh::SecretKey::from_bytes(&[4; 32]).public())

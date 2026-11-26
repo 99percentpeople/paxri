@@ -317,6 +317,33 @@ impl Connections {
         .context("connecting to paired device timed out")?
     }
 
+    /// Refresh local network discovery, retire any existing session for this peer, and establish
+    /// a fresh authenticated connection so path selection and holepunching renegotiate cleanly.
+    pub(super) async fn reconnect(
+        self: &Arc<Self>,
+        ep: &Endpoint,
+        addr: EndpointAddr,
+    ) -> Result<NativeSession> {
+        let slot = self.paired_slot(addr.id)?;
+        timeout(CONNECT_TIMEOUT, async {
+            let _dial = slot.dial.lock().await;
+            ep.network_change().await;
+            if let Some(previous) = slot.live() {
+                previous.conn.close(0u32.into(), b"reconnecting");
+                slot.clear(&previous, &self.changes);
+            }
+            let conn = super::addresses::dial(ep, addr, PROTOCOL).await.context(
+                "shared peer protocol handshake failed; both gateways must support paxri/session/1",
+            )?;
+            let pool = self.clone();
+            // A cancelled request must not cancel admission on the connection its peer may select.
+            tokio::spawn(async move { pool.admit(conn).await }).await??;
+            slot.live().context("peer session closed during admission")
+        })
+        .await
+        .context("reconnecting to paired device timed out")?
+    }
+
     async fn admit(&self, conn: Connection) -> Result<()> {
         let remote = conn.remote_id();
         let slot = match self.paired_slot(remote) {
@@ -653,6 +680,48 @@ mod tests {
                 sa.status().streams,
                 BTreeMap::from([(StreamKind::Command, 1)])
             );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        ra.shutdown().await?;
+        rb.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconnect_replaces_existing_session_from_either_side() -> Result<()> {
+        let a = endpoint().await?;
+        let b = endpoint().await?;
+        let (pa, mut at_a, _grants_a) = pool(&a, &b);
+        let (pb, mut at_b, _grants_b) = pool(&b, &a);
+        let ra = Router::builder(a.clone())
+            .accept(PROTOCOL, pa.clone())
+            .spawn();
+        let rb = Router::builder(b.clone())
+            .accept(PROTOCOL, pb.clone())
+            .spawn();
+        timeout(Duration::from_secs(12), async {
+            let initial = pa.get(&a, b.addr()).await?;
+            assert_eq!(pb.get(&b, a.addr()).await?.token, initial.token);
+
+            // Reconnect initiated by endpoint A replaces the live session on both sides.
+            let second = pa.reconnect(&a, b.addr()).await?;
+            assert!(!second.same_connection(&initial));
+            assert_eq!(pb.get(&b, a.addr()).await?.token, second.token);
+            let mut tx = second.open(StreamKind::Command).await?;
+            let mut rx = at_b.recv().await.unwrap();
+            tx.write_u8(41).await?;
+            assert_eq!(rx.stream.read_u8().await?, 41);
+            drop((tx, rx));
+
+            // Reconnect initiated by endpoint B (the opposite ID ordering) also replaces cleanly.
+            let third = pb.reconnect(&b, a.addr()).await?;
+            assert!(!third.same_connection(&second));
+            assert_eq!(pa.get(&a, b.addr()).await?.token, third.token);
+            let mut tx = third.open(StreamKind::Command).await?;
+            let mut rx = at_a.recv().await.unwrap();
+            tx.write_u8(53).await?;
+            assert_eq!(rx.stream.read_u8().await?, 53);
             Ok::<_, anyhow::Error>(())
         })
         .await??;

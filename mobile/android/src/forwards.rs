@@ -313,7 +313,7 @@ pub(super) struct RuleForm {
 impl RuleForm {
     pub(super) fn new(cx: &mut Context<Mobile>) -> Self {
         Self {
-            inputs: ["e.g. web", "8080 or IP:port", "3000 or host:port"]
+            inputs: ["e.g. web (optional)", "8080 or IP:port", "3000 or host:port"]
                 .map(|placeholder| Input::setting(placeholder, cx)),
             existing: None,
             direction: Direction::Local,
@@ -339,13 +339,8 @@ impl RuleForm {
                 direction,
             })
         } else {
-            let name = if entered.is_empty() {
-                format!("tcp-{}", listen.port())
-            } else {
-                entered.to_owned()
-            };
             Ok(PeerForward::Create {
-                name,
+                name: entered.to_owned(),
                 listen,
                 target,
                 direction,

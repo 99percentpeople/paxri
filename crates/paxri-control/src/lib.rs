@@ -35,7 +35,7 @@ pub enum Command {
     WatchPeerConnections,
     ListForwards,
     ManagePeerForward { owner: String, action: PeerForward },
-    CheckPeer {
+    ReconnectPeer {
         peer: String,
     },
     Shutdown,
@@ -517,68 +517,25 @@ pub async fn watch_peer_connections(path: &Path) -> Result<Stream> {
 pub async fn peer_status(path: &Path, peer: &str, check: bool) -> Result<PeerStatus> {
     let command = Command::PeerStatus { peer: peer.to_owned(), check };
     let deadline = if check { Duration::from_secs(30) } else { DEADLINE };
-    match begin(path, command, deadline).await {
-        Ok((_, snapshot)) => Ok(snapshot),
-        // Gateways predating this read-only command return Serde's unknown-variant error.
-        Err(e) if e.to_string().starts_with("unknown variant `peer_status`") => {
-            let command = if check { Command::CheckPeer { peer: peer.into() } } else { Command::Status };
-            let status = request(path, command).await?;
-            let (name, id) = status.resolve_peer(peer)?;
-            Ok(PeerStatus {
-                peer: name.into(),
-                device_id: id.into(),
-                platform: status.peer_platform(name),
-                capabilities: status.peer_capabilities.get(name).copied(),
-                state: status.peer_state(name).into(),
-                connections: status.connections_for(name).map(<[_]>::to_vec),
-            })
-        }
-        Err(e) => Err(e),
-    }
+    let (_, snapshot) = begin(path, command, deadline).await?;
+    Ok(snapshot)
 }
 
 pub async fn request(path: &Path, command: Command) -> Result<Status> {
-    let deadline = if matches!(command, Command::CheckPeer { .. } | Command::Unpair { .. } | Command::ListForwards | Command::ManagePeerForward { .. }) {
+    let deadline = if matches!(
+        command,
+        Command::ReconnectPeer { .. }
+            | Command::Unpair { .. }
+            | Command::ListForwards
+            | Command::ManagePeerForward { .. }
+    ) {
         Duration::from_secs(30)
     } else {
         DEADLINE
     };
     let (_stream, mut status) = begin::<Status>(path, command, deadline).await?;
     status.ipc_path = Some(path.to_owned());
-    // Older gateways did not report their image. Ask the OS about this pipe's server.
-    #[cfg(windows)]
-    if status.executable.is_none() {
-        status.executable = _stream
-            .peer_creds()
-            .ok()
-            .and_then(|p| process_image(p.pid()?));
-    }
     Ok(status)
-}
-
-#[cfg(windows)]
-fn process_image(pid: u32) -> Option<PathBuf> {
-    use std::{
-        ffi::OsString,
-        os::windows::{
-            ffi::OsStringExt,
-            io::{AsRawHandle, FromRawHandle, OwnedHandle},
-        },
-    };
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-    };
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
-    let mut path = vec![0u16; 32768];
-    let mut len = path.len() as u32;
-    let ok = unsafe {
-        QueryFullProcessImageNameW(process.as_raw_handle(), 0, path.as_mut_ptr(), &mut len)
-    };
-    (ok != 0).then(|| OsString::from_wide(&path[..len as usize]).into())
 }
 
 /// The gateway acknowledges after closing its listeners and transport.
@@ -626,12 +583,7 @@ pub async fn copy_files(
 }
 
 pub async fn managed_terminal(path: &Path, peer: String, action: terminal::managed::Request) -> Result<(Stream, Vec<terminal::managed::Key>)> {
-    let result = begin(path, Command::ManagedTerminal { peer, action }, Duration::from_secs(25)).await;
-    match result {
-        Err(e) if e.to_string().starts_with("unknown variant `managed_terminal`") =>
-            Err(e.context("Update the local gateway to use managed terminal sessions")),
-        other => other,
-    }
+    begin(path, Command::ManagedTerminal { peer, action }, Duration::from_secs(25)).await
 }
 
 /// Open a native interactive terminal. After the reply, IPC carries terminal frames directly.

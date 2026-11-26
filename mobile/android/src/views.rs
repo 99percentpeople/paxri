@@ -400,20 +400,32 @@ impl Mobile {
     fn device_actions(&self, id: &str, ui: Ui, cx: &Context<Self>) -> AnyElement {
         let name = &self.peers[id].name;
         let menu_id = SharedString::from(format!("device-actions-{id}"));
+        let reconnect_id = id.to_owned();
+        let reconnect_name = name.clone();
+        let reconnect_view = cx.weak_entity();
         let id = id.to_owned();
         let view = cx.weak_entity();
-        ui.device_actions(menu_id, name, move |_, cx| {
-            let _ = view.update(cx, |this, cx| {
-                if let Some(peer) = this.peers.get(&id) {
-                    this.confirm_unpair(
-                        id.clone(),
-                        peer.generation.clone(),
-                        peer.name.clone(),
-                        cx,
-                    );
-                }
-            });
-        })
+        ui.device_actions(
+            menu_id,
+            name,
+            move |_, cx| {
+                let _ = reconnect_view.update(cx, |this, cx| {
+                    this.reconnect_device(reconnect_id.clone(), reconnect_name.clone(), cx);
+                });
+            },
+            move |_, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some(peer) = this.peers.get(&id) {
+                        this.confirm_unpair(
+                            id.clone(),
+                            peer.generation.clone(),
+                            peer.name.clone(),
+                            cx,
+                        );
+                    }
+                });
+            },
+        )
         .into_any_element()
     }
 

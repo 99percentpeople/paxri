@@ -153,20 +153,25 @@ pub(super) fn forwards(status: &Status) -> String {
 pub(super) fn pairing(pairing: &PairingStatus) -> String {
     let mut report = Report::new();
     if !pairing.incoming.is_empty() {
+        let short_ids = paxri_config::peer_id::unique_prefixes(
+            pairing.incoming.iter().map(|peer| peer.device_id.as_str()),
+        );
         let rows = pairing
             .incoming
             .iter()
             .map(|peer| {
-                [
-                    peer.name.clone(),
-                    peer.platform.label().into(),
-                    peer.device_id.clone(),
-                ]
+                let short = short_ids
+                    .get(&peer.device_id.to_ascii_lowercase())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        paxri_config::peer_id::default_prefix(&peer.device_id).to_owned()
+                    });
+                [peer.name.clone(), peer.platform.label().into(), short]
             })
             .collect();
         report.table(
             "Incoming pairing requests",
-            ["NAME", "SYSTEM", "DEVICE ID"],
+            ["NAME", "SYSTEM", "SHORT ID"],
             rows,
         );
     }
@@ -174,7 +179,10 @@ pub(super) fn pairing(pairing: &PairingStatus) -> String {
         report.line(&format!("Awaiting unpair confirmation: {}", pairing.pending_unpairs.join(", ")));
     }
     if let Some(id) = &pairing.outgoing {
-        report.line(&format!("Waiting for approval from {id}"));
+        report.line(&format!(
+            "Waiting for approval from {}",
+            paxri_config::peer_id::default_prefix(id)
+        ));
     }
     if let Some(message) = &pairing.message {
         report.line(message);

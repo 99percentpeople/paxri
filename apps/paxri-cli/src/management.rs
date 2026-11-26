@@ -210,9 +210,9 @@ pub enum PairAction {
     Remove { peer: String },
     /// Withdraw this device's outgoing request
     Cancel,
-    /// Approve the pending request from this device ID
+    /// Approve the pending request by full device ID or unique ID prefix
     Accept { device_id: String },
-    /// Decline the pending request from this device ID
+    /// Decline the pending request by full device ID or unique ID prefix
     Decline { device_id: String },
 }
 

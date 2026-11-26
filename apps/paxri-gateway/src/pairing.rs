@@ -72,7 +72,7 @@ impl Pairings {
                     request_id: p.request_id.clone(),
                     name: p.peer.name.clone(),
                     device_id: id.clone(),
-                    platform: p.peer.platform.unwrap_or_default(),
+                    platform: p.peer.platform,
                 })
                 .collect(),
             outgoing: self.outgoing.as_ref().map(|o| o.id.clone()),
@@ -137,6 +137,20 @@ impl Pairings {
             .abort();
         self.message = Some("Pairing request canceled.".into());
         Ok(())
+    }
+
+    fn resolve_pending(
+        &self,
+        selector: &str,
+        request_id: Option<&str>,
+    ) -> Result<(&str, &Pending)> {
+        let (id, pending) =
+            paxri_config::peer_id::resolve_id(&self.pending, selector, |p| &p.peer.name)?;
+        ensure!(
+            request_id.is_none_or(|r| r == pending.request_id),
+            "This pairing request is no longer pending"
+        );
+        Ok((id.as_str(), pending))
     }
 }
 
@@ -236,8 +250,8 @@ impl Gateway {
             &alias,
             &id,
             &peer.ticket.to_string(),
-            peer.platform,
-            PeerUpdate::Pair(peer.supports_unpair.then_some(request_id)),
+            Some(peer.platform),
+            PeerUpdate::Pair(Some(request_id)),
         )?;
         self.file.persist(text)?;
         self.transport.set_peer(alias.clone(), peer.ticket.clone());
@@ -253,16 +267,11 @@ impl Gateway {
         accept: bool,
     ) -> Result<()> {
         self.pairing.prune();
-        let peer = self
-            .pairing
-            .pending
-            .get(id)
-            .filter(|p| request_id.is_none_or(|r| r == p.request_id))
-            .context("This pairing request is no longer pending")?
-            .peer
-            .clone();
+        let (resolved_id, pending) = self.pairing.resolve_pending(id, request_id)?;
+        let resolved_id = resolved_id.to_owned();
+        let peer = pending.peer.clone();
+        let generation = pending.request_id.clone();
         let (decision, message) = if accept {
-            let generation = self.pairing.pending[id].request_id.clone();
             let name = self.save_peer(&peer, &generation)?;
             (
                 Decision::Accepted(self.contact()),
@@ -274,12 +283,16 @@ impl Gateway {
                 format!("Declined pairing with {}.", peer.name),
             )
         };
-        let pending = self.pairing.pending.remove(id).expect("pending request");
+        let pending = self
+            .pairing
+            .pending
+            .remove(&resolved_id)
+            .expect("pending request");
         for reply in pending.replies {
             let _ = reply.send(decision.clone());
         }
         self.pairing.replies.insert(
-            (id.into(), pending.request_id),
+            (resolved_id, pending.request_id),
             (Instant::now() + Duration::from_secs(90), decision),
         );
         self.pairing.message = Some(message);
@@ -332,6 +345,59 @@ impl Gateway {
             task: task.abort_handle(),
         });
         self.pairing.message = None;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paxri_config::{DeviceCapabilities, DevicePlatform};
+
+    fn pending(name: &str, request_id: &str) -> Result<(String, Pending)> {
+        let dir = tempfile::tempdir()?;
+        let key = paxri_native::identity::init(&dir.path().join("device.key"))?;
+        let id = key.public().to_string();
+        let (tx, _rx) = oneshot::channel();
+        Ok((
+            id,
+            Pending {
+                request_id: request_id.into(),
+                peer: Contact {
+                    name: name.into(),
+                    ticket: EndpointTicket::new(key.public().into()),
+                    platform: DevicePlatform::Android,
+                    capabilities: DeviceCapabilities::default(),
+                },
+                replies: vec![tx],
+            },
+        ))
+    }
+
+    #[test]
+    fn resolve_pending_accepts_full_and_unique_short_ids() -> Result<()> {
+        let mut pairings = Pairings::default();
+        let (first_id, first) = pending("Phone", "req1")?;
+        let (second_id, second) = pending("Laptop", "req2")?;
+        pairings.pending.insert(first_id.clone(), first);
+        pairings.pending.insert(second_id.clone(), second);
+
+        assert_eq!(
+            pairings.resolve_pending(&first_id[..4], None)?.0,
+            first_id
+        );
+        assert_eq!(
+            pairings
+                .resolve_pending(&second_id[..8].to_uppercase(), Some("req2"))?
+                .0,
+            second_id
+        );
+        assert_eq!(
+            pairings.resolve_pending(&first_id, Some("req1"))?.0,
+            first_id
+        );
+        assert!(pairings.resolve_pending(&first_id[..8], Some("stale")).is_err());
+        assert!(pairings.resolve_pending(&first_id[..3], None).is_err());
         Ok(())
     }
 }

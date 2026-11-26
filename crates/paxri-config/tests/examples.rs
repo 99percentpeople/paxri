@@ -59,3 +59,78 @@ fn forwarding_discovery_respects_advertised_support_and_legacy_peers() {
         assert_eq!(Android.supports_forward_rules(capabilities), advertised);
     }
 }
+
+#[test]
+fn listen_ports_are_unique_per_receiving_host_while_targets_can_be_shared() {
+    let a = "aa".repeat(32);
+    let b = "bb".repeat(32);
+    // One local service (8080) can be reverse-forwarded to port 8080 on multiple different peers.
+    let shared_target_reverse = format!(
+        r#"version = 1
+[peers.first]
+endpoint_id = "{a}"
+[peers.second]
+endpoint_id = "{b}"
+[forwards.web-a]
+peer = "first"
+direction = "remote"
+listen = "127.0.0.1:8080"
+target = "8080"
+[forwards.web-b]
+peer = "second"
+direction = "remote"
+listen = "127.0.0.1:8080"
+target = "8080"
+"#
+    );
+    assert!(parse(&shared_target_reverse).is_ok());
+
+    // The same receiving peer cannot bind the same listen port twice.
+    let dup_remote = format!(
+        r#"{shared_target_reverse}
+[forwards.web-a-dup]
+peer = "first"
+direction = "remote"
+listen = "0.0.0.0:8080"
+target = "3000"
+"#
+    );
+    assert!(parse(&dup_remote).is_err());
+
+    // The same receiving peer CAN bind a different listen port for the same target.
+    let diff_remote_port = format!(
+        r#"{shared_target_reverse}
+[forwards.web-a-alt]
+peer = "first"
+direction = "remote"
+listen = "127.0.0.1:8081"
+target = "8080"
+"#
+    );
+    assert!(parse(&diff_remote_port).is_ok());
+
+    // On this device (Local listening host), two forwards cannot reuse the same listen port
+    // even when targeting different peers.
+    let dup_local = format!(
+        r#"version = 1
+[peers.first]
+endpoint_id = "{a}"
+[peers.second]
+endpoint_id = "{b}"
+[forwards.web-a]
+peer = "first"
+listen = "127.0.0.1:8080"
+target = "8080"
+[forwards.web-b]
+peer = "second"
+listen = "127.0.0.1:8080"
+target = "8080"
+"#
+    );
+    assert!(parse(&dup_local).is_err());
+
+    // Different local listen ports targeting the same service port are allowed.
+    let diff_local = dup_local.replace("listen = \"127.0.0.1:8080\"\ntarget = \"8080\"\n", "listen = \"127.0.0.1:8080\"\ntarget = \"8080\"\n");
+    let diff_local = diff_local.replacen("127.0.0.1:8080", "127.0.0.1:8081", 1);
+    assert!(parse(&diff_local).is_ok());
+}

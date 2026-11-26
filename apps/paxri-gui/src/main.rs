@@ -73,6 +73,7 @@ struct Dashboard {
     presence_watch: Option<(PathBuf, Task<()>)>,
     refresh_presence: bool,
     listing_forwards: bool,
+    reconnecting_peers: std::collections::BTreeSet<String>,
     connection_history: ConnectionHistory,
     terminal_sessions: BTreeMap<SharedString, workspace::PeerSessions>,
     session_titles: paxri_ui::terminal::title::SessionTitles,
@@ -491,6 +492,7 @@ impl Dashboard {
             presence_watch: None,
             refresh_presence: false,
             listing_forwards: false,
+            reconnecting_peers: std::collections::BTreeSet::new(),
             connection_history: Default::default(),
             terminal_sessions: BTreeMap::new(),
             session_titles: paxri_ui::terminal::title::SessionTitles::open(

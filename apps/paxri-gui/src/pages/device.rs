@@ -4,12 +4,12 @@ use crate::{
     components::{
         Button,
         ButtonVariant::Destructive,
-        Dialog, DialogContent, DialogMode, DialogSuccess, Ui,
+        Dialog, DialogContent, DialogMode, DialogSuccess, Toast, Ui,
     },
 };
 use gpui::{prelude::*, *};
 use paxri_control::{Command, DevicePlatform, Status};
-use paxri_ui::components::DeviceCounts;
+use paxri_ui::{components::DeviceCounts, connections::reconnect_toast};
 
 impl Dashboard {
     pub(super) fn device_counts(&self, peer: &str, status: &Status) -> DeviceCounts {
@@ -46,6 +46,77 @@ impl Dashboard {
 }
 
 impl Dashboard {
+    fn reconnect_peer(
+        &mut self,
+        peer: String,
+        display_name: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.reconnecting_peers.insert(peer.clone()) {
+            return;
+        }
+        let target_window = window.window_handle();
+        Toast::show(format!("Reconnecting to {display_name}…"), target_window, cx);
+        let path = self
+            .active_address()
+            .unwrap_or_else(paxri_control::default_address);
+        let request_peer = peer.clone();
+        let job = self.runtime.spawn(async move {
+            paxri_control::request(&path, Command::ReconnectPeer { peer: request_peer }).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| format!("{e:#}")));
+            let _ = this.update(cx, |view, cx| {
+                view.reconnecting_peers.remove(&peer);
+                match result {
+                    Ok(mut status) => {
+                        let conns = status
+                            .connections_for(&peer)
+                            .map(<[_]>::to_vec)
+                            .unwrap_or_default();
+                        let label = status.peer_display_name(&peer).to_owned();
+                        if status.peer_forwards.is_none()
+                            && let Some(old) = &mut view.status
+                            && old.device_id == status.device_id
+                            && old.ipc_path == status.ipc_path
+                            && old.peers == status.peers
+                        {
+                            status.peer_forwards = old.peer_forwards.take();
+                        }
+                        let paths = status.peer_connections.iter().flatten().filter_map(
+                            |(alias, paths)| {
+                                Some((status.peers.get(alias)?.as_str(), paths.as_slice()))
+                            },
+                        );
+                        view.connection_history.record(paths);
+                        view.status = Some(status);
+                        view.refresh_hosted_sessions(true, cx);
+                        view.refresh_forward_directory(cx);
+                        Toast::show(reconnect_toast(&label, &conns), target_window, cx);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        if !view.busy {
+                            view.send(Command::Status, cx);
+                        } else {
+                            view.refresh_presence = true;
+                        }
+                        Toast::show(
+                            format!("Could not reconnect to {display_name}: {error}"),
+                            target_window,
+                            cx,
+                        );
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     fn confirm_unpair(&self, peer: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let peer = peer.to_owned();
         let id = id.to_owned();
@@ -94,14 +165,22 @@ impl Dashboard {
         let Some(id) = status.peers.get(peer) else { return overview() };
         let short = status.short_peer_ids().remove(peer).unwrap_or_else(|| id.clone());
         let name = status.peer_display_name(peer);
-        let view = cx.weak_entity();
+        let reconnect_view = cx.weak_entity();
+        let reconnect_peer = peer.to_owned();
+        let reconnect_name = name.to_owned();
+        let unpair_view = cx.weak_entity();
         let selected = peer.to_owned();
         let expected = id.clone();
         let menu = ui.device_actions(
             SharedString::from(format!("device-actions-{id}")),
             name,
             move |w, cx| {
-                let _ = view.update(cx, |v, cx| v.confirm_unpair(&selected, &expected, w, cx));
+                let _ = reconnect_view.update(cx, |v, cx| {
+                    v.reconnect_peer(reconnect_peer.clone(), reconnect_name.clone(), w, cx)
+                });
+            },
+            move |w, cx| {
+                let _ = unpair_view.update(cx, |v, cx| v.confirm_unpair(&selected, &expected, w, cx));
             },
         );
         let header = ui.device_heading(

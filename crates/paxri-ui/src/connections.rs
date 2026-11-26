@@ -464,3 +464,51 @@ pub fn presence_detail(state: &str, now: i64, changed: Option<i64>) -> String {
     };
     format!("{state} · {age}")
 }
+
+pub fn reconnect_toast(name: &str, connections: &[PeerConnection]) -> String {
+    let Some(path) = connections.first() else {
+        return format!("Reconnected to {name}.");
+    };
+    if matches!(path.path, PathKind::Selecting) {
+        return format!("Reconnected to {name}.");
+    }
+    match path.rtt_ms {
+        Some(0) => format!("Reconnected to {name} ({}, <1 ms).", path.path.label()),
+        Some(ms) => format!("Reconnected to {name} ({}, {ms} ms).", path.path.label()),
+        None => format!("Reconnected to {name} ({}).", path.path.label()),
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::reconnect_toast;
+    use paxri_core::connection::{PathKind, PeerConnection};
+
+    #[test]
+    fn reconnect_toast_formats_path_and_latency() {
+        let mut conn = PeerConnection {
+            protocol: "Shared connection".into(),
+            path: PathKind::Direct,
+            address: Some("192.168.1.2:4433".into()),
+            rtt_ms: Some(0),
+            traffic: None,
+            streams: Default::default(),
+        };
+        assert_eq!(
+            reconnect_toast("YZZPC", std::slice::from_ref(&conn)),
+            "Reconnected to YZZPC (Direct, <1 ms)."
+        );
+        conn.path = PathKind::Relay;
+        conn.rtt_ms = Some(42);
+        assert_eq!(
+            reconnect_toast("Lab", std::slice::from_ref(&conn)),
+            "Reconnected to Lab (Relay, 42 ms)."
+        );
+        conn.path = PathKind::Selecting;
+        assert_eq!(
+            reconnect_toast("Lab", std::slice::from_ref(&conn)),
+            "Reconnected to Lab."
+        );
+        assert_eq!(reconnect_toast("Lab", &[]), "Reconnected to Lab.");
+    }
+}

@@ -406,8 +406,10 @@ def check_pairing(root, keys, call, start, target_port, wait):
     wait("client", lambda s: not s["pairing"]["outgoing"] and "invalid" in (s["pairing"]["message"] or "").lower())
     join_and_wait(code)
     rejected("host", "pair", "accept", spare)
+    rejected("host", "pair", "accept", keys["client"][:3])
+    assert keys["client"][:8] in call("host", "pair", "status")
     assert not status("host")["peers"] and status("client")["peers"] == {"Studio": spare}
-    call("host", "pair", "decline", keys["client"])
+    call("host", "pair", "decline", keys["client"][:8].upper())
     wait("client", lambda s: not s["pairing"]["outgoing"] and "declined" in s["pairing"]["message"])
     assert all((root / (node + ".toml")).read_bytes() == text for node, text in originals.items())
 
@@ -428,7 +430,7 @@ def check_pairing(root, keys, call, start, target_port, wait):
         wait(node, lambda s: not s["pairing"]["outgoing"] and "refreshed" in s["pairing"]["message"])
     rejected("host", "pair", "accept", keys["client"])
     join_and_wait(code)
-    call("host", "pair", "accept", keys["client"])
+    call("host", "pair", "accept", keys["client"][:8])
     wait("client", lambda s: s["peers"].get("Studio-2") == keys["host"])
     assert status("host")["peers"] == {"Laptop": keys["client"]}
     assert status("host")["peer_platforms"] == {"Laptop": platform}
@@ -705,7 +707,34 @@ def check_shared_forwards(root, call, start, rule_state, target_port):
     call("host", "forward", "remove", "pull", "--owner", "first")
     assert "pull" not in directory("host")["first"]
     assert "pull" in json.loads(call("second", "status", "--json"))["forwards"]
-    print("PASS: forward and reverse TCP, same-name rules on different owners, bilateral list/edit/rename/pause/resume/remove, same-port rebind, third-party and unpaired isolation")
+
+    # One host target can be reverse-forwarded to the same listen port on multiple different peers,
+    # while the same receiving host cannot reuse a listen port.
+    with socket.socket() as reserve:
+        reserve.bind(("127.0.0.1", 0))
+        shared_port = reserve.getsockname()[1]
+    call("host", "forward", "add", "web-first", "--remote", "--peer", "first", "--listen", str(shared_port), "--target", address)
+    call("host", "forward", "add", "web-second", "--remote", "--peer", "second", "--listen", str(shared_port), "--target", address)
+    # Wait for first to release or test port conflict on the same receiving peer:
+    try:
+        call("host", "forward", "add", "web-first-dup", "--remote", "--peer", "first", "--listen", str(shared_port), "--target", address)
+        raise AssertionError("Duplicate listen port on the same receiving peer was allowed")
+    except subprocess.CalledProcessError as error:
+        assert "already forwarded" in error.stderr, error.stderr
+    # On localhost, two local forwards cannot reuse the same listen port even for different peers.
+    call("host", "forward", "add", "local-a", "--peer", "first", "--listen", "0", "--target", address)
+    local_port = json.loads(call("host", "status", "--json"))["forwards"]["local-a"]["bound"].rsplit(":", 1)[1]
+    call("host", "forward", "edit", "local-a", "--peer", "first", "--listen", local_port, "--target", address)
+    try:
+        call("host", "forward", "add", "local-b", "--peer", "second", "--listen", local_port, "--target", address)
+        raise AssertionError("Duplicate listen port on this receiving host was allowed")
+    except subprocess.CalledProcessError as error:
+        assert "already used" in error.stderr, error.stderr
+    call("host", "forward", "remove", "local-a")
+    call("host", "forward", "remove", "web-first")
+    call("host", "forward", "remove", "web-second")
+
+    print("PASS: forward and reverse TCP, same-name rules on different owners, shared targets across receiving peers, per-receiver duplicate port block, bilateral list/edit/rename/pause/resume/remove, same-port rebind, third-party and unpaired isolation")
 
 
 def check_unpair(root, keys, call, start, wait, echo_port):
