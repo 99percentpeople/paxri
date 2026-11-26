@@ -20,7 +20,7 @@ paxri pairs computers and opens shells, copies files, and forwards TCP ports bet
 | `crates/paxri-terminal`, `crates/paxri-files` | PTY and file-transfer protocols |
 | `crates/paxri-ui` | GPUI components, terminal emulator and renderer, settings catalog. Shared by desktop **and** Android |
 | `compat/{gpui,iroh,xattr}` | Vendored, patched crates wired in through `[patch.crates-io]`. See `LOCAL_CHANGES.md` in `gpui` and `iroh` (and `Cargo.toml` for `xattr`) |
-| `mobile/android` | Android client: a **separate Cargo workspace** with its own `Cargo.lock`, a different GPUI snapshot (`gpui-mobile`/`gpui-pre`), Java glue, and upstream patches in `patches/` |
+| `mobile/android` | Android client: a workspace member with a different GPUI snapshot (`gpui-mobile`/`gpui-pre`), Java glue, and upstream patches in `patches/` |
 | `scripts/` | Integration checks (`check-gateway.py`, `check-nat*.{py,sh}`) and Windows dev sync |
 | `packaging/` | Release archives, Windows portable ZIP, systemd and launchd units, Docker entrypoint, rolling-release publishing |
 | `docs/` | User and developer documentation |
@@ -43,7 +43,7 @@ target/debug/paxri config check examples/home.toml
 
 Other `check-gateway.py` modes: `--pairing-only`, `--unpair`, `--native-terminal`, `--session-tools`, `--forwarding`, `--lifecycle`. Run the ones that cover your change.
 
-Android (needs JDK 17, SDK 35, NDK, `cargo-ndk`): `python3 mobile/android/build.py`. Android has its own lockfile, so run `cargo` there from `mobile/android/`. Changes to `crates/paxri-ui` are built against both desktop `compat/gpui` (0.2.2) and Android `gpui-pre` (0.3.6); guard divergent GPUI APIs (such as `ShapedLine::paint`) with `#[cfg(target_os = "android")]` and make sure both clients compile.
+Android shares the root `Cargo.lock` but is not a default workspace member. From the repository root, run `python3 mobile/android/build.py` (needs JDK 17, SDK 35, NDK, and `cargo-ndk` or an explicit Android linker). The script selects `-p paxri-android` for `aarch64-linux-android` and uses `android-dev` by default or `android-release` with `--unsigned-release`. Changes to `crates/paxri-ui` are built against both desktop `compat/gpui` (0.2.2) and Android `gpui-pre` (0.3.6); guard divergent GPUI APIs (such as `ShapedLine::paint`) with `#[cfg(target_os = "android")]` and make sure both clients compile.
 
 ## Conventions
 

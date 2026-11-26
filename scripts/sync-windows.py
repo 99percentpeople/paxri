@@ -31,7 +31,8 @@ RECEIVE_COMMAND = (
 def source_path(name):
     parts = name.split("/")
     leaf = parts[-1].lower()
-    if name not in ROOT_FILES and parts[0] not in SOURCE_DIRS:
+    android_member = name == "mobile/android/Cargo.toml" or name.startswith("mobile/android/src/")
+    if name not in ROOT_FILES and parts[0] not in SOURCE_DIRS and not android_member:
         return False
     return not (EXCLUDED_DIRS.intersection(p.lower() for p in parts)
                 or leaf == ".env" or leaf.startswith(".env.") or leaf == "node.toml"

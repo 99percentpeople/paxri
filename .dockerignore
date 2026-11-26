@@ -3,6 +3,11 @@
 !Cargo.lock
 !apps/
 !apps/**
+!mobile/
+!mobile/android/
+!mobile/android/Cargo.toml
+!mobile/android/src/
+!mobile/android/src/**
 !crates/
 !crates/**
 !compat/

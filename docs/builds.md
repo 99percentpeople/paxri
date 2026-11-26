@@ -32,7 +32,9 @@ gh run list --workflow builds.yml --branch main
 
 ## Android APK
 
-Rolling APKs use Cargo's size-optimized release profile for the ARM64 native library. The desktop and Android terminals embed the same Cascadia Mono PL subset. Ordinary text uses the selected or system monospace font. Box drawing, blocks, Braille and common prompt symbols use the bundled face. The renderer fits box drawing, block elements and the four basic Powerline separators to the terminal grid at the selected line height and zoom. Other scripts and emoji use the installed system fonts.
+Android shares the root `Cargo.lock` with the desktop and headless packages. The APK builder selects `paxri-android` and uses the `android-dev` Cargo profile by default. Rolling APKs use `android-release`, a size-optimized profile for the ARM64 native library.
+
+The desktop and Android terminals embed the same Cascadia Mono PL subset. Ordinary text uses the selected or system monospace font. Box drawing, blocks, Braille and common prompt symbols use the bundled face. The renderer fits box drawing, block elements and the four basic Powerline separators to the terminal grid at the selected line height and zoom. Other scripts and emoji use the installed system fonts.
 
 To regenerate the subset, run `python3 crates/paxri-ui/fonts/subset.py /path/to/CascadiaMonoPL-Regular.ttf` with fontTools and the static Regular face from Cascadia Code v2407.24. The APK and desktop packages include the SIL Open Font License. [Upstream font release](https://github.com/microsoft/cascadia-code/releases/tag/v2407.24)
 

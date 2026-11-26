@@ -1,6 +1,6 @@
 # Android GPUI patches
 
-Each directory is named after the Cargo package it modifies. The Android build applies the patches to a copy of the locked upstream source. Rust and Java both build from the patched copy of `gpui-mobile`. [Build script](../build.py) · [Dependency lockfile](../Cargo.lock)
+Each directory is named after the Cargo package it modifies. The Android build applies the patches to a copy of the locked upstream source. Rust and Java both build from the patched copy of `gpui-mobile`. [Build script](../build.py) · [Dependency lockfile](../../../Cargo.lock)
 
 | Package | Patch | Purpose |
 | --- | --- | --- |

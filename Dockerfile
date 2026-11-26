@@ -5,6 +5,8 @@ COPY packaging/distribution.toml packaging/distribution.toml
 COPY compat/ compat/
 COPY crates/ crates/
 COPY apps/ apps/
+COPY mobile/android/Cargo.toml mobile/android/Cargo.toml
+COPY mobile/android/src/ mobile/android/src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo --config packaging/distribution.toml build --locked --profile distribution \
         -p paxri-gateway -p paxri-cli \

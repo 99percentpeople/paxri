@@ -89,14 +89,13 @@ def main():
     override = "paths = " + json.dumps(list(sources.values()))
     # Align the extracted native library for both 4 KB and 16 KB page devices.
     linker_flags = ["--", "-C", "link-arg=-Wl,-z,max-page-size=16384"]
-    profile_flags = ["--release"] if args.unsigned_release else []
-    rustc_args = ["--lib", "--locked", *profile_flags, *linker_flags]
+    profile = "android-release" if args.unsigned_release else "android-dev"
+    rustc_args = ["-p", "paxri-android", "--lib", "--locked", "--profile", profile, *linker_flags]
     if os.environ.get("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"):
         run("cargo", "--config", override, "rustc", "--target", TARGET, *rustc_args)
     else:
         run("cargo", "ndk", "-t", "arm64-v8a", "-P", "29", "rustc", "--config", override, *rustc_args)
-    profile_dir = "release" if args.unsigned_release else "debug"
-    native = Path(metadata["target_directory"]) / TARGET / profile_dir / "libpaxri_android.so"
+    native = Path(metadata["target_directory"]) / TARGET / profile / "libpaxri_android.so"
     host = Path(sources["gpui-mobile"]) / "example/android/gradle/app/src/main"
     version = crates["rustls-platform-verifier-android"]["version"]
     aar = download("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/"

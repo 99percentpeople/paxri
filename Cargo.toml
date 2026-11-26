@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "apps/*"]
+members = ["crates/*", "apps/*", "mobile/android"]
 default-members = ["apps/paxri-gateway", "apps/paxri-cli"]
 resolver = "3"
 
@@ -20,6 +20,42 @@ opt-level = 2
 
 [profile.dev.package.taffy]
 opt-level = 2
+
+[profile.android-dev]
+inherits = "dev"
+debug = 0
+
+# Optimize the per-frame UI and layout paths in Android development builds.
+[profile.android-dev.package.gpui-pre]
+opt-level = 2
+debug-assertions = false
+
+[profile.android-dev.package.gpui-pre-wgpu]
+opt-level = 2
+
+[profile.android-dev.package.wgpu-core]
+opt-level = 2
+
+[profile.android-dev.package.wgpu-hal]
+opt-level = 2
+
+[profile.android-dev.package.taffy]
+opt-level = 2
+
+[profile.android-dev.package.slotmap]
+opt-level = 2
+
+[profile.android-dev.package.paxri-ui]
+opt-level = 2
+
+[profile.android-dev.package.paxri-android]
+opt-level = 2
+
+[profile.android-release]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+strip = "symbols"
 
 [patch.crates-io]
 # GPUI 0.2.2 with native desktop pinch input.

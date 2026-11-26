@@ -1,50 +1,12 @@
 [package]
 name = "paxri-android"
 version = "0.1.0"
-edition = "2024"
-publish = false
-
-# Mobile GPUI uses a separate snapshot from the desktop release.
-[workspace]
-resolver = "3"
+edition.workspace = true
+publish.workspace = true
 
 [lib]
 name = "paxri_android"
 crate-type = ["cdylib"]
-
-[profile.dev]
-debug = 0
-
-# Optimize the per-frame UI and layout paths in development builds.
-[profile.dev.package.gpui-pre]
-opt-level = 2
-debug-assertions = false
-
-[profile.dev.package.gpui-pre-wgpu]
-opt-level = 2
-
-[profile.dev.package.wgpu-core]
-opt-level = 2
-
-[profile.dev.package.wgpu-hal]
-opt-level = 2
-
-[profile.dev.package.taffy]
-opt-level = 2
-
-[profile.dev.package.slotmap]
-opt-level = 2
-
-[profile.dev.package.paxri-ui]
-opt-level = 2
-
-[profile.dev.package.paxri-android]
-opt-level = 2
-
-[profile.release]
-opt-level = "s"
-lto = "thin"
-strip = "symbols"
 
 [dependencies]
 paxri-ui = { path = "../../crates/paxri-ui" }
@@ -71,6 +33,3 @@ tempfile = "3"
 ttf-parser = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "io-util", "macros"] }
 uuid = { version = "1", features = ["v4"] }
-
-[patch.crates-io]
-iroh = { path = "../../compat/iroh" }
