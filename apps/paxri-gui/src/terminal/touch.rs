@@ -162,7 +162,7 @@ impl Terminal {
         let at = event.position;
         match event.phase {
             Down => {
-                self.focus.focus(w);
+                self.focus.focus(w, cx);
                 self.touch.points.insert(event.id, at);
                 self.touch.hold = None;
                 if self.touch.points.len() > 1 {

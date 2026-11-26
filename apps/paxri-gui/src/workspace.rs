@@ -215,7 +215,7 @@ impl Workspace {
                 })
                 .detach();
                 let tab_focus = cx.focus_handle().tab_stop(true);
-                tab_focus.focus(w);
+                tab_focus.focus(w, cx);
                 observe_window_focus(w, &tab_focus, cx);
                 cx.observe_window_activation(w, |v: &mut Self, w, cx| {
                     if !w.is_window_active() {
@@ -289,7 +289,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn focus_content(&self, w: &mut Window, cx: &App) {
+    fn focus_content(&self, w: &mut Window, cx: &mut App) {
         let focus = match &self.active {
             Page::Terminal { view, .. } => view.read(cx).focus_handle(cx),
             _ => self.tab_focus.clone(),
@@ -298,7 +298,7 @@ impl Workspace {
         if !focus.is_focused(w) {
             crate::ime::blur(w);
         }
-        focus.focus(w);
+        focus.focus(w, cx);
     }
 
     fn focus_tab(&mut self, page: Page, w: &mut Window, cx: &mut Context<Self>) {
@@ -600,7 +600,7 @@ impl Render for Workspace {
                     let shortcut = Modifiers::secondary_key();
                     if key.modifiers == shortcut && key.key.eq_ignore_ascii_case("f") {
                         if let Some(primary) = searches.first() {
-                            primary.read(cx).focus_handle(cx).focus(window);
+                            primary.read(cx).focus_handle(cx).focus(window, cx);
                         }
                     } else if key.key == "escape" && !key.modifiers.modified() {
                         let focused = searches.iter().find(|search| {

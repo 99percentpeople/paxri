@@ -227,7 +227,7 @@ pub fn tab(
         .px(SPACE_3)
         .gap(SPACE_2)
         .child(icon.draw(16.))
-        .child(div().min_w_0().flex_grow().truncate().child(label))
+        .child(div().min_w_0().flex_grow(1.).truncate().child(label))
         .children(close)
 }
 

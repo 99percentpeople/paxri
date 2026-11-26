@@ -75,7 +75,6 @@ impl TooltipOptions {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 impl From<TooltipAnchor> for gpui::TooltipAnchor {
     fn from(value: TooltipAnchor) -> Self {
         match value {
@@ -85,7 +84,6 @@ impl From<TooltipAnchor> for gpui::TooltipAnchor {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 impl From<TooltipPlacement> for gpui::TooltipPlacement {
     fn from(value: TooltipPlacement) -> Self {
         match value {
@@ -117,10 +115,7 @@ pub fn tooltip_with(
 ) -> impl Fn(&mut Window, &mut App) -> AnyView {
     let offset = options.resolved_offset();
     move |window, cx| {
-        #[cfg(not(target_os = "android"))]
         window.set_tooltip_placement(options.anchor.into(), options.placement.into(), offset);
-        #[cfg(target_os = "android")]
-        let _ = (window, options, offset);
         cx.new(|_| Tooltip(text.clone())).into()
     }
 }
@@ -185,7 +180,7 @@ impl Render for Tooltip {
     }
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(test)]
 mod tests {
     use super::{
         TOOLTIP_CURSOR_OFFSET, TOOLTIP_ELEMENT_OFFSET, TooltipAnchor, TooltipOptions,

@@ -320,7 +320,7 @@ impl Terminal {
     }
 
     fn start_selection(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
-        self.focus.focus(w);
+        self.focus.focus(w, cx);
         let (row, x) = self.cell_at(e.position);
         if e.modifiers.shift && self.emulator.term.selection.is_some() {
             self.emulator.extend_selection(row, x);
@@ -478,7 +478,7 @@ impl Render for Terminal {
             move |_, (bounds, hitbox), window, cx| {
                 Self::listen_touch(&entity, hitbox, window);
                 if hide_pointer {
-                    window.set_window_cursor_style(CursorStyle::None);
+                    window.hide_cursor_until_mouse_moves(cx);
                 }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
                 entity.update(cx, |view, cx| {
@@ -557,7 +557,7 @@ impl Render for Terminal {
                     })
                     .on_any_mouse_down(cx.listener(Self::mouse_down))
                     .on_mouse_move(cx.listener(Self::mouse_hover))
-                    .on_pinch(|event, window, cx| TerminalZoom::apply(Zoom::Pinch(event.scale), window, cx))
+                    .on_pinch(|event, window, cx| TerminalZoom::apply(Zoom::Pinch(1. + event.delta), window, cx))
                     .on_scroll_wheel(cx.listener(Self::wheel))
                     .child(screen)
                     .child(Scrollbar::vertical("terminal-history", TerminalHistory(cx.entity())))
@@ -590,7 +590,7 @@ impl Render for Terminal {
                                     }
                                     v.touch.handles = false;
                                     v.emulator.term.selection = None;
-                                    v.focus.focus(w);
+                                    v.focus.focus(w, cx);
                                     cx.notify();
                                 }))
                         )

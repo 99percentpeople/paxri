@@ -47,8 +47,7 @@ impl Desktop {
             )?
             .reply()?;
         let mut clients = Vec::new();
-        // GPUI 0.2's X11 PlatformWindow does not implement HasWindowHandle.
-        // Each workspace has a distinct title within this process.
+        // Identify mapped workspaces by their distinct titles within this process.
         for window in windows.value32().into_iter().flatten() {
             let owner = conn
                 .get_property(false, window, atoms._NET_WM_PID, AtomEnum::CARDINAL, 0, 1)?

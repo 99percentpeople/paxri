@@ -278,17 +278,10 @@ impl DropdownState {
             }
             MenuAction::Traverse => {
                 self.dismiss(cx);
-                #[cfg(target_os = "android")]
                 if key.modifiers.shift {
                     window.focus_prev(cx)
                 } else {
                     window.focus_next(cx)
-                }
-                #[cfg(not(target_os = "android"))]
-                if key.modifiers.shift {
-                    window.focus_prev()
-                } else {
-                    window.focus_next()
                 }
             }
         }
@@ -391,10 +384,7 @@ impl<T: InteractiveElement + IntoElement> DropdownTrigger<T> {
                         menu.open(checked, count, window, cx);
                         true
                     };
-                    #[cfg(target_os = "android")]
                     menu.focus.focus(window, cx);
-                    #[cfg(not(target_os = "android"))]
-                    menu.focus.focus(window);
                     opened
                 });
                 if opened && let Some(callback) = &on_open {

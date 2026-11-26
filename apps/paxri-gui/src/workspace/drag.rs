@@ -94,7 +94,7 @@ async fn present_docked_page(
             {
                 // AppKit and X11 suspend frames for fully covered windows. Build
                 // the new scene before raising the receiver to request presentation.
-                w.draw(_cx).clear();
+                w.draw(_cx).clear(_cx);
                 if !w.is_window_active() {
                     w.activate_window();
                 }

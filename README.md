@@ -125,7 +125,7 @@ The terminal header shows the active path. Public relays use Android's certifica
 
 ## Build and develop
 
-CI builds use Rust 1.98.1. The default workspace build produces the headless CLI and gateway. The desktop app is a separate package.
+CI builds use Rust 1.98.1. The default workspace build produces the headless CLI and gateway. The desktop and Android apps are separate packages that share one pinned GPUI core.
 
 ```sh
 cargo build --locked

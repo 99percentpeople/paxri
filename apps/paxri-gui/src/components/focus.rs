@@ -17,7 +17,7 @@ pub fn observe_window_focus<V: 'static>(
                 .iter()
                 .any(|ctx| ctx.contains(TEXT_FIELD))
             {
-                tab.focus(window);
+                tab.focus(window, cx);
             }
             if KeyboardFocus::window(cx) == Some(window.window_handle()) {
                 KeyboardFocus::set(None, cx);
@@ -31,7 +31,7 @@ pub fn observe_window_focus<V: 'static>(
         // An outside press on another control already moved focus there.
         // After a press on background, keep Tab navigation in the workspace.
         if window.focused(cx).is_none() {
-            tab.focus(window);
+            tab.focus(window, cx);
         }
     })
     .detach();
@@ -51,9 +51,9 @@ pub fn workspace_keyboard(root: Div) -> Div {
         let key = &event.keystroke;
         if key.key == "tab" && (!key.modifiers.modified() || key.modifiers == Modifiers::shift()) {
             if key.modifiers.shift {
-                window.focus_prev();
+                window.focus_prev(cx);
             } else {
-                window.focus_next();
+                window.focus_next(cx);
             }
             window.prevent_default();
             cx.stop_propagation();

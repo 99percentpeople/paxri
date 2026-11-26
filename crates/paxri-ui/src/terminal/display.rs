@@ -251,9 +251,6 @@ fn paint_runs(
     };
     let layout_baseline = (px(typography.cell.height) + shaped.ascent - shaped.descent) / 2.;
     let at = bounds.origin + point(x, baseline - layout_baseline);
-    #[cfg(not(target_os = "android"))]
-    let _ = shaped.paint(at, px(typography.cell.height), window, cx);
-    #[cfg(target_os = "android")]
     let _ = shaped.paint(
         at,
         px(typography.cell.height),

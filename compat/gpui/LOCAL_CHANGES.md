@@ -1,7 +1,0 @@
-This is the published gpui 0.2.2 crate from Zed, with its example and integration test targets omitted. The desktop app uses a local Cargo patch for direct touch and pinch gestures. Windows, X11 and Wayland deliver touchscreen contacts to views that consume the initial press. Other views keep platform tap, scroll and magnification handling. macOS translates platform magnification events. Android uses its own GPUI dependency and Android gesture detector.
-
-Windows debug builds embed the HLSL sources so a standalone executable can initialize DirectWrite after the build checkout is removed. Launch errors include the underlying cause.
-
-`src/elements/text.rs` fixes truncation caching, run mutation, and prepaint re-truncation so overflowing labels render an ellipsis (`…`) reliably across menus, tabs, and lists.
-
-`src/app.rs`, `src/window.rs`, and `src/elements/div.rs` add `TooltipAnchor` (`Cursor` or `Element`) and `TooltipPlacement` (`Bottom`, `Top`, `Left`, `Right`), defaulting to centered below the pointer with a configurable offset, automatic edge flipping, and fixed viewport clamping.

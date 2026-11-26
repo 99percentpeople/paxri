@@ -798,9 +798,6 @@ impl<const MULTILINE: bool> Render for TextInput<MULTILINE> {
                             ui.icon_button(Ghost, "clear-search", Icon::Close, "Clear search")
                                 .on_click(cx.listener(|field, _, w, cx| {
                                     field.set_text("", cx);
-                                    #[cfg(not(target_os = "android"))]
-                                    field.focus.focus(w);
-                                    #[cfg(target_os = "android")]
                                     field.focus.focus(w, cx);
                                 })),
                         )

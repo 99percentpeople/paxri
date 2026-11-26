@@ -162,10 +162,10 @@ impl Dialog {
                 cx.new(|cx| {
                     let focus = cx.focus_handle();
                     observe_window_focus(w, &focus, cx);
-                    w.focus(initial_focus.as_ref().unwrap_or(&focus));
+                    w.focus(initial_focus.as_ref().unwrap_or(&focus), cx);
                     cx.observe(&model, |_, _, cx| cx.notify()).detach();
-                    let lifetime = cx.on_window_closed(move |cx| {
-                        if !cx.windows().contains(&owner) {
+                    let lifetime = cx.on_window_closed(move |cx, closed| {
+                        if closed == owner.window_id() {
                             let _ = child.update(cx, |_, w, _| w.remove_window());
                         }
                     });
@@ -180,7 +180,7 @@ impl Dialog {
                                     enable_owner(w, true);
                                     w.activate_window();
                                     if let Some(focus) = return_focus {
-                                        w.focus(&focus);
+                                        w.focus(&focus, cx);
                                     }
                                 }
                                 w.refresh();

@@ -61,10 +61,7 @@ impl Recording {
         {
             self.touch = None;
         }
-        #[cfg(target_os = "android")]
         self.focus.focus(window, cx);
-        #[cfg(not(target_os = "android"))]
-        self.focus.focus(window);
         let state = cx.weak_entity();
         // Capture before keybindings such as Settings search or the platform paste action.
         self.interceptor = Some(cx.intercept_keystrokes(move |event, window, cx| {

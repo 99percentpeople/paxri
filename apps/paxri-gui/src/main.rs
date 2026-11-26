@@ -600,15 +600,14 @@ fn main() -> anyhow::Result<()> {
     );
     let runtime = tokio::runtime::Runtime::new().expect("create IPC runtime");
     let handle = runtime.handle().clone();
-    Application::new().run(move |cx: &mut App| {
-        // GPUI stops its Linux and Windows loops when the last window is removed.
-        #[cfg(target_os = "macos")]
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+    #[cfg(not(windows))]
+    let app = gpui_platform::application();
+    #[cfg(windows)]
+    let app = Application::with_platform(std::rc::Rc::new(
+        gpui_windows::WindowsPlatform::new(false)
+            .unwrap_or_else(|error| panic!("failed to initialize Windows platform: {error:#}")),
+    ));
+    app.with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut App| {
         theme::init(config.as_deref(), cx);
         let dashboard = cx.new(|cx| Dashboard::new(ipc, options.config, config, handle, cx));
         Workspace::open_home(dashboard, cx).expect("open gateway window");

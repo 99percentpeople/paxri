@@ -72,10 +72,7 @@ pub trait ScrollSource: Clone + 'static {
 
 impl ScrollSource for ScrollHandle {
     fn metrics(&self, _: &App) -> ScrollMetrics {
-        #[cfg(target_os = "android")]
         let overflow = self.max_offset().y;
-        #[cfg(not(target_os = "android"))]
-        let overflow = self.max_offset().height;
         ScrollMetrics::new(
             self.bounds().size.height.into(),
             overflow.into(),

@@ -11,12 +11,9 @@ impl Ui {
             .id(id)
             .track_focus(focus)
             .key_context("TextField")
-            .on_mouse_down_out(move |_, window, _cx| {
+            .on_mouse_down_out(move |_, window, cx| {
                 if handle.is_focused(window) {
-                    #[cfg(target_os = "android")]
-                    window.blur(_cx);
-                    #[cfg(not(target_os = "android"))]
-                    window.blur();
+                    window.blur(cx);
                 }
             });
         self.text_field_frame(field)

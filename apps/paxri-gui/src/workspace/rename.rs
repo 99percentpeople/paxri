@@ -46,7 +46,7 @@ impl Workspace {
             input,
             _blur: blur,
         });
-        focus.focus(w);
+        focus.focus(w, cx);
         cx.notify();
     }
 

@@ -65,6 +65,7 @@ impl Terminal {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.hidden_pointer_at = None;
         self.cancel_touch();
         self.touch.handles = false;
         if e.button == MouseButton::Left
@@ -72,7 +73,7 @@ impl Terminal {
             && Self::link_modifier_active(e.modifiers)
             && let Some(link) = self.link_at(e.position, cx)
         {
-            self.focus.focus(w);
+            self.focus.focus(w, cx);
             self.link_modifier = true;
             self.pending_link = Some(link.clone());
             self.hovered_link = Some(link);
@@ -94,7 +95,7 @@ impl Terminal {
             let Some(code) = button_code(e.button) else {
                 return;
             };
-            self.focus.focus(w);
+            self.focus.focus(w, cx);
             let cell = self.mouse_cell(e.position);
             self.mouse.held |= 1 << code;
             self.mouse.last_motion = Some((cell, code + 32));
@@ -114,7 +115,7 @@ impl Terminal {
             && self.mouse.held == 0
             && self.viewport.contains(&e.position)
         {
-            self.focus.focus(w);
+            self.focus.focus(w, cx);
             if let Some(text) = self.emulator.selected_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.emulator.term.selection = None;
@@ -225,6 +226,7 @@ impl Terminal {
     }
 
     pub(super) fn wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.hidden_pointer_at = None;
         let mode = *self.emulator.term.mode();
         let target = self
             .emulator

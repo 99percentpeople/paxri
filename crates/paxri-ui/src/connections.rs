@@ -243,7 +243,7 @@ fn sparkline(samples: &VecDeque<Sample>, metric: Metric, ui: Ui) -> Option<impl 
     Some(
         canvas(
             |_, _, _| (),
-            move |bounds, _, window, _cx| {
+            move |bounds, _, window, cx| {
                 if !bounds.intersects(&window.content_mask().bounds) {
                     return;
                 }
@@ -254,11 +254,7 @@ fn sparkline(samples: &VecDeque<Sample>, metric: Metric, ui: Ui) -> Option<impl 
                 if segments.peek().is_none() {
                     return;
                 }
-                #[cfg(target_os = "android")]
-                let animate = !_cx.reduce_motion();
-                #[cfg(not(target_os = "android"))]
-                let animate = true;
-                if animate {
+                if !cx.reduce_motion() {
                     window.request_animation_frame();
                 }
                 let ceiling = maximum.max(floor) as f32;

@@ -11,6 +11,8 @@ Each build is identified by its Git commit. Cargo uses `0.0.0-dev` as the worksp
 | `dist/docker/` | Offline image tarballs for Linux AMD64 and ARM64 | **Build** workflow |
 | `dist/release/` | All nine packages alongside `SHA256SUMS`, `compose.yaml`, and `build.env` | **Build** workflow after all platform jobs succeed |
 
+Desktop and Android share the workspace-pinned `gpui-pre` core. Linux desktop builds use the wgpu renderer with the X11 and Wayland backends. Windows uses DirectX and macOS uses Metal. Android keeps its `gpui-mobile` backend. [Shared GPUI patches](../compat/gpui-pre/LOCAL_CHANGES.md)
+
 Native CI jobs use `target/ci-native/` on every platform, with separate caches per matrix target. Local native packaging accepts `CARGO_TARGET_DIR`. Cargo output and Android build intermediates live under `target/` by default. The Android builder keeps its development keystore and the output of `--unsigned-release` in `target/android/`.
 
 ## Run the workflow
