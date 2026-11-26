@@ -70,8 +70,59 @@ else
     for bin in paxri paxri-gateway paxri-gui; do install -m 0755 "$bins/$bin" "$root/bin/$bin"; done
     cp packaging/linux/{install-systemd.sh,paxri-gateway.service} "$root/"
 fi
-install -d "$root/docs"
-install -m 0644 README.md docs/installation.md "$root/docs/"
+rewrite_release_doc() {
+    local doc=$1 src=$2 dst=$3
+    local repo="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-99percentpeople/paxri}"
+    awk -v doc="$doc" -v repo="$repo" '
+        /^```/ { code = !code; print; next }
+        code { print; next }
+        {
+            out = ""
+            rest = $0
+            while ((i = index(rest, "](")) > 0) {
+                out = out substr(rest, 1, i + 1)
+                rest = substr(rest, i + 2)
+                j = index(rest, ")")
+                if (j == 0) break
+                target = substr(rest, 1, j - 1)
+                rest = substr(rest, j)
+                if (target ~ /^(https?:|mailto:|#)/) {
+                    # Keep external URLs and in-page anchors unchanged.
+                } else if (doc == "readme") {
+                    if (target ~ /^docs\/installation\.md($|#)/) {
+                        sub(/^docs\//, "", target)
+                    } else if (target ~ /^(README|installation)\.md($|#)/) {
+                        # Already relative to the archive root.
+                    } else if (target ~ /^\.\.\/\.\.\//) {
+                        sub(/^\.\.\/\.\.\//, "", target)
+                        target = repo "/" target
+                    } else {
+                        target = repo "/blob/main/" target
+                    }
+                } else if (doc == "installation") {
+                    if (target ~ /^\.\.\/README\.md($|#)/) {
+                        sub(/^\.\.\//, "", target)
+                    } else if (target ~ /^(README|installation)\.md($|#)/) {
+                        # Already relative to the archive root.
+                    } else if (target ~ /^\.\.\/\.\.\/\.\.\//) {
+                        sub(/^\.\.\/\.\.\/\.\.\//, "", target)
+                        target = repo "/" target
+                    } else if (target ~ /^\.\.\//) {
+                        sub(/^\.\.\//, "", target)
+                        target = repo "/blob/main/" target
+                    } else {
+                        target = repo "/blob/main/docs/" target
+                    }
+                }
+                out = out target
+            }
+            print out rest
+        }
+    ' "$src" > "$dst"
+    chmod 0644 "$dst"
+}
+rewrite_release_doc readme README.md "$root/README.md"
+rewrite_release_doc installation docs/installation.md "$root/installation.md"
 tar -cf - -C "$work" "$name" | gzip -9n > "$work/$name.tar.gz"
 mv "$work/$name.tar.gz" "$dist/$name.tar.gz"
 echo "$dist/$name.tar.gz"

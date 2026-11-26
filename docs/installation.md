@@ -12,9 +12,11 @@ Download your system's package and `SHA256SUMS` from the **paxri rolling build**
 | Intel Mac | `paxri-macos-amd64.tar.gz` |
 | ARM64 Android | `paxri-android-arm64.apk` |
 
+Every archive has `README.md` and this guide, `installation.md`, at its top level. Third-party licenses are in `licenses/`. On macOS they are inside `paxri.app/Contents/Resources/licenses/`.
+
 On Windows, extract the whole ZIP into one directory. Keep `conpty.dll` and `OpenConsole.exe` beside the gateway to support mouse input and screen switching in remote terminal applications. Restart the gateway after updating those files.
 
-Every Linux archive includes `bin/paxri`, `bin/paxri-gateway`, and `bin/paxri-gui`. The glibc builds target Debian 12 (glibc 2.36). The musl build targets Alpine 3.23. Opening the GUI requires a graphical session, a Vulkan driver, and the desktop runtime libraries, including Fontconfig and XKB.
+Every Linux archive includes `bin/paxri`, `bin/paxri-gateway`, and `bin/paxri-gui`, plus `install-systemd.sh` and `paxri-gateway.service` for a system service. The glibc builds target Debian 12 (glibc 2.36). The musl build targets Alpine 3.23. Opening the GUI requires a graphical session, a Vulkan driver, and the desktop runtime libraries, including Fontconfig and XKB.
 
 ## Headless ARM64 musl installation
 

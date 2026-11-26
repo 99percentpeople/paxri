@@ -14,6 +14,8 @@ Each computer owns one version 1 TOML file. For a working pair of device configu
 | `peers.<alias>.pairing_id` | Approval request ID for pairings established by two gateways with unpair support |
 | `pending_unpairs.<device-id>` | Gateway-managed notice awaiting acknowledgement, with the peer ticket and pairing generation |
 | `gateway.startup` | `manual`, `gui`, `login`, or `system`. Use the GUI or CLI to also update OS registration |
+| `gateway.session_keep_alive` | How long hosted terminal sessions survive after their device disconnects: `5m` (default), `30m`, `1h`, `6h`, `24h`, or `forever`. Changes apply to running sessions |
+| `gui.controls.remote_clipboard`, `clickable_links`, `terminal_bell` | Allow OSC 52 clipboard writes, open terminal links, and play the terminal bell. All default to `true` |
 | `gui.appearance` | `system` (default), `light`, or `dark` |
 | `gui.tab_placement` | Position of the workspace tab bar in all windows, `top` (default) or `left` |
 | `gui.terminal.scheme` | `follow-app` (default), `light`, `dark`, or `midnight` |

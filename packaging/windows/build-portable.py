@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,51 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from windows_conpty import runtime_files
 TARGET = "x86_64-pc-windows-msvc"
+LINK_RE = re.compile(r"\]\(([^)]+)\)")
+
+
+def rewrite_release_doc(doc: str, path: Path) -> bytes:
+    server = os.environ.get("GITHUB_SERVER_URL") or "https://github.com"
+    repository = os.environ.get("GITHUB_REPOSITORY") or "99percentpeople/paxri"
+    repo = f"{server.rstrip('/')}/{repository.strip('/')}"
+
+    def replace(match: re.Match[str]) -> str:
+        target = match.group(1)
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            return match.group(0)
+        if doc == "readme":
+            if target == "docs/installation.md" or target.startswith("docs/installation.md#"):
+                target = target[len("docs/"):]
+            elif target in ("README.md", "installation.md") or target.startswith(("README.md#", "installation.md#")):
+                pass
+            elif target.startswith("../../"):
+                target = f"{repo}/{target[len('../../'):]}"
+            else:
+                target = f"{repo}/blob/main/{target}"
+        elif doc == "installation":
+            if target == "../README.md" or target.startswith("../README.md#"):
+                target = target[len("../"):]
+            elif target in ("README.md", "installation.md") or target.startswith(("README.md#", "installation.md#")):
+                pass
+            elif target.startswith("../../../"):
+                target = f"{repo}/{target[len('../../../'):]}"
+            elif target.startswith("../"):
+                target = f"{repo}/blob/main/{target[len('../'):]}"
+            else:
+                target = f"{repo}/blob/main/docs/{target}"
+        return f"]({target})"
+
+    in_code = False
+    lines = []
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        if line.startswith("```"):
+            in_code = not in_code
+            lines.append(line)
+        elif in_code:
+            lines.append(line)
+        else:
+            lines.append(LINK_RE.sub(replace, line))
+    return "".join(lines).encode("utf-8")
 
 
 def main():
@@ -42,8 +88,8 @@ def main():
                 bundle.writestr(name, data)
             bundle.write(ROOT / "packaging/windows/ConPTY-LICENSE.txt", "licenses/conpty.txt")
             bundle.write(ROOT / "crates/paxri-ui/fonts/OFL.txt", "licenses/terminal-symbols-ofl.txt")
-            bundle.write(ROOT / "README.md", "docs/README.md")
-            bundle.write(ROOT / "docs/installation.md", "docs/installation.md")
+            bundle.writestr("README.md", rewrite_release_doc("readme", ROOT / "README.md"))
+            bundle.writestr("installation.md", rewrite_release_doc("installation", ROOT / "docs/installation.md"))
         staged.replace(archive)
     finally:
         staged.unlink(missing_ok=True)
