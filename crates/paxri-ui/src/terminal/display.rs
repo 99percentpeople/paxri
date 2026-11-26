@@ -152,7 +152,116 @@ struct CellPaint {
 struct PaintSpan {
     start: u16,
     end: u16,
+    byte_len: usize,
     paint: CellPaint,
+}
+
+fn has_rtl(text: &str) -> bool {
+    !text.is_ascii()
+        && text.chars().any(|c| {
+            matches!(
+                c,
+                '\u{0590}'..='\u{08ff}'
+                    | '\u{200f}'
+                    | '\u{202b}'
+                    | '\u{202e}'
+                    | '\u{2067}'
+                    | '\u{fb1d}'..='\u{fdff}'
+                    | '\u{fe70}'..='\u{feff}'
+                    | '\u{10800}'..='\u{10fff}'
+                    | '\u{1e800}'..='\u{1efff}'
+            )
+        })
+}
+
+fn text_face(typography: &TerminalFont, style: Style) -> gpui::Font {
+    let mut face = if style.glyph == GlyphSource::TerminalSymbol {
+        font(TERMINAL_SYMBOL_FAMILY)
+    } else {
+        typography.face.clone()
+    };
+    if style.bold {
+        face.weight = FontWeight::BOLD;
+    }
+    if style.italic {
+        face.style = FontStyle::Italic;
+    }
+    face
+}
+
+fn build_text_runs(
+    target_len: usize,
+    spans: &[PaintSpan],
+    face: &gpui::Font,
+    mut ink_for: impl FnMut(CellPaint) -> u32,
+) -> Vec<TextRun> {
+    let mut remaining = target_len;
+    let mut runs: Vec<TextRun> = Vec::with_capacity(spans.len());
+    for part in spans {
+        let len = part.byte_len.min(remaining);
+        if len == 0 {
+            break;
+        }
+        remaining -= len;
+        let color = rgb(ink_for(part.paint)).into();
+        if let Some(last) = runs.last_mut()
+            && last.color == color
+        {
+            last.len += len;
+        } else {
+            runs.push(TextRun {
+                len,
+                font: face.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+    }
+    runs
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_runs(
+    text: &str,
+    runs: &[TextRun],
+    typography: &TerminalFont,
+    baseline: Pixels,
+    wide: bool,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if text.is_empty() || runs.is_empty() {
+        return;
+    }
+    let shaped = window.text_system().shape_line(
+        text.to_owned().into(),
+        px(typography.size),
+        runs,
+        (!wide).then(|| px(typography.cell.width)),
+    );
+    // Center fullwidth clusters in their grid cells. Use the same primary-font
+    // baseline even when a spinner or a CJK character introduces a fallback face.
+    let x = if wide {
+        (bounds.size.width - shaped.width) / 2.
+    } else {
+        px(0.)
+    };
+    let layout_baseline = (px(typography.cell.height) + shaped.ascent - shaped.descent) / 2.;
+    let at = bounds.origin + point(x, baseline - layout_baseline);
+    #[cfg(not(target_os = "android"))]
+    let _ = shaped.paint(at, px(typography.cell.height), window, cx);
+    #[cfg(target_os = "android")]
+    let _ = shaped.paint(
+        at,
+        px(typography.cell.height),
+        gpui::TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 fn append_glyph(text: &mut String, cell: &Cell) {
@@ -184,49 +293,21 @@ fn paint_ink(
     } else if !visible.is_empty() {
         // ASCII padding has no glyph ink. Keep the original text for bidirectional shaping.
         let text = if visible.is_ascii() { visible } else { text };
-        let mut face = if style.glyph == GlyphSource::TerminalSymbol {
-            font(TERMINAL_SYMBOL_FAMILY)
-        } else {
-            typography.face.clone()
-        };
-        if style.bold {
-            face.weight = FontWeight::BOLD;
-        }
-        if style.italic {
-            face.style = FontStyle::Italic;
-        }
         let run = TextRun {
             len: text.len(),
-            font: face,
+            font: text_face(typography, style),
             color: rgb(style.fg).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
         };
-        let wide = style.glyph == GlyphSource::WideText;
-        let shaped = window.text_system().shape_line(
-            text.to_owned().into(),
-            px(typography.size),
+        paint_runs(
+            text,
             &[run],
-            (!wide).then(|| px(typography.cell.width)),
-        );
-        // Center fullwidth clusters in their grid cells. Use the same primary-font
-        // baseline even when a spinner or a CJK character introduces a fallback face.
-        let x = if wide {
-            (bounds.size.width - shaped.width) / 2.
-        } else {
-            px(0.)
-        };
-        let layout_baseline = (px(typography.cell.height) + shaped.ascent - shaped.descent) / 2.;
-        let at = bounds.origin + point(x, baseline - layout_baseline);
-        #[cfg(not(target_os = "android"))]
-        let _ = shaped.paint(at, px(typography.cell.height), window, cx);
-        #[cfg(target_os = "android")]
-        let _ = shaped.paint(
-            at,
-            px(typography.cell.height),
-            gpui::TextAlign::Left,
-            None,
+            typography,
+            baseline,
+            style.glyph == GlyphSource::WideText,
+            bounds,
             window,
             cx,
         );
@@ -310,7 +391,9 @@ pub fn paint(
                 {
                     break;
                 }
+                let byte_start = text.len();
                 append_glyph(&mut text, c);
+                let byte_len = text.len() - byte_start;
                 col += 1;
                 let wide = c.flags.contains(Flags::WIDE_CHAR);
                 if wide && col < cols && grid[coord(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -343,10 +426,12 @@ pub fn paint(
                     && last.paint == paint
                 {
                     last.end = col;
+                    last.byte_len += byte_len;
                 } else {
                     spans.push(PaintSpan {
                         start,
                         end: col,
+                        byte_len,
                         paint,
                     });
                 }
@@ -355,18 +440,33 @@ pub fn paint(
                 }
             }
             let bounds = rect(first, col);
+            let text_glyph = matches!(face.glyph, GlyphSource::Text | GlyphSource::WideText);
+            let part_ink = |paint: CellPaint| {
+                if light_surface && text_glyph && !paint.block {
+                    contrast::readable_text(paint.fg, paint.bg)
+                } else {
+                    paint.fg
+                }
+            };
             for part in &spans {
                 let area = rect(part.start, part.end);
-                let paint = part.paint;
-                if paint.bg != background {
-                    window.paint_quad(fill(area, rgb(paint.bg)));
+                if part.paint.bg != background {
+                    window.paint_quad(fill(area, rgb(part.paint.bg)));
                 }
-                if paint.block
+                if part.paint.block
                     && let Some(caret) = caret
                 {
                     window.paint_quad(fill(caret, rgb(cursor_color)));
                 }
-                let mask = (spans.len() > 1).then(|| {
+            }
+            if let GlyphSource::Grid(ch) = face.glyph {
+                for part in &spans {
+                    let area = rect(part.start, part.end);
+                    grid_glyph::paint(ch, area, part_ink(part.paint), window);
+                }
+            } else if spans.len() > 1 && has_rtl(&text) {
+                for part in &spans {
+                    let area = rect(part.start, part.end);
                     let outer = window.content_mask().bounds;
                     let left = if part.start == first {
                         outer.left()
@@ -378,25 +478,46 @@ pub fn paint(
                     } else {
                         area.right()
                     };
-                    ContentMask {
+                    let mask = ContentMask {
                         bounds: Bounds::from_corners(
                             point(left, outer.top()),
                             point(right, outer.bottom()),
                         ),
-                    }
-                });
-                let text_glyph = matches!(face.glyph, GlyphSource::Text | GlyphSource::WideText);
-                let ink = if light_surface && text_glyph && !paint.block {
-                    contrast::readable_text(paint.fg, paint.bg)
-                } else {
-                    paint.fg
-                };
-                window.with_content_mask(mask, |window| {
-                    let style = Style { fg: ink, ..face };
-                    paint_ink(&text, &screen.font, span.baseline, style, bounds, window, cx);
-                });
-                if paint.underline {
-                    paint_underline(area, ink, window);
+                    };
+                    window.with_content_mask(Some(mask), |window| {
+                        let style = Style {
+                            fg: part_ink(part.paint),
+                            ..face
+                        };
+                        paint_ink(&text, &screen.font, span.baseline, style, bounds, window, cx);
+                    });
+                }
+            } else {
+                let visible = text.trim_end_matches(' ');
+                if !visible.is_empty() {
+                    let target = if has_rtl(&text) {
+                        text.as_str()
+                    } else {
+                        visible
+                    };
+                    let run_face = text_face(&screen.font, face);
+                    let runs = build_text_runs(target.len(), &spans, &run_face, part_ink);
+                    paint_runs(
+                        target,
+                        &runs,
+                        &screen.font,
+                        span.baseline,
+                        face.glyph == GlyphSource::WideText,
+                        bounds,
+                        window,
+                        cx,
+                    );
+                }
+            }
+            for part in &spans {
+                if part.paint.underline {
+                    let area = rect(part.start, part.end);
+                    paint_underline(area, part_ink(part.paint), window);
                 }
             }
         }
@@ -607,5 +728,47 @@ mod tests {
             assert_eq!(at(4).fg, palette.surface.background);
             assert_eq!(at(4).bg, palette.surface.foreground);
         }
+    }
+
+    #[test]
+    fn text_runs_keep_symbol_color_merges_same_ink_and_trims_trailing_spaces() {
+        let face = font("monospace");
+        let paint = |fg, bg| CellPaint {
+            fg,
+            bg,
+            underline: false,
+            block: false,
+        };
+        // "● ok  ": colored bullet (3 bytes), space+text across two bg spans, trailing spaces
+        let text = "● ok  ";
+        let spans = [
+            PaintSpan {
+                start: 0,
+                end: 1,
+                byte_len: "●".len(),
+                paint: paint(0x00ff00, 0x000000),
+            },
+            PaintSpan {
+                start: 1,
+                end: 2,
+                byte_len: 1,
+                paint: paint(0xffffff, 0x000000),
+            },
+            PaintSpan {
+                start: 2,
+                end: 6,
+                byte_len: 4,
+                paint: paint(0xffffff, 0x222222),
+            },
+        ];
+        let visible = text.trim_end_matches(' ');
+        let runs = build_text_runs(visible.len(), &spans, &face, |p| p.fg);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].len, "●".len());
+        assert_eq!(runs[0].color, rgb(0x00ff00).into());
+        assert_eq!(runs[1].len, " ok".len());
+        assert_eq!(runs[1].color, rgb(0xffffff).into());
+        assert!(!has_rtl("● ok 中文 😀"));
+        assert!(has_rtl("مرحبا"));
     }
 }
