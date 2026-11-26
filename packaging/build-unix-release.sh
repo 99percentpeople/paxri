@@ -48,8 +48,7 @@ if [[ $platform == macos-* ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleName</key><string>paxri</string>
-<!-- Existing macOS installations use this bundle identifier. -->
-<key>CFBundleIdentifier</key><string>org.peerhatch.desktop</string>
+<key>CFBundleIdentifier</key><string>org.paxri.desktop</string>
 <key>CFBundleExecutable</key><string>paxri-gui</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>

@@ -91,20 +91,10 @@ fn edit(path: &Path, create: bool, update: impl FnOnce(&str) -> Result<String>) 
 
 pub fn user_config() -> Option<PathBuf> {
     #[cfg(windows)]
-    let (base, previous) = (dirs::data_local_dir()?, ["PeerHatch", "P2PTunnel"]);
+    let base = dirs::data_local_dir()?;
     #[cfg(not(windows))]
-    let (base, previous) = (dirs::config_dir()?, ["peerhatch", "p2p-tunnel"]);
-    let path = base.join("paxri").join("node.toml");
-    // Existing nodes keep the configuration and device key in the same directory.
-    if !path.exists() {
-        for name in previous {
-            let legacy = base.join(name).join("node.toml");
-            if legacy.is_file() {
-                return Some(legacy);
-            }
-        }
-    }
-    Some(path)
+    let base = dirs::config_dir()?;
+    Some(base.join("paxri").join("node.toml"))
 }
 
 // This hint can survive shutdown. Clients verify the live endpoint's configuration

@@ -13,7 +13,7 @@ use tokio::{
     time::timeout,
 };
 
-pub(super) const PROTOCOL: &[u8] = b"p2p-tunnel/pair/1";
+pub(super) const PROTOCOL: &[u8] = b"paxri/pair/1";
 const MAX_FRAME: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,14 +65,14 @@ pub struct Invitation {
 
 impl Invitation {
     pub fn encode(ticket: &str, token: &str) -> String {
-        format!("p2p1.{ticket}.{token}")
+        format!("paxri1.{ticket}.{token}")
     }
 
     pub fn parse(code: &str) -> Result<Self> {
         ensure!(code.len() <= MAX_FRAME, "Pairing code is too long");
         let (ticket, token) = code
             .trim()
-            .strip_prefix("p2p1.")
+            .strip_prefix("paxri1.")
             .and_then(|rest| rest.split_once('.'))
             .context("Invalid pairing code. Paste the entire code from the other device.")?;
         ensure!(

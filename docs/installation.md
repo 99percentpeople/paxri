@@ -37,7 +37,7 @@ Extract the complete archive. On Windows double-click `paxri-gui.exe`. On macOS 
 
 For a headless per-user installation, run `paxri gateway start`. Use `gateway status`, `stop`, or `restart` to manage it. Commands below assume the directory containing the binaries is on PATH. In PowerShell you can use `.\paxri.exe` in the extracted directory. In a Unix archive you can use `./bin/paxri`.
 
-The CLI and GUI share `node.toml` and a sibling `device.key`. The default directory is `$XDG_CONFIG_HOME/paxri` (usually `~/.config/paxri`) on Linux, `~/Library/Application Support/paxri` on macOS, and `%LOCALAPPDATA%\paxri` on Windows. On upgrade, paxri reuses an existing PeerHatch or P2P Tunnel profile, including its device key and pairings. To inspect or change startup policy use **Settings → Gateway → Startup behavior** or the CLI:
+The CLI and GUI share `node.toml` and a sibling `device.key`. The default directory is `$XDG_CONFIG_HOME/paxri` (usually `~/.config/paxri`) on Linux, `~/Library/Application Support/paxri` on macOS, and `%LOCALAPPDATA%\paxri` on Windows. To inspect or change startup policy use **Settings → Gateway → Startup behavior** or the CLI:
 
 ```sh
 paxri gateway startup
@@ -66,15 +66,15 @@ GUI terminals, `paxri shell`, and both forms of `paxri exec` share the host gate
 - `PAXRI_IPC` identifies the host gateway’s Unix socket or Windows pipe, including when multiple gateways run on the same computer.
 - `PAXRI_CALLER_ID` is the full paired device ID of the computer that opened this session. Inside a Unix terminal, `paxri cp ./build.log "${PAXRI_CALLER_ID}:Downloads/"` sends a file back to that computer. In PowerShell, use `paxri cp .\build.log "${env:PAXRI_CALLER_ID}:Downloads/"`.
 
-To add a tool, place a native executable (or an executable script with a shebang on Unix) in `tools/bin/` next to the host’s active `node.toml`. Create this directory if needed. Open a new session to pick it up. For example, an independently installed `ph-inspect` or `ph-inspect.exe` can be called as `paxri exec home -- ph-inspect`. Arguments and the tool’s exit status follow the normal `exec` behavior.
+To add a tool, place a native executable (or an executable script with a shebang on Unix) in `tools/bin/` next to the host’s active `node.toml`. Create this directory if needed. Open a new session to pick it up. For example, an independently installed `paxri-inspect` or `paxri-inspect.exe` can be called as `paxri exec home -- paxri-inspect`. Arguments and the tool’s exit status follow the normal `exec` behavior.
 
-An extension runs as the gateway account in its OS session. A desktop tool needs access to the intended graphical session and the platform’s screen capture or accessibility permissions. With a PNG-producing `ph-screenshot` installed, a caller can capture its output directly:
+An extension runs as the gateway account in its OS session. A desktop tool needs access to the intended graphical session and the platform’s screen capture or accessibility permissions. With a PNG-producing `paxri-screenshot` installed, a caller can capture its output directly:
 
 ```python
 import subprocess
 
 png = subprocess.run(
-    ["paxri", "exec", "--pipe", "home", "--", "ph-screenshot"],
+    ["paxri", "exec", "--pipe", "home", "--", "paxri-screenshot"],
     capture_output=True, check=True,
 ).stdout
 ```
@@ -134,8 +134,6 @@ journalctl -u paxri-gateway -f
 ```
 
 From a source checkout, build `cargo --config packaging/distribution.toml build --locked --profile distribution` and run `sudo ./packaging/linux/install-systemd.sh ./target/distribution`. The installer registers `paxri-gateway.service` under a dedicated `paxri` account. It uses `/etc/paxri` for the key and configuration, `/var/lib/paxri` as the home directory, and `/run/paxri/gateway.sock` for local management. Add authorized operators to the `paxri` group and sign in again. To disable boot startup and stop the service, run `sudo systemctl disable --now paxri-gateway`.
-
-When upgrading an existing `peerhatch-gateway.service` with this installer, use the existing service and account names. The installer updates the binaries in place and keeps the service’s configuration and device key.
 
 To run a separate node for your user, give the CLI its own configuration and socket.
 

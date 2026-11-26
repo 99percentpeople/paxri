@@ -1,6 +1,6 @@
 # Native protocol and configuration
 
-paxri gateways share an authenticated connection using the iroh QUIC ALPN `p2p-tunnel/session/1`. The protocol identifiers and pairing-code prefix are stable across project renames. Each application operation opens an independent reliable, ordered, bidirectional stream.
+paxri gateways share an authenticated connection using the iroh QUIC ALPN `paxri/session/1`. Each application operation opens an independent reliable, ordered, bidirectional stream.
 
 ## Node configuration
 
@@ -37,7 +37,7 @@ Both endpoints can manage a forwarding rule. The creating gateway stores it in `
 
 ## Pairing and addressing
 
-Pairing uses the separate ALPN `p2p-tunnel/pair/1`. The code `p2p1.<endpoint ticket>.<token>` contains the issuer’s addressing ticket and a random 128-bit invitation. Each request has a fresh random request ID. Each side sends a UTF-8 JSON message of up to 16 KiB followed by FIN. The receiver verifies the ticket’s key against the authenticated peer before asking the local user to approve.
+Pairing uses the separate ALPN `paxri/pair/1`. The code `paxri1.<endpoint ticket>.<token>` contains the issuer’s addressing ticket and a random 128-bit invitation. Each request has a fresh random request ID. Each side sends a UTF-8 JSON message of up to 16 KiB followed by FIN. The receiver verifies the ticket’s key against the authenticated peer before asking the local user to approve.
 
 The issuer saves the pairing before answering with its name and ticket. The requester verifies the responder’s key before persisting it. Existing keys retain their aliases. Name collisions get a numeric suffix. Refreshing a code invalidates requests made with its old value. Pairing contacts can include the platform and a `capabilities` object. Android uses the system device name for pairing, falling back to the model and then `Android`. The Android client advertises `shell: false` and `exec: false`. Gateways report shell hosting and command execution for their own account.
 
@@ -105,4 +105,4 @@ Senders bracket directory entries with `directory` and `end_directory`. A `file`
 
 ## Diagnostic echo
 
-`p2p-tunnel/probe/1` uses its own authenticated bidirectional stream. The caller sends a big-endian `u16` count, then successive `u16` sequence numbers starting at 1. The listener checks the configured peer and echoes each sequence. The probe exercises path selection and measures application-level RTT. [Network experiments](connectivity.md)
+`paxri/probe/1` uses its own authenticated bidirectional stream. The caller sends a big-endian `u16` count, then successive `u16` sequence numbers starting at 1. The listener checks the configured peer and echoes each sequence. The probe exercises path selection and measures application-level RTT. [Network experiments](connectivity.md)

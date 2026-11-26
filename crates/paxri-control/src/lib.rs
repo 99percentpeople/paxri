@@ -311,9 +311,7 @@ struct Reply<T> {
 }
 
 pub fn ipc_from_env() -> Option<PathBuf> {
-    std::env::var_os("PAXRI_IPC")
-        .or_else(|| std::env::var_os("PEERHATCH_IPC"))
-        .map(PathBuf::from)
+    std::env::var_os("PAXRI_IPC").map(PathBuf::from)
 }
 
 pub fn default_address() -> PathBuf {
@@ -325,15 +323,12 @@ pub fn default_address() -> PathBuf {
     #[cfg(unix)]
     {
         #[cfg(target_os = "linux")]
-        let system = ["/run/paxri/gateway.sock", "/run/peerhatch/gateway.sock"];
+        let system = Path::new("/run/paxri/gateway.sock");
         #[cfg(target_os = "macos")]
-        let system = [
-            "/Library/Application Support/paxri/run/gateway.sock",
-            "/Library/Application Support/PeerHatch/run/gateway.sock",
-        ];
+        let system = Path::new("/Library/Application Support/paxri/run/gateway.sock");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(path) = system.iter().map(Path::new).find(|p| p.exists()) {
-            return path.into();
+        if system.exists() {
+            return system.into();
         }
         let base = std::env::var_os("XDG_RUNTIME_DIR").or_else(|| std::env::var_os("HOME"));
         base.map(PathBuf::from)

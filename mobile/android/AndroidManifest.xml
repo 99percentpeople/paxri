@@ -1,6 +1,5 @@
-<!-- Keep the installed application ID so same-key updates retain paired devices. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="org.peerhatch.android" android:versionCode="1" android:versionName="0.1">
+    package="org.paxri.android" android:versionCode="1" android:versionName="0.1">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

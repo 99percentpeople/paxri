@@ -18,7 +18,7 @@ use tokio::{
 };
 use paxri_config::Native;
 
-const ALPN: &[u8] = b"p2p-tunnel/probe/1";
+const ALPN: &[u8] = b"paxri/probe/1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 // Allow a stalled direct path to expire and QUIC to recover over the relay.
 const IO_TIMEOUT: Duration = Duration::from_secs(35);

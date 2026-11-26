@@ -21,11 +21,7 @@ if [ "$(id -u)" != 0 ]; then
     exit 1
 fi
 
-# Upgrade the existing system unit in place so it keeps its account and device key.
 account=paxri
-if [ ! -e /etc/systemd/system/paxri-gateway.service ] && [ -f /etc/systemd/system/peerhatch-gateway.service ]; then
-    account=peerhatch
-fi
 unit="$account-gateway.service"
 getent group "$account" >/dev/null || groupadd --system "$account"
 getent passwd "$account" >/dev/null || useradd --system --gid "$account" --no-create-home \
@@ -35,16 +31,7 @@ install -D -m 0755 -t /usr/local/bin "$bin_dir/paxri" "$bin_dir/paxri-gateway"
 install -D -m 0644 /dev/stdin "/usr/local/lib/tmpfiles.d/$account.conf" <<EOF
 f /etc/$account/node.toml :0600 :$account :$account - version = 1\n
 EOF
-service="$here/paxri-gateway.service"
-if [ "$account" = peerhatch ]; then
-    legacy_unit=$(mktemp)
-    trap 'rm -f "$legacy_unit"' EXIT
-    sed -e 's|=paxri$|=peerhatch|' -e 's|/etc/paxri/|/etc/peerhatch/|g' \
-        -e 's|/var/lib/paxri$|/var/lib/peerhatch|' -e 's|/run/paxri/|/run/peerhatch/|' \
-        -e 's|tmpfiles.d/paxri.conf|tmpfiles.d/peerhatch.conf|' "$service" > "$legacy_unit"
-    service=$legacy_unit
-fi
-install -D -m 0644 "$service" "/etc/systemd/system/$unit"
+install -D -m 0644 "$here/paxri-gateway.service" "/etc/systemd/system/$unit"
 systemctl daemon-reload
 systemctl enable "$unit"
 systemctl restart "$unit"

@@ -50,9 +50,6 @@ impl SessionTools {
         }
         cmd.env("PAXRI_IPC", &self.ipc);
         cmd.env("PAXRI_CALLER_ID", caller_id);
-        // Installed session tools may still read the original variable names.
-        cmd.env("PEERHATCH_IPC", &self.ipc);
-        cmd.env("PEERHATCH_CALLER_ID", caller_id);
     }
 }
 

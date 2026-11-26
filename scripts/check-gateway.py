@@ -359,11 +359,11 @@ def check_session_tools(root, keys, call, cli):
     directory = root / "tools" / "bin"
     directory.mkdir(parents=True)
     suffix = ".exe" if os.name == "nt" else ""
-    shutil.copy2(Path(cli).with_name("paxri" + suffix), directory / ("ph-test" + suffix))
-    assert host_code in remote("--", "ph-test", "pair", "code")
-    assert host_code in call("client", "exec", "--pipe", "host", "--", "ph-test", "pair", "code")
+    shutil.copy2(Path(cli).with_name("paxri" + suffix), directory / ("paxri-test" + suffix))
+    assert host_code in remote("--", "paxri-test", "pair", "code")
+    assert host_code in call("client", "exec", "--pipe", "host", "--", "paxri-test", "pair", "code")
     caller = "$env:PAXRI_CALLER_ID" if os.name == "nt" else '"$PAXRI_CALLER_ID"'
-    output = remote("-c", f"echo {caller}; ph-test pair code")
+    output = remote("-c", f"echo {caller}; paxri-test pair code")
     assert keys["client"] in output and host_code in output, output
     print("PASS: bundled CLI, profile extension, host IPC and authenticated caller in remote exec")
 

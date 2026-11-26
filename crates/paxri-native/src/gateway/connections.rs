@@ -299,7 +299,7 @@ impl Connections {
                 return Ok(current);
             }
             let conn = super::addresses::dial(ep, addr, PROTOCOL).await.context(
-                "shared peer protocol handshake failed; both gateways must support p2p-tunnel/session/1"
+                "shared peer protocol handshake failed; both gateways must support paxri/session/1"
             )?;
             let pool = self.clone();
             // A cancelled request must not cancel admission on the connection its peer may select.

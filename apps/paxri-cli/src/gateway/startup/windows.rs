@@ -26,9 +26,9 @@ fn startup_client() -> Result<PathBuf> {
 pub(super) fn inspect(id: &str, mode: Startup) -> Result<Vec<String>> {
     let output = powershell()?
         .arg(include_str!("inspect.ps1"))
-        .env("P2P_STARTUP_TASK", id)
-        .env("P2P_STARTUP_EXE", startup_client()?)
-        .env("P2P_STARTUP_MODE", mode.as_str())
+        .env("PAXRI_STARTUP_TASK", id)
+        .env("PAXRI_STARTUP_EXE", startup_client()?)
+        .env("PAXRI_STARTUP_MODE", mode.as_str())
         .output()?;
     ensure!(
         output.status.success(),
@@ -69,13 +69,13 @@ pub(super) fn register(
     let boot_args = format!(r#"{ipc_arg}boot-gateway --client "{client}" --node-file "{config}""#);
     let output = powershell()?
         .arg(include_str!("task.ps1"))
-        .env("P2P_STARTUP_TASK", id)
-        .env("P2P_STARTUP_EXE", exe)
-        .env("P2P_BOOT_SOURCE", std::env::current_exe()?)
-        .env("P2P_BOOT_ARGS", boot_args)
-        .env("P2P_PREVIOUS_MODE", old.as_str())
-        .env("P2P_STARTUP_ARGS", args)
-        .env("P2P_STARTUP_MODE", mode.as_str())
+        .env("PAXRI_STARTUP_TASK", id)
+        .env("PAXRI_STARTUP_EXE", exe)
+        .env("PAXRI_BOOT_SOURCE", std::env::current_exe()?)
+        .env("PAXRI_BOOT_ARGS", boot_args)
+        .env("PAXRI_PREVIOUS_MODE", old.as_str())
+        .env("PAXRI_STARTUP_ARGS", args)
+        .env("PAXRI_STARTUP_MODE", mode.as_str())
         .output()?;
     ensure!(
         output.status.success(),

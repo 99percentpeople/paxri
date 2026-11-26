@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL: &[u8] = b"p2p-tunnel/session/1";
+pub const PROTOCOL: &[u8] = b"paxri/session/1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

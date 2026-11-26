@@ -28,7 +28,7 @@ impl Process {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         // Keep native (possibly non-UTF-8) session paths intact.
-        for key in ["PATH", "PAXRI_IPC", "PEERHATCH_IPC"] {
+        for key in ["PATH", "PAXRI_IPC"] {
             if let Some(value) = builder.get_env(key) {
                 cmd.env(key, value);
             }

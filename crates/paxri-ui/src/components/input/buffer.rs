@@ -135,16 +135,16 @@ mod form_controls {
 
     #[test]
     fn read_only_input_keeps_text_and_selection_during_edits_and_composition() {
-        let mut buffer = TextBuffer::<false>::read_only("p2p1.α\nβ");
+        let mut buffer = TextBuffer::<false>::read_only("paxri1.α\nβ");
         assert_eq!(buffer.selection(), 0..0);
-        buffer.anchor = "p2p1.α".len();
-        buffer.cursor = "p2p1.".len();
+        buffer.anchor = "paxri1.α".len();
+        buffer.cursor = "paxri1.".len();
         let selection = buffer.selection();
         buffer.replace(None, "");
         buffer.replace(None, "pasted");
         let added = buffer.replace(Some(0..4), "漢");
         buffer.mark(added, "漢", Some(1..1));
-        assert_eq!(buffer.text, "p2p1.αβ");
+        assert_eq!(buffer.text, "paxri1.αβ");
         assert_eq!(buffer.selection(), selection);
         assert_eq!(&buffer.text[selection], "α");
         assert!(buffer.marked.is_none());

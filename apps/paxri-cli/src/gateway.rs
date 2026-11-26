@@ -36,16 +36,6 @@ async fn status(ipc: &Path) -> Result<Option<Status>> {
     }
 }
 
-fn legacy_address(name: &str) -> Option<PathBuf> {
-    #[cfg(windows)]
-    return Some(PathBuf::from(format!("{name}-gateway")));
-    #[cfg(unix)]
-    Some(
-        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").or_else(|| std::env::var_os("HOME"))?)
-            .join(format!(".{name}/gateway.sock")),
-    )
-}
-
 pub async fn discover(ipc: Option<&Path>, config: Option<&Path>) -> Result<Option<Status>> {
     let preferred = ipc
         .map(Path::to_owned)
@@ -68,25 +58,17 @@ pub async fn discover(ipc: Option<&Path>, config: Option<&Path>) -> Result<Optio
     else {
         return Ok(None);
     };
-    for candidate in [
-        file::gateway_address(&profile),
-        legacy_address("peerhatch"),
-        legacy_address("p2p-tunnel"),
-    ]
-        .into_iter()
-        .flatten()
+    if let Some(candidate) = file::gateway_address(&profile)
+        && candidate != preferred
+        && let Ok(Some(active)) = status(&candidate).await
+        && active
+            .config_path
+            .as_ref()
+            .and_then(|p| p.canonicalize().ok())
+            .as_ref()
+            == Some(&profile)
     {
-        if candidate != preferred
-            && let Ok(Some(active)) = status(&candidate).await
-            && active
-                .config_path
-                .as_ref()
-                .and_then(|p| p.canonicalize().ok())
-                .as_ref()
-                == Some(&profile)
-        {
-            return Ok(Some(active));
-        }
+        return Ok(Some(active));
     }
     Ok(None)
 }

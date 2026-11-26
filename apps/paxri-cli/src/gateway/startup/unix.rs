@@ -79,14 +79,6 @@ fn register_native(id: &str, old: Startup, mode: Startup, args: &[&str]) -> Resu
     let cfg = dirs::config_dir().context("Cannot find the login configuration directory")?;
     let autostart = cfg.join("autostart");
     let user = cfg.join("systemd/user");
-    let legacy = id.replacen("org.paxri.", "org.peerhatch.", 1);
-    let id = if autostart.join(format!("{legacy}.desktop")).exists()
-        || user.join(format!("{legacy}.service")).exists()
-    {
-        &legacy
-    } else {
-        id
-    };
     let desktop = autostart.join(format!("{id}.desktop"));
     let unit = user.join(format!("{id}.service"));
     let want = user
@@ -189,7 +181,7 @@ trap '/bin/rm -f "$draft"' EXIT
         .env_clear()
         .uid(uid)
         .gid(gid)
-        .args(["-c", script, "p2p-launch-agent"])
+        .args(["-c", script, "paxri-launch-agent"])
         .arg(path.parent().context("Missing LaunchAgents directory")?)
         .arg(path)
         .stdin(Stdio::piped())
@@ -245,14 +237,6 @@ fn register_native(id: &str, old: Startup, mode: Startup, args: &[&str]) -> Resu
     };
     let agents = home.join("Library/LaunchAgents");
     let daemons = Path::new("/Library/LaunchDaemons");
-    let legacy = id.replacen("org.paxri.", "org.peerhatch.", 1);
-    let id = if agents.join(format!("{legacy}.plist")).exists()
-        || daemons.join(format!("{legacy}.plist")).exists()
-    {
-        &legacy
-    } else {
-        id
-    };
     let login = agents.join(format!("{id}.plist"));
     let system = daemons.join(format!("{id}.plist"));
     let xml = |s: &str| {
