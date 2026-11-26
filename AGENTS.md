@@ -4,7 +4,7 @@ Guidance for coding agents working in this repository. Read [README.md](README.m
 
 ## Project at a glance
 
-paxri pairs computers and opens shells, copies files, and forwards TCP ports between them over authenticated iroh connections. Every device runs one **gateway** (`paxri-gateway`). The CLI (`paxri`), the GPUI desktop app (`paxri-gui`) and the Android client talk to the local gateway over IPC: a Unix domain socket, or a named pipe on Windows. Settings live in one TOML file (`node.toml`). The private key is kept in a separate file.
+paxri pairs computers and opens shells, copies files, and forwards TCP ports between them over authenticated iroh connections. On desktop and servers, every device runs one **gateway** (`paxri-gateway`), and the CLI (`paxri`) and GPUI desktop app (`paxri-gui`) talk to it over local IPC (a Unix domain socket, or a named pipe on Windows); settings live in one TOML file (`node.toml`) and the private key in a separate file. The Android client embeds the iroh transport in-process without a separate gateway daemon and stores its UI settings in its private `files/gui.toml`.
 
 ## Repository layout
 
@@ -19,7 +19,7 @@ paxri pairs computers and opens shells, copies files, and forwards TCP ports bet
 | `crates/paxri-native` | iroh identities, discovery, relays, direct paths |
 | `crates/paxri-terminal`, `crates/paxri-files` | PTY and file-transfer protocols |
 | `crates/paxri-ui` | GPUI components, terminal emulator and renderer, settings catalog. Shared by desktop **and** Android |
-| `compat/{gpui,iroh,xattr}` | Vendored, patched crates wired in through `[patch.crates-io]`. Each one's `LOCAL_CHANGES.md` describes the changes |
+| `compat/{gpui,iroh,xattr}` | Vendored, patched crates wired in through `[patch.crates-io]`. See `LOCAL_CHANGES.md` in `gpui` and `iroh` (and `Cargo.toml` for `xattr`) |
 | `mobile/android` | Android client: a **separate Cargo workspace** with its own `Cargo.lock`, a different GPUI snapshot (`gpui-mobile`/`gpui-pre`), Java glue, and upstream patches in `patches/` |
 | `scripts/` | Integration checks (`check-gateway.py`, `check-nat*.{py,sh}`) and Windows dev sync |
 | `packaging/` | Release archives, Windows portable ZIP, systemd and launchd units, Docker entrypoint, rolling-release publishing |
@@ -34,6 +34,8 @@ The toolchain is Rust 1.98.1 (edition 2024, resolver 3), the same version CI and
 cargo build --locked                       # headless CLI + gateway (default members)
 cargo build --locked -p paxri-gui          # desktop app (needs Fontconfig/FreeType/XKB/Wayland/X11/Vulkan dev libs on Linux)
 cargo test --locked -p paxri-config -p paxri-core -p paxri-files -p paxri-native -p paxri-terminal --lib   # CI unit tests
+cargo test --locked -p paxri-config --tests   # config & example integration tests (skipped by --lib)
+cargo test --locked -p paxri-ui --lib      # shared terminal and UI unit tests
 python3 scripts/check-gateway.py --file-copy   # integration checks; need target/debug binaries
 python3 scripts/check-gateway.py --pipe-exec
 target/debug/paxri config check examples/home.toml
@@ -41,16 +43,17 @@ target/debug/paxri config check examples/home.toml
 
 Other `check-gateway.py` modes: `--pairing-only`, `--unpair`, `--native-terminal`, `--session-tools`, `--forwarding`, `--lifecycle`. Run the ones that cover your change.
 
-Android (needs JDK 17, SDK 35, NDK, `cargo-ndk`): `python3 mobile/android/build.py`. Android has its own lockfile, so run `cargo` there from `mobile/android/`. Changes to `crates/paxri-ui` affect both clients. Make sure both still compile.
+Android (needs JDK 17, SDK 35, NDK, `cargo-ndk`): `python3 mobile/android/build.py`. Android has its own lockfile, so run `cargo` there from `mobile/android/`. Changes to `crates/paxri-ui` are built against both desktop `compat/gpui` (0.2.2) and Android `gpui-pre` (0.3.6); guard divergent GPUI APIs (such as `ShapedLine::paint`) with `#[cfg(target_os = "android")]` and make sure both clients compile.
 
 ## Conventions
 
 - **Formatting.** The tree is not `rustfmt`-clean. Do **not** run `cargo fmt` on the whole workspace, because it rewrites hundreds of unrelated files. Match the surrounding style and keep diffs limited to the code you change.
 - **Wire and config compatibility.** Peers can run different builds. New `Status` fields and config keys use `#[serde(default)]`. Gateways advertise capabilities, so check them before relying on a new peer feature (as `exec --pipe` and unpair confirmation do). Config structs use `deny_unknown_fields`, so a new key must be added to the schema in `crates/paxri-config`.
+- **Upgrade and legacy compatibility.** Do not rename or remove legacy `peerhatch` / `p2p-tunnel` identifiers kept for in-place upgrades: Android `package="org.peerhatch.android"`, macOS `CFBundleIdentifier` `org.peerhatch.desktop`, `PEERHATCH_IPC`/`PEERHATCH_CALLER_ID`, and profile, service, or Task Scheduler migration paths.
 - **Config edits** go through `crates/paxri-config/src/file.rs` (`set_gateway`, `set_gui`, …) with `toml_edit`. These functions preserve user comments and write atomically. Don't serialize the whole file again.
-- **New preferences.** Declare a `SettingSpec` in `crates/paxri-ui/src/settings/catalog.rs`, add a `GuiChange`/`GatewayChange` variant, handle it in the gateway's `Command` handler, and add a round-trip test in `file.rs`. The settings-editor paragraphs under "Desktop workspace" in `docs/architecture.md` describe how this fits together.
+- **New preferences.** Declare a `SettingSpec` in `crates/paxri-ui/src/settings/catalog.rs`, update the config schema (`crates/paxri-config/src/gui.rs` or `startup.rs`) and `file.rs` with round-trip tests (including `crates/paxri-config/tests/gui.rs` for GUI settings), add a `GuiChange`/`GatewayChange` variant handled in the gateway's `Command` handler, and wire shared GUI preferences in `mobile/android/src/settings.rs` (`files/gui.toml`). The settings-editor paragraphs under "Desktop workspace" in `docs/architecture.md` describe how this fits together.
 - **Vendored crates.** If you change `compat/*` or `mobile/android/patches/*`, update the matching `LOCAL_CHANGES.md` or `patches/README.md`. Android patches must also be listed in `PATCH_SERIES` in `mobile/android/build.py`.
-- **Platforms.** Code runs on Linux, macOS, Windows (ConPTY, named pipes, services) and Android. Put platform-specific code behind `cfg` and keep the other targets compiling. For shortcuts, use `Modifiers::secondary_key()` (Ctrl, or Cmd on macOS).
+- **Platforms.** Code runs on Linux, macOS, Windows (ConPTY, named pipes, services) and Android. Put platform-specific code behind `cfg` and keep the other targets compiling. For shortcuts, use `Modifiers::secondary_key()` (Ctrl, or Cmd on macOS). In Windows releases, keep `conpty.dll` and `OpenConsole.exe` in the same directory as `paxri-gateway.exe`.
 - **Security.** Pairing grants shell, file and TCP access as the gateway account. Keep access checks in the gateway, not in the clients. Terminal links are restricted to `http`, `https` and `mailto` (see `sanitize_uri`). Don't weaken this kind of filtering.
 - **Commits.** Use `type(scope): summary`, for example `feat(ui,gateway): …` or `fix(android,terminal): …`. Common scopes are `ui`, `gateway`, `terminal`, `android`, `packaging`, `build`. The body is a short bullet list.
 - **Secrets.** Never commit `node.toml`, `*.key`, `*.p12`/`*.pfx` or `.env*`. They are gitignored. `target/` and `dist/` are build outputs.
