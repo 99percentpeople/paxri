@@ -13,9 +13,10 @@ use tokio::{
     time::{sleep, timeout},
 };
 use paxri_core::{
-    PeerSession, StreamKind, Transport,
+    PeerSession, StreamKind,
     reverse::{self as wire, ListenerId},
 };
+use paxri_native::gateway::{NativeSession, NativeTransport};
 
 type Target = (String, watch::Receiver<String>);
 #[derive(Clone, Default)]
@@ -82,8 +83,8 @@ pub struct RemoteForward {
 }
 
 impl RemoteForward {
-    pub fn start<T: Transport>(
-        transport: Arc<T>,
+    pub fn start(
+        transport: Arc<NativeTransport>,
         peer: String,
         listen: SocketAddr,
         target: String,
@@ -93,14 +94,58 @@ impl RemoteForward {
         let (target_tx, targets) = watch::channel(target);
         let (stop_tx, mut stop) = oneshot::channel();
         let task = tokio::spawn(async move {
+            let mut phases = transport.subscribe_phase_changes();
             let mut delay = 1;
+            let mut initial_probe = true;
             loop {
-                let session = tokio::select! {
+                let session = match transport.online_session(&peer) {
+                    Ok(session) => {
+                        initial_probe = false;
+                        session
+                    }
+                    Err(offline) => {
+                        delay = 1;
+                        let error = if std::mem::take(&mut initial_probe) {
+                            match tokio::select! {
+                                biased;
+                                _ = &mut stop => break,
+                                result = transport.probe_session(&peer) => result,
+                            } {
+                                Ok(session) => session,
+                                Err(err) => {
+                                    state_tx.send_replace(BindingState {
+                                        address: None,
+                                        error: Some(format!("{err:#}")),
+                                    });
+                                    tokio::select! {
+                                        biased;
+                                        _ = &mut stop => break,
+                                        changed = phases.changed() => if changed.is_err() { break; },
+                                    }
+                                    continue;
+                                }
+                            }
+                        } else {
+                            state_tx.send_replace(BindingState {
+                                address: None,
+                                error: Some(format!("{offline:#}")),
+                            });
+                            tokio::select! {
+                                biased;
+                                _ = &mut stop => break,
+                                changed = phases.changed() => if changed.is_err() { break; },
+                            }
+                            continue;
+                        };
+                        error
+                    }
+                };
+                let bound = tokio::select! {
                     biased;
                     _ = &mut stop => break,
-                    result = bind(&*transport, &peer, listen, &routes, &targets) => result,
+                    result = bind(session, listen, &routes, &targets) => result,
                 };
-                let error = match session {
+                let error = match bound {
                     Ok((mut control, bound, _registration)) => {
                         delay = 1;
                         state_tx.send_replace(BindingState {
@@ -112,7 +157,7 @@ impl RemoteForward {
                             _ = &mut stop => {
                                 // The peer acknowledges the FIN after releasing the listening socket.
                                 let _ = control.shutdown().await;
-                                let _ = timeout(Duration::from_secs(2),control.read_u8()).await;
+                                let _ = timeout(Duration::from_secs(2), control.read_u8()).await;
                                 break;
                             }
                             _ = control.read_u8() => anyhow::anyhow!("Peer closed the listener"),
@@ -120,11 +165,19 @@ impl RemoteForward {
                     }
                     Err(error) => error,
                 };
+                if transport.online_session(&peer).is_err() {
+                    continue;
+                }
                 state_tx.send_replace(BindingState {
                     address: None,
                     error: Some(format!("{error:#}")),
                 });
-                tokio::select! { _ = &mut stop => break, _ = sleep(Duration::from_secs(delay)) => {} }
+                tokio::select! {
+                    biased;
+                    _ = &mut stop => break,
+                    _ = sleep(Duration::from_secs(delay)) => {}
+                    changed = phases.changed() => if changed.is_err() { break; },
+                }
                 delay = (delay * 2).min(15);
             }
         });
@@ -148,19 +201,17 @@ impl RemoteForward {
     }
 }
 
-async fn bind<T: Transport>(
-    transport: &T,
-    peer: &str,
+async fn bind(
+    session: NativeSession,
     listen: SocketAddr,
     routes: &Routes,
     targets: &watch::Receiver<String>,
 ) -> Result<(
-    <T::Session as PeerSession>::Stream,
+    <NativeSession as PeerSession>::Stream,
     SocketAddr,
     Registration,
 )> {
     timeout(STREAM_TIMEOUT, async {
-        let session = transport.session(peer).await?;
         let guard = routes.register(session.peer_id(), targets.clone())?;
         let mut stream = session.open(StreamKind::Listen).await?;
         let (mut rx, mut tx) = tokio::io::split(&mut stream);

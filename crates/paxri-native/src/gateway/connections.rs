@@ -464,6 +464,25 @@ impl Connections {
         ep: &Endpoint,
         addr: EndpointAddr,
     ) -> Result<NativeSession> {
+        self.dial(ep, addr, true).await
+    }
+
+    /// Background presence probe that leaves an offline peer in `Disconnected`
+    /// instead of flashing `Initializing` ("Connecting…") in the UI while dialing.
+    pub(super) async fn probe(
+        self: &Arc<Self>,
+        ep: &Endpoint,
+        addr: EndpointAddr,
+    ) -> Result<NativeSession> {
+        self.dial(ep, addr, false).await
+    }
+
+    async fn dial(
+        self: &Arc<Self>,
+        ep: &Endpoint,
+        addr: EndpointAddr,
+        publish_phase: bool,
+    ) -> Result<NativeSession> {
         let slot = self.paired_slot(addr.id)?;
         if let Some(s) = slot.live() {
             return Ok(s);
@@ -478,7 +497,15 @@ impl Connections {
             if let Some(current) = slot.live() {
                 return Ok(current);
             }
-            let _phase = slot.begin_event(ConnectionEvent::BeginInitialize, &self.phase_events)?;
+            let _phase = if publish_phase {
+                Some(slot.begin_event(ConnectionEvent::BeginInitialize, &self.phase_events)?)
+            } else {
+                anyhow::ensure!(
+                    slot.phase() != ConnectionPhase::Stopping,
+                    "peer connection is stopping"
+                );
+                None
+            };
             let conn = super::addresses::dial(ep, addr, PROTOCOL).await.context(
                 "shared peer protocol handshake failed; both gateways must support paxri/session/1"
             )?;
@@ -961,6 +988,61 @@ mod tests {
         .await??;
         ra.shutdown().await?;
         rb.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn offline_peer_stops_background_polling_and_stays_disconnected_until_peer_connects() -> Result<()> {
+        use super::super::NativeTransport;
+        let a = endpoint().await?;
+        let b = endpoint().await?;
+        let (pa, _streams_a, grants_a) = pool(&a, &b);
+        let (pb, _streams_b, _grants_b) = pool(&b, &a);
+        b.set_alpns(vec![PROTOCOL.to_vec()]);
+        let ra = Router::builder(a.clone())
+            .accept(PROTOCOL, pa.clone())
+            .spawn();
+        let client = Arc::new(NativeTransport {
+            endpoint: a.clone(),
+            connections: pa.clone(),
+            config: grants_a,
+            peers: std::sync::RwLock::new(BTreeMap::from([("peer".into(), b.addr())])),
+            presence_refresh: Default::default(),
+        });
+        let announce = tokio::spawn(client.clone().announce_presence());
+        timeout(Duration::from_secs(12), async {
+            // B rejects A's single initial startup probe; A must not flash `Initializing`.
+            let initial = b
+                .accept()
+                .await
+                .context("endpoint closed")?
+                .await?;
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Disconnected);
+            initial.close(1u32.into(), b"offline");
+
+            // After the initial probe fails, A must not keep polling B.
+            assert!(
+                timeout(Duration::from_secs(4), b.accept()).await.is_err(),
+                "offline peer should not be polled repeatedly after initial probe"
+            );
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Disconnected);
+
+            // When B comes online and initiates a connection itself, A accepts passively.
+            let session_b = pb.get(&b, a.addr()).await?;
+            let mut selected = pa.paired_slot(b.id())?.state.subscribe();
+            let session_a = selected
+                .wait_for(|s| s.live().is_some())
+                .await?
+                .live()
+                .unwrap();
+            assert_eq!(session_a.token, session_b.token);
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Connected);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        ra.shutdown().await?;
+        b.close().await;
+        announce.await?;
         Ok(())
     }
 }

@@ -9,26 +9,48 @@ use std::{
 };
 use tokio::time::{Instant, sleep_until};
 
+/// Short backoff retries after a live peer drops. Once exhausted, the gateway stops
+/// polling and waits passively for the peer to reconnect when it comes back online.
+const RECOVERY_DELAYS: &[Duration] = &[
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+];
+
 #[derive(Clone, Copy)]
 struct Attempt {
     at: Instant,
-    delay: Duration,
+    retries_left: usize,
+    retry_index: usize,
 }
 
 impl Attempt {
-    fn now() -> Self {
+    fn once() -> Self {
         Self {
             at: Instant::now(),
-            delay: Duration::ZERO,
+            retries_left: 0,
+            retry_index: 0,
         }
     }
 
-    fn retry(self) -> Self {
-        let delay = (self.delay * 2).clamp(Duration::from_secs(2), Duration::from_secs(60));
+    fn recover() -> Self {
         Self {
-            at: Instant::now() + delay,
-            delay,
+            at: Instant::now(),
+            retries_left: RECOVERY_DELAYS.len(),
+            retry_index: 0,
         }
+    }
+
+    fn next_retry(self) -> Option<Self> {
+        if self.retries_left == 0 {
+            return None;
+        }
+        let delay = RECOVERY_DELAYS[self.retry_index.min(RECOVERY_DELAYS.len() - 1)];
+        Some(Self {
+            at: Instant::now() + delay,
+            retries_left: self.retries_left - 1,
+            retry_index: self.retry_index + 1,
+        })
     }
 }
 
@@ -62,7 +84,17 @@ impl NativeTransport {
         let mut relay_ready = relays.get();
         let mut local_addr = address.get();
         let mut targets = self.presence_targets();
-        let mut queued: BTreeMap<_, _> = targets.keys().map(|&id| (id, Attempt::now())).collect();
+        let mut was_live: BTreeSet<EndpointId> = targets
+            .keys()
+            .copied()
+            .filter(|&id| self.connections.live(id).is_some())
+            .collect();
+        let mut queued: BTreeMap<_, _> = targets
+            .keys()
+            .copied()
+            .filter(|id| !was_live.contains(id))
+            .map(|id| (id, Attempt::once()))
+            .collect();
         let mut active = BTreeSet::new();
         let mut attempts = FuturesUnordered::new();
         loop {
@@ -86,13 +118,14 @@ impl NativeTransport {
                     continue;
                 };
                 if self.connections.live(id).is_some() {
+                    was_live.insert(id);
                     continue;
                 }
                 active.insert(id);
                 let transport = &self;
                 let addr = addr.clone();
                 attempts.push(async move {
-                    let _ = transport.connections.get(&transport.endpoint, addr).await;
+                    let _ = transport.connections.probe(&transport.endpoint, addr).await;
                     (id, attempt)
                 });
             }
@@ -108,8 +141,12 @@ impl NativeTransport {
                 } => false,
                 Some((id, attempt)) = attempts.next(), if !attempts.is_empty() => {
                     active.remove(&id);
-                    if targets.contains_key(&id) && self.connections.live(id).is_none() {
-                        queued.entry(id).or_insert_with(|| attempt.retry());
+                    if self.connections.live(id).is_some() {
+                        was_live.insert(id);
+                    } else if targets.contains_key(&id)
+                        && let Some(next) = attempt.next_retry()
+                    {
+                        queued.entry(id).or_insert(next);
                     }
                     false
                 }
@@ -133,9 +170,10 @@ impl NativeTransport {
                     if event.is_err() { return; }
                     let next = self.presence_targets();
                     queued.retain(|id, _| next.contains_key(id));
+                    was_live.retain(|id| next.contains_key(id));
                     for (id, addr) in &next {
                         if targets.get(id) != Some(addr) {
-                            queued.insert(*id, Attempt::now());
+                            queued.insert(*id, Attempt::once());
                         }
                     }
                     targets = next;
@@ -145,18 +183,26 @@ impl NativeTransport {
                     if event.is_err() { return; }
                     for &id in targets.keys() {
                         if self.connections.live(id).is_some() {
+                            was_live.insert(id);
                             queued.remove(&id);
-                        } else if !active.contains(&id) {
-                            // An unrelated peer changing state must not reset this peer's backoff.
-                            queued.entry(id).or_insert_with(Attempt::now);
+                        } else if was_live.remove(&id) {
+                            // Only a peer that just dropped from a live connection gets brief
+                            // recovery retries; already-offline peers wait passively.
+                            queued.insert(id, Attempt::recover());
                         }
                     }
                     false
                 }
             };
             if announce_all {
-                let now = Attempt::now();
-                queued.extend(targets.keys().map(|&id| (id, now)));
+                for &id in targets.keys() {
+                    if self.connections.live(id).is_none() {
+                        queued
+                            .entry(id)
+                            .and_modify(|existing| existing.at = Instant::now())
+                            .or_insert_with(Attempt::once);
+                    }
+                }
             }
         }
     }

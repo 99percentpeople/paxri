@@ -52,6 +52,18 @@ impl NativeTransport {
             .with_context(|| format!("{peer} is offline"))
     }
 
+    /// Dial a peer once without transitioning its visible phase to `Initializing`.
+    pub async fn probe_session(&self, peer: &str) -> Result<NativeSession> {
+        let address = self
+            .peers
+            .read()
+            .expect("peer map")
+            .get(peer)
+            .cloned()
+            .context("unknown peer")?;
+        self.connections.probe(&self.endpoint, address).await
+    }
+
     pub fn live_sessions(&self) -> Vec<(String, NativeSession)> {
         self.peers
             .read()
@@ -114,14 +126,9 @@ impl NativeTransport {
             .get(peer)
             .cloned()
             .context("unknown peer")?;
-        let result = async {
-            let session = self.connections.reconnect(&self.endpoint, address).await?;
-            paxri_core::peer_platform(self, peer).await?;
-            Ok(session)
-        }
-        .await;
-        self.refresh_presence();
-        result
+        let session = self.connections.reconnect(&self.endpoint, address).await?;
+        paxri_core::peer_platform(self, peer).await?;
+        Ok(session)
     }
 
     pub fn endpoint_online(&self, id: &str) -> bool {
