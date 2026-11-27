@@ -27,7 +27,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{AttachmentId, Update};
+use crate::{AttachmentId, Update, gateway::UpdateSink};
 
 const ATTACH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CREATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -118,7 +118,8 @@ struct ViewedPage {
 pub struct Client {
     viewed_peer: watch::Sender<ViewedPage>,
     transport: Arc<NativeTransport>,
-    presence: tokio::task::JoinHandle<()>,
+    device_id: String,
+    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     router: iroh::protocol::Router,
     devices_io: Mutex<()>,
     devices: Mutex<SavedDevices>,
@@ -129,7 +130,11 @@ pub struct Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        self.presence.abort();
+        if let Ok(mut tasks) = self.tasks.lock() {
+            for handle in tasks.drain(..) {
+                handle.abort();
+            }
+        }
     }
 }
 
@@ -182,11 +187,23 @@ impl Client {
         paxri_control::forwarding::query(name, session, action).await
     }
 
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub async fn shutdown(&self) {
+        let handles = std::mem::take(&mut *self.tasks.lock().expect("client tasks"));
+        for handle in handles {
+            handle.abort();
+        }
+        let _ = timeout(Duration::from_secs(3), self.router.shutdown()).await;
+    }
+
     pub async fn start(
         dir: &Path,
         relay_url: Option<String>,
-        updates: Sender<Update>,
-        connection_state: impl Fn(bool, bool) + Send + 'static,
+        updates: UpdateSink,
+        connection_state: impl Fn(usize, usize) + Send + 'static,
     ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let key = paxri_native::identity::init(&dir.join("device.key"))?;
@@ -213,6 +230,7 @@ impl Client {
         )
         .await?;
         let transport = Arc::new(transport);
+        let device_id = transport.id().to_owned();
         let mut name = crate::DEVICE_NAME.subscribe();
         transport.set_device_name(name.borrow_and_update().effective());
         let mut info = transport.subscribe_device_info();
@@ -221,7 +239,8 @@ impl Client {
         let client = Arc::new(Self {
             viewed_peer,
             transport,
-            presence,
+            device_id,
+            tasks: std::sync::Mutex::new(vec![presence]),
             router,
             devices_io: Mutex::new(()),
             devices: Mutex::new(devices),
@@ -229,18 +248,18 @@ impl Client {
             relay_url,
             file,
         });
-        tokio::spawn(Self::watch_connections(
+        let watch_task = tokio::spawn(Self::watch_connections(
             Arc::downgrade(&client),
             viewed,
             updates.clone(),
             connection_state,
         ));
-        tokio::spawn(Self::deliver_unpairs(
+        let unpair_task = tokio::spawn(Self::deliver_unpairs(
             Arc::downgrade(&client),
             client.transport.subscribe_config(),
         ));
         let weak = Arc::downgrade(&client);
-        tokio::spawn(async move {
+        let event_task = tokio::spawn(async move {
             let mut flows = tokio::task::JoinSet::new();
             let slots = Arc::new(tokio::sync::Semaphore::new(
                 paxri_config::limits::DEFAULT_MAX_CONCURRENT_STREAMS,
@@ -270,7 +289,7 @@ impl Client {
                                 let Some(client) = weak.upgrade() else { break };
                                 let result = client.remove(&authenticated_id, pairing_id.as_deref(), false).await;
                                 if let Ok(UnpairAck::Cleared) = result {
-                                    let _ = updates.send(Update::Devices(client.list().await)).await;
+                                    updates.send(Update::Devices(client.list().await)).await;
                                 }
                                 let _ = reply.send(result.map_err(|e| e.to_string()));
                             }
@@ -334,7 +353,7 @@ impl Client {
                             |_, _| {},
                         ).await {
                             Ok(Some((snapshot, ()))) => {
-                                let _ = updates.send(Update::Devices(snapshot)).await;
+                                updates.send(Update::Devices(snapshot)).await;
                             }
                             Ok(None) => {}
                             Err(e) => log::warn!("Saving peer device info: {e}"),
@@ -360,6 +379,11 @@ impl Client {
                 }
             }
         });
+        client
+            .tasks
+            .lock()
+            .expect("client tasks")
+            .extend([watch_task, unpair_task, event_task]);
         Ok(client)
     }
 
@@ -433,6 +457,10 @@ impl Client {
         Ok((paths, state))
     }
 
+    pub fn notify_ui_attached(&self) {
+        self.viewed_peer.send_modify(|_| {});
+    }
+
     pub fn watch_peer(&self, id: Option<&str>, list_interval: Option<Duration>) {
         let page = ViewedPage {
             peer: id.map(str::to_owned),
@@ -450,8 +478,8 @@ impl Client {
     async fn watch_connections(
         weak: Weak<Self>,
         mut viewed: watch::Receiver<ViewedPage>,
-        updates: Sender<Update>,
-        connection_state: impl Fn(bool, bool),
+        updates: UpdateSink,
+        connection_state: impl Fn(usize, usize),
     ) {
         let Some(transport) = weak.upgrade().map(|c| c.transport.clone()) else {
             return;
@@ -495,7 +523,9 @@ impl Client {
                 .into_iter()
                 .map(|(id, (phase, conn_id))| (id, PeerConnectionState::from_phase(phase, conn_id)))
                 .collect();
-            let state = (!paths.is_empty(), paths.values().any(|links| !links.is_empty()));
+            let paired_count = paths.len();
+            let connected_count = paths.values().filter(|links| !links.is_empty()).count();
+            let state = (paired_count, connected_count);
             if last_service_state != Some(state) {
                 connection_state(state.0, state.1);
                 last_service_state = Some(state);
@@ -511,9 +541,7 @@ impl Client {
                     interval = Duration::from_secs(1);
                 }
                 if let Some(list_interval) = page.list_interval { interval = list_interval; }
-                if updates.send(Update::Presence(snapshot)).await.is_err() {
-                    break;
-                }
+                updates.send(Update::Presence(snapshot)).await;
             }
             tokio::select! {
                 result = changes.changed() => if result.is_err() { break; },

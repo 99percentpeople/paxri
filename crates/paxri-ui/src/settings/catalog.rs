@@ -50,6 +50,18 @@ pub const SESSION_KEEP_ALIVE: SettingSpec = SettingSpec::new(
     "How long this gateway keeps hosted terminal sessions running after a device disconnects.",
     "timeout expire ttl forever persistent idle disconnect",
 );
+pub const BACKGROUND_SERVICE: SettingSpec = SettingSpec::new(
+    "background_service",
+    "Background service",
+    "Keep the gateway active in a foreground service when switching apps or closing the window.",
+    "foreground daemon keep alive background persistent",
+);
+pub const SCREEN_OFF_KEEP_ALIVE: SettingSpec = SettingSpec::new(
+    "screen_off_keep_alive",
+    "Screen-off keep-alive",
+    "Hold CPU and low-latency Wi-Fi locks while the gateway runs so turning off the screen does not drop connections.",
+    "background sleep wake lock wifi screen off power",
+);
 pub const UPNP: SettingSpec = SettingSpec::new(
     "upnp",
     "Allow UPnP",

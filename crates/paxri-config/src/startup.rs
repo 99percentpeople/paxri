@@ -1,18 +1,40 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GatewaySettings {
     pub startup: Startup,
     pub session_keep_alive: SessionKeepAlive,
+    #[serde(default = "default_true")]
+    pub background_service: bool,
+    #[serde(default = "default_true")]
+    pub screen_off_keep_alive: bool,
     pub limits: crate::limits::Limits,
+}
+
+impl Default for GatewaySettings {
+    fn default() -> Self {
+        Self {
+            startup: Startup::default(),
+            session_keep_alive: SessionKeepAlive::default(),
+            background_service: true,
+            screen_off_keep_alive: true,
+            limits: crate::limits::Limits::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayChange {
     SessionKeepAlive(SessionKeepAlive),
+    BackgroundService(bool),
+    ScreenOffKeepAlive(bool),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

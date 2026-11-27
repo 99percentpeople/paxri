@@ -104,16 +104,16 @@ impl SettingRow {
         let title = actions()
             .child(
                 div()
+                    .min_w_0()
                     .text_role(TextRole::Subtitle)
-                    .whitespace_nowrap()
                     .child(self.title),
             )
-            .when_some(self.path, |d, path| d.child(ui.caption(path)));
+            .when_some(self.path, |d, path| d.child(ui.caption(path).min_w_0()));
         let copy = div()
             .min_w_0()
             .max_w_full()
             .flex_1()
-            .flex_basis(px(220.))
+            .flex_basis(px(260.))
             .flex()
             .flex_col()
             .gap(SPACE_1)
@@ -124,7 +124,7 @@ impl SettingRow {
 
         let control = div()
             .min_w_0()
-            .max_w(px(440.))
+            .max_w_full()
             .flex_initial()
             .flex()
             .justify_end()

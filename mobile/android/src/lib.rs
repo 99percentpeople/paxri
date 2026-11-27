@@ -2,6 +2,7 @@ mod bridge;
 mod client;
 mod fonts;
 mod forwards;
+mod gateway;
 mod keybar;
 mod navigation;
 mod sessions;
@@ -15,6 +16,7 @@ use anyhow::Result;
 use async_channel::Sender;
 use bridge::*;
 use client::{Client, Peers, Presence};
+use gateway::{GATEWAY, GatewayPolicy, GatewayStatus};
 use gpui::{prelude::*, *};
 use navigation::Drawer;
 use paxri_config::keybar::KeybarSettings;
@@ -58,6 +60,8 @@ struct PendingPairing {
 }
 
 enum Update {
+    GatewayStatus(GatewayStatus),
+    GatewayStopped,
     Ready(Arc<Client>, Peers),
     Error(String),
     Devices(Peers),
@@ -81,6 +85,7 @@ enum Update {
     DeviceNameChanged,
     Gesture(u64, touch::Gesture),
     Close,
+    BatteryStatus(bool),
     Resumed,
     NetworkRefreshed,
     HostConfirmed(AttachmentId),
@@ -183,6 +188,11 @@ struct Mobile {
     relay_input: Entity<paxri_ui::components::input::Input>,
     saved_relay: String,
     active_relay: String,
+    gateway_status: GatewayStatus,
+    gateway_policy: GatewayPolicy,
+    gateway_details: bool,
+    data_dir: Option<std::path::PathBuf>,
+    battery_unrestricted: bool,
     keybar: Arc<KeybarSettings>,
     key_editor: Option<keybar::Editor>,
     terminal_settings: paxri_ui::settings::terminal::TerminalSettings,
@@ -191,7 +201,6 @@ struct Mobile {
     dark_system_bar_icons: Option<bool>,
     editing_input: Option<Entity<paxri_ui::components::input::Input>>,
     generation: u64,
-    starting_network: bool,
     pairing: Option<PendingPairing>,
 }
 
@@ -622,18 +631,39 @@ impl Mobile {
             Update::Presence(_) | Update::Ready(..) | Update::Devices(_) | Update::Paired(_)
         );
         match event {
+            Update::GatewayStatus(status) => {
+                if status.is_running() {
+                    self.active_relay = status.relay_url().unwrap_or_default().to_owned();
+                }
+                self.gateway_status = status;
+            }
+            Update::GatewayStopped => {
+                self.client = None;
+                self.presence = Presence::default();
+                self.hosted.clear();
+                self.reconnecting.clear();
+                self.listing_peers.clear();
+                self.session_list_errors.clear();
+                let peer_ids: Vec<String> = self.lifecycles.keys().cloned().collect();
+                for peer in peer_ids {
+                    self.emit_lifecycle(
+                        &peer,
+                        LifecycleEvent::ConnectionChanged(PeerConnectionState::Disconnected),
+                        cx,
+                    );
+                }
+                self.sync_forwards(false);
+            }
             Update::Ready(client, peers) => {
                 self.client = Some(client);
                 self.peers = peers;
                 self.watch_current_page();
                 self.refresh_sessions();
-                self.starting_network = false;
                 if let Err(error) = activity_action(&self.android, ActivityAction::PairingReady) {
                     Toast::show(error, self.window, cx);
                 }
             }
             Update::Error(error) => {
-                self.starting_network = false;
                 Toast::show(error, self.window, cx);
             }
             Update::PairCode(code) => {
@@ -825,8 +855,18 @@ impl Mobile {
                     s.write_input(bytes);
                 }
             }
+            Update::BatteryStatus(unrestricted) => {
+                if self.battery_unrestricted == unrestricted {
+                    return;
+                }
+                self.battery_unrestricted = unrestricted;
+            }
             Update::Resumed => {
-                if let Some(client) = self.client.clone() {
+                self.battery_unrestricted = load_battery_unrestricted(&self.android);
+                let away = take_background_duration();
+                let should_refresh = away.is_none_or(|elapsed| elapsed >= std::time::Duration::from_secs(2))
+                    || self.sessions.values().any(|s| !self.peer_connection(&s.peer).is_connected());
+                if should_refresh && let Some(client) = self.client.clone() {
                     let updates = self.updates.clone();
                     self.rt.spawn(async move {
                         client.refresh_network().await;
@@ -1065,7 +1105,13 @@ impl Mobile {
                 }
                 self.dispatch_all_pending(cx);
                 self.refresh_sessions();
-                if matches!(self.page, Page::Settings | Page::SettingsCategory(_)) {
+                if matches!(self.page, Page::Settings)
+                    || matches!(
+                        self.page,
+                        Page::SettingsCategory(section)
+                            if section != paxri_ui::settings::catalog::GATEWAY
+                    )
+                {
                     return;
                 }
             }
@@ -1130,61 +1176,50 @@ fn android_main(android: AndroidApp) {
             .with_max_level(log::LevelFilter::Warn)
             .with_tag("paxri"),
     );
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("Android runtime");
-    let handle = rt.handle().clone();
-    // Load local settings/peers and start the transport immediately so network
-    // bootstrap runs in parallel with Vulkan/GPUI window initialization.
-    let (local_settings, settings_error) = match settings::load(&android) {
-        Ok(settings) => (settings, None),
-        Err(error) => (
+    let handle = GATEWAY.handle();
+    let disk = android.internal_data_path();
+    // Load local settings/peers and attach to the process-wide embedded gateway
+    // immediately so network bootstrap runs in parallel with Vulkan/GPUI init and
+    // survives Activity recreation or closing the window.
+    let (local_settings, settings_error) = match disk.as_deref() {
+        Some(dir) => match settings::load_dir(dir) {
+            Ok(settings) => (settings, None),
+            Err(error) => (
+                paxri_config::file::LocalSettings::default(),
+                Some(format!("Loading settings: {error:#}")),
+            ),
+        },
+        None => (
             paxri_config::file::LocalSettings::default(),
-            Some(format!("Loading settings: {error:#}")),
+            Some("App storage unavailable".to_owned()),
         ),
     };
     let preferences = local_settings.gui;
+    let gateway_policy = GatewayPolicy::from(&local_settings.gateway);
     let initial_relay = local_settings
         .native
         .relay_url
         .as_ref()
         .map(|url| url.as_str().to_owned())
         .unwrap_or_default();
-    let startup_relay = (!initial_relay.is_empty()).then(|| initial_relay.clone());
     *HARDWARE_CONTROLS.lock().unwrap() = preferences.controls.clone();
-    let disk = android.internal_data_path();
     let initial_peers = disk
         .as_deref()
         .map(client::load_saved_peers)
         .unwrap_or_default();
     let (tx, rx) = async_channel::bounded(128);
-    let events = tx.clone();
-    let network_activity = android.clone();
-    handle.spawn(async move {
-        let result = async {
-            let dir = disk.ok_or_else(|| anyhow::anyhow!("App storage unavailable"))?;
-            Client::start(&dir, startup_relay, events.clone(), move |paired, connected| {
-                if let Err(error) = activity_action(
-                    &network_activity,
-                    ActivityAction::DeviceConnections { paired, connected },
-                ) {
-                    log::warn!("Updating background connection service: {error}");
-                }
-            })
-            .await
-        }
-        .await;
-        let event = match result {
-            Ok(c) => {
-                let peers = c.list().await;
-                Update::Ready(c, peers)
-            }
-            Err(e) => Update::Error(format!("{e:#}")),
-        };
-        let _ = events.send(event).await;
-    });
+    let cleanup_tx = tx.clone();
+    GATEWAY.attach_ui(
+        disk.clone(),
+        gateway_policy,
+        Arc::new(AndroidGatewayHost),
+        tx.clone(),
+    );
+    let initial_gateway_status = GATEWAY.status();
+    let active_relay = initial_gateway_status
+        .relay_url()
+        .map(str::to_owned)
+        .unwrap_or_else(|| initial_relay.clone());
     gpui_mobile::android::jni::install_panic_hook();
     gpui_mobile::android::jni::init_platform(&android);
     let platform = gpui_mobile::android::jni::shared_platform().unwrap();
@@ -1276,8 +1311,13 @@ fn android_main(android: AndroidApp) {
                 Mobile {
                     name_input,
                     relay_input,
-                    saved_relay: initial_relay.clone(),
-                    active_relay: initial_relay,
+                    saved_relay: initial_relay,
+                    active_relay,
+                    gateway_status: initial_gateway_status,
+                    gateway_policy,
+                    gateway_details: false,
+                    data_dir: disk,
+                    battery_unrestricted: load_battery_unrestricted(&android),
                     terminal_zoom: load_terminal_zoom(&android),
                     session_names: paxri_ui::terminal::title::SessionTitles::open(
                         android
@@ -1322,7 +1362,6 @@ fn android_main(android: AndroidApp) {
                     key_editor: None,
                     terminal_settings,
                     generation: 0,
-                    starting_network: true,
                     pairing: None,
                 }
             })
@@ -1341,8 +1380,8 @@ fn android_main(android: AndroidApp) {
             CAN_GO_BACK.store(false, Ordering::Release);
         }
     }
+    GATEWAY.detach_ui(&cleanup_tx);
     controls.close();
     gpui_mobile::set_text_input_callback(None);
-    rt.shutdown_timeout(std::time::Duration::from_secs(1));
     gpui_mobile::android::jni::shutdown_platform();
 }

@@ -175,6 +175,12 @@ pub fn set_gateway(
                 "session_keep_alive",
                 toml_edit::Value::from(mode.as_str()),
             ),
+            crate::startup::GatewayChange::BackgroundService(enabled) => {
+                ("background_service", toml_edit::Value::from(enabled))
+            }
+            crate::startup::GatewayChange::ScreenOffKeepAlive(enabled) => {
+                ("screen_off_keep_alive", toml_edit::Value::from(enabled))
+            }
         };
         if let Some(old) = gateway.get(key).and_then(Item::as_value) {
             *value.decor_mut() = old.decor().clone();
@@ -427,6 +433,19 @@ mod network_tests {
             SessionKeepAlive::Forever
         );
         assert!(crate::parse(&saved.replace("forever", "invalid")).is_err());
+
+        assert!(read_local(&path)?.gateway.background_service);
+        assert!(read_local(&path)?.gateway.screen_off_keep_alive);
+        let updated = set_gateway(&path, GatewayChange::BackgroundService(false), false)?;
+        assert!(!updated.background_service);
+        assert!(updated.screen_off_keep_alive);
+        let updated = set_gateway(&path, GatewayChange::ScreenOffKeepAlive(false), false)?;
+        assert!(!updated.background_service);
+        assert!(!updated.screen_off_keep_alive);
+        let reloaded = read_local(&path)?.gateway;
+        assert!(!reloaded.background_service);
+        assert!(!reloaded.screen_off_keep_alive);
+        assert!(fs::read_to_string(&path)?.contains("# keep"));
         Ok(())
     }
 

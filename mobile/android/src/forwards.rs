@@ -158,7 +158,7 @@ impl Mobile {
                 }
             }
         }
-        if (self.starting_network || pending) && total == 0 {
+        if (self.gateway_status.is_transitioning() || pending) && total == 0 {
             return Some("Loading…".into());
         }
         let filtered = filters.has_selections() || !query.is_empty();
@@ -254,10 +254,13 @@ impl Mobile {
                 .device
                 .as_ref()
                 .and_then(|id| self.peers.get(id).map(|p| (id, p)));
-            let state = if self.starting_network || pending {
+            let state = if self.gateway_status.is_transitioning() || pending {
                 ListState::loading("Loading forwarding rules…")
+            } else if matches!(self.gateway_status, GatewayStatus::Stopped) {
+                ListState::empty(Icon::Server, "Gateway stopped")
+                    .detail("Start the gateway in Settings → Gateway.")
             } else if self.client.is_none() {
-                ListState::empty(Icon::Server, "Network unavailable")
+                ListState::empty(Icon::Server, "Gateway unavailable")
             } else if !failures.is_empty() {
                 ListState::empty(Icon::Forward, "Forwarding rules unavailable")
                     .detail(failures.join("\n"))

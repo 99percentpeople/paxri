@@ -707,7 +707,7 @@ impl Mobile {
                 }
             }
         }
-        if (self.starting_network || initial_request) && total == 0 {
+        if (self.gateway_status.is_transitioning() || initial_request) && total == 0 {
             return Some("Loading…".into());
         }
         let filtered = filters.has_selections() || !query.is_empty();
@@ -830,8 +830,13 @@ impl Mobile {
                 )))
             })
             .when_some(
-                if self.starting_network && rows.is_empty() {
+                if self.gateway_status.is_transitioning() && rows.is_empty() {
                     Some(paxri_ui::components::ListState::loading("Loading sessions…"))
+                } else if matches!(self.gateway_status, GatewayStatus::Stopped) && rows.is_empty() {
+                    Some(
+                        paxri_ui::components::ListState::empty(Icon::Server, "Gateway stopped")
+                            .detail("Start the gateway in Settings → Gateway."),
+                    )
                 } else {
                     session_list_notice(total, rows.len(), initial_request, &failed)
                 },

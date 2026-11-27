@@ -144,12 +144,13 @@ impl Mobile {
             .child(ui.separator())
             .child(div().px_3().py_2().child(ui.local_device_footer(
                 DEVICE_NAME.borrow().effective().into(),
-                Some(if self.client.is_some() {
-                    "Network ready"
-                } else if self.starting_network {
-                    "Starting network…"
-                } else {
-                    "Network unavailable"
+                Some(match &self.gateway_status {
+                    GatewayStatus::Running { .. } => "Gateway running",
+                    GatewayStatus::Starting => "Starting gateway…",
+                    GatewayStatus::Restarting => "Restarting gateway…",
+                    GatewayStatus::Stopping => "Stopping gateway…",
+                    GatewayStatus::Stopped => "Gateway stopped",
+                    GatewayStatus::Failed(_) => "Gateway offline",
                 }),
             )));
         div()

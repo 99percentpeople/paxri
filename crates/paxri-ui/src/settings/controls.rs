@@ -140,14 +140,12 @@ impl Ui {
         editable: bool,
         change: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Div {
-        if editable {
-            div()
-                .flex()
-                .child(self.switch(id, enabled).on_click(change))
+        let switch = if editable {
+            self.switch(id, enabled).on_click(change)
         } else {
-            self.muted(if enabled { "On" } else { "Off" })
-                .whitespace_nowrap()
-        }
+            self.switch(id, enabled).disabled(true)
+        };
+        div().flex_none().flex().child(switch)
     }
 }
 

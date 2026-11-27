@@ -19,8 +19,8 @@ pub enum SessionLocation {
 impl SessionLocation {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Open => "Open here",
-            Self::Gateway => "On gateway",
+            Self::Open => "Open",
+            Self::Gateway => "Detached",
             Self::Ended => "Ended",
         }
     }

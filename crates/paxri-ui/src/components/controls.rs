@@ -99,7 +99,12 @@ impl Ui {
             .flex()
             .items_center()
             .gap(SPACE_2)
-            .child(if on { "On" } else { "Off" })
+            .child(
+                div()
+                    .min_w(rems(1.5))
+                    .text_right()
+                    .child(if on { "On" } else { "Off" }),
+            )
             .child(track);
         self.button(ButtonVariant::Ghost, id, label)
     }

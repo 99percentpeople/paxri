@@ -36,7 +36,10 @@ public final class PaxriActivity extends GpuiInputActivity {
     private static final int SCAN_PAIRING = 71;
     private static final String DEVICE_NAME_OVERRIDE = "device_name";
     private static native void initVerifier(Context application);
+    private static native void initGatewayBridge(Class<?> serviceClass);
     private static native void activityVisibilityChanged(boolean visible);
+    private static native void activityFinishing();
+    private static native void batteryStatusChanged(boolean unrestricted);
     private static native void deviceNameChanged(String name, String model);
     private static native void submitCode(String code);
     private static native void systemTextSizeChanged(float size);
@@ -60,11 +63,6 @@ public final class PaxriActivity extends GpuiInputActivity {
     private Rect touchArea = new Rect();
     private boolean visible;
     private static int startedActivities;
-    private static PaxriActivity connectionServiceOwner;
-    private boolean deviceConnected;
-    private boolean connectionServiceStarted;
-    private final Handler connectionHandler = new Handler(Looper.getMainLooper());
-    private final Runnable stopConnections = this::stopConnectionService;
     private String scannedCode;
     private Insets previousInsets;
     private float insetDensity;
@@ -172,47 +170,42 @@ public final class PaxriActivity extends GpuiInputActivity {
         publishDeviceName();
     }
 
-    public void setDeviceConnections(boolean paired, boolean connected) {
+    public boolean isBatteryUnrestricted() {
+        android.os.PowerManager power = getSystemService(android.os.PowerManager.class);
+        return power != null && power.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    public void openBatterySettings() {
         runOnUiThread(() -> {
             if (isDestroyed() || isFinishing()) return;
-            deviceConnected = connected;
-            connectionHandler.removeCallbacks(stopConnections);
-            if (connected) {
-                startConnectionServiceIfVisible();
-            } else if (!paired) {
-                stopConnectionService();
-            } else if (connectionServiceStarted) {
-                // Keep the process eligible for reconnect during the gateway's offline grace period.
-                connectionHandler.postDelayed(stopConnections, 5 * 60 * 1000L);
+            try {
+                if (!isBatteryUnrestricted()) {
+                    Intent direct = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            android.net.Uri.parse("package:" + getPackageName()));
+                    startActivity(direct);
+                    return;
+                }
+            } catch (RuntimeException ignored) {
+                // Fall back to the system battery optimization list below.
+            }
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (RuntimeException ignored) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:" + getPackageName())));
+                } catch (RuntimeException error) {
+                    android.util.Log.w("paxri", "Opening battery settings", error);
+                }
             }
         });
     }
 
-    private void startConnectionServiceIfVisible() {
-        if (!visible || !deviceConnected || connectionServiceStarted) return;
-        try {
-            startForegroundService(new Intent(this, ConnectionService.class));
-            connectionServiceStarted = true;
-            connectionServiceOwner = this;
-        } catch (IllegalStateException | SecurityException error) {
-            android.util.Log.w("paxri", "Starting background device connections", error);
-        }
-    }
-
-    private void stopConnectionService() {
-        if (connectionServiceStarted) {
-            if (connectionServiceOwner == this) {
-                stopService(new Intent(this, ConnectionService.class));
-                connectionServiceOwner = null;
-            }
-            connectionServiceStarted = false;
-        }
-    }
-
     @Override
     protected void onDestroy() {
-        connectionHandler.removeCallbacks(stopConnections);
-        stopConnectionService();
+        if (isFinishing()) {
+            activityFinishing();
+        }
         if (bellRingtone != null) {
             bellRingtone.stop();
             bellRingtone = null;
@@ -224,7 +217,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     protected void onStart() {
         super.onStart();
         visible = true;
-        startConnectionServiceIfVisible();
+        ConnectionService.setActivityVisible(this, true);
         updateTerminalTouch();
         if (++startedActivities == 1) activityVisibilityChanged(true);
         try {
@@ -237,6 +230,20 @@ public final class PaxriActivity extends GpuiInputActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        batteryStatusChanged(isBatteryUnrestricted());
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            batteryStatusChanged(isBatteryUnrestricted());
+        }
+    }
+
+    @Override
     protected void onPause() {
         shortcutKeys.clear();
         if (keybar != null) keybar.cancelPendingInputEvents();
@@ -246,6 +253,7 @@ public final class PaxriActivity extends GpuiInputActivity {
     @Override
     protected void onStop() {
         visible = false;
+        ConnectionService.setActivityVisible(this, false);
         dismissTerminalTouch();
         if (--startedActivities == 0) activityVisibilityChanged(false);
         getContentResolver().unregisterContentObserver(nameObserver);
@@ -256,7 +264,9 @@ public final class PaxriActivity extends GpuiInputActivity {
     protected void onCreate(Bundle state) {
         System.loadLibrary("paxri_android");
         reportSystemTextSize();
+        ConnectionService.init(getApplicationContext());
         initVerifier(getApplicationContext());
+        initGatewayBridge(ConnectionService.class);
         publishDeviceName();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (state != null) scannedCode = state.getString("scannedCode");

@@ -227,7 +227,13 @@ impl Terminal {
             &self.runtime,
         );
         if self.viewport.size.width > px(0.) && self.viewport.size.height > px(0.) {
-            session.resize(self.grid_size().pty(self.emulator.font.cell));
+            let size = self.grid_size().pty(self.emulator.font.cell);
+            session.resize(portable_pty::PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+            });
         }
         self.session = Some(session);
         self.error = None;
@@ -465,7 +471,13 @@ impl Terminal {
         self.viewport = bounds;
         if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
             if let Some(session) = &mut self.session {
-                session.resize(grid.pty(self.emulator.font.cell));
+                let size = grid.pty(self.emulator.font.cell);
+                session.resize(portable_pty::PtySize {
+                    rows: size.rows,
+                    cols: size.cols,
+                    pixel_width: size.pixel_width,
+                    pixel_height: size.pixel_height,
+                });
             }
             if self.emulator.resize(grid) {
                 cx.notify();

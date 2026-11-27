@@ -5906,7 +5906,6 @@ dependencies = [
  "paxri-config",
  "paxri-control",
  "paxri-core",
- "portable-pty",
  "raw-window-handle",
  "serde",
  "serde_json",

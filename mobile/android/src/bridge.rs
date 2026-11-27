@@ -1,17 +1,118 @@
-//! JNI callbacks, Activity actions, and shared Android platform state.
+//! JNI callbacks, Activity actions, and Android gateway host bridge.
 use super::*;
+use crate::gateway::{GATEWAY, GatewayHost, ServiceState};
 use jni::{
-    EnvUnowned, jni_sig, jni_str,
+    EnvUnowned, JavaVM, jni_sig, jni_str,
     objects::{Global, JClass, JObject, JString},
 };
 use paxri_config::shortcuts::{ALT, CTRL, META, SHIFT};
 use std::sync::{
-    LazyLock, Mutex,
+    LazyLock, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 
 pub(crate) static ACTIVITY_VISIBLE: LazyLock<tokio::sync::watch::Sender<bool>> =
     LazyLock::new(|| tokio::sync::watch::channel(false).0);
+static BACKGROUNDED_AT: LazyLock<Mutex<Option<std::time::Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+static GATEWAY_JVM: OnceLock<JavaVM> = OnceLock::new();
+static CONNECTION_SERVICE_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
+
+pub(crate) fn take_background_duration() -> Option<std::time::Duration> {
+    BACKGROUNDED_AT
+        .lock()
+        .unwrap()
+        .take()
+        .map(|since| since.elapsed())
+}
+
+pub(crate) struct AndroidGatewayHost;
+
+impl GatewayHost for AndroidGatewayHost {
+    fn sync_service(&self, state: ServiceState) {
+        let (Some(vm), Some(service_class)) = (GATEWAY_JVM.get(), CONNECTION_SERVICE_CLASS.get())
+        else {
+            return;
+        };
+        let result = vm.attach_current_thread(|env: &mut jni::Env| {
+            env.call_static_method(
+                service_class,
+                jni_str!("syncGatewayState"),
+                jni_sig!("(ZZZII)V"),
+                &[
+                    state.running.into(),
+                    state.background_service.into(),
+                    state.screen_off_keep_alive.into(),
+                    (state.connected_count as i32).into(),
+                    (state.paired_count as i32).into(),
+                ],
+            )?;
+            Ok::<_, jni::errors::Error>(())
+        });
+        if let Err(error) = result {
+            log::warn!("Synchronizing Android gateway service: {error}");
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_initGatewayBridge(
+    mut env: EnvUnowned,
+    _class: JClass,
+    service_class: JClass,
+) {
+    env.with_env(|env| {
+        let vm = env.get_java_vm()?;
+        let _ = GATEWAY_JVM.set(vm);
+        if CONNECTION_SERVICE_CLASS.get().is_none() {
+            let global = env.new_global_ref(&service_class)?;
+            let _ = CONNECTION_SERVICE_CLASS.set(global);
+        }
+        Ok::<_, jni::errors::Error>(())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_ConnectionService_networkChanged(
+    _env: EnvUnowned,
+    _class: JClass,
+) {
+    GATEWAY.trigger_network_refresh();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_ConnectionService_stopRequested(
+    _env: EnvUnowned,
+    _class: JClass,
+) {
+    GATEWAY.stop();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_ConnectionService_taskRemoved(
+    _env: EnvUnowned,
+    _class: JClass,
+) {
+    GATEWAY.on_task_removed();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_activityFinishing(
+    _env: EnvUnowned,
+    _class: JClass,
+) {
+    GATEWAY.on_activity_finishing();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_paxri_android_PaxriActivity_batteryStatusChanged(
+    _env: EnvUnowned,
+    _class: JClass,
+    unrestricted: bool,
+) {
+    post(Update::BatteryStatus(unrestricted));
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_paxri_android_PaxriActivity_activityVisibilityChanged(
@@ -24,8 +125,13 @@ pub extern "system" fn Java_org_paxri_android_PaxriActivity_activityVisibilityCh
         *old = visible;
         changed
     });
-    if changed && visible {
-        post(Update::Resumed);
+    if changed {
+        if visible {
+            GATEWAY.sync_host();
+            post(Update::Resumed);
+        } else {
+            *BACKGROUNDED_AT.lock().unwrap() = Some(std::time::Instant::now());
+        }
     }
 }
 
@@ -283,10 +389,7 @@ pub(crate) enum ActivityAction<'a> {
     SaveZoom(f32),
     Scan,
     PairingReady,
-    DeviceConnections {
-        paired: bool,
-        connected: bool,
-    },
+    OpenBatterySettings,
     HardwareText(u64, &'a str),
     BackEnabled(bool),
     Appearance(bool, &'a theme::Palette),
@@ -336,6 +439,23 @@ pub(crate) fn load_terminal_zoom(app: &AndroidApp) -> f32 {
     .unwrap_or(1.)
 }
 
+pub(crate) fn load_battery_unrestricted(app: &AndroidApp) -> bool {
+    gpui_mobile::android::jni::with_env(|env| {
+        let raw = app.activity_as_ptr().cast();
+        let activity =
+            unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
+        env.call_method(
+            activity,
+            jni_str!("isBatteryUnrestricted"),
+            jni_sig!("()Z"),
+            &[],
+        )
+        .and_then(|value| value.z())
+        .map_err(|e| e.to_string())
+    })
+    .unwrap_or(false)
+}
+
 pub(crate) fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> Result<(), String> {
     gpui_mobile::android::jni::with_env(|env| {
         let raw = app.activity_as_ptr().cast();
@@ -343,11 +463,11 @@ pub(crate) fn activity_action(app: &AndroidApp, action: ActivityAction<'_>) -> R
         let activity =
             unsafe { env.as_cast_raw::<Global<JObject>>(&raw) }.map_err(|e| e.to_string())?;
         match action {
-            ActivityAction::DeviceConnections { paired, connected } => env.call_method(
+            ActivityAction::OpenBatterySettings => env.call_method(
                 activity,
-                jni_str!("setDeviceConnections"),
-                jni_sig!("(ZZ)V"),
-                &[paired.into(), connected.into()],
+                jni_str!("openBatterySettings"),
+                jni_sig!("()V"),
+                &[],
             ),
             ActivityAction::Toast(message) => {
                 let text = JString::from_str(env, message).map_err(|e| e.to_string())?;

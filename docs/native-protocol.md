@@ -15,6 +15,8 @@ Each computer owns one version 1 TOML file. For a working pair of device configu
 | `pending_unpairs.<device-id>` | Gateway-managed notice awaiting acknowledgement, with the peer ticket and pairing generation |
 | `gateway.startup` | `manual`, `gui`, `login`, or `system`. Use the GUI or CLI to also update OS registration |
 | `gateway.session_keep_alive` | How long hosted terminal sessions survive after their device disconnects: `5m` (default), `30m`, `1h`, `6h`, `24h`, or `forever`. Changes apply to running sessions |
+| `gateway.background_service` | Keep the embedded mobile gateway running in a background foreground service when switching apps or closing the window (default `true`) |
+| `gateway.screen_off_keep_alive` | Hold CPU and low-latency Wi-Fi locks while the embedded mobile gateway runs so screen-off does not drop connections (default `true`) |
 | `gateway.limits.max_peers` | Maximum paired devices allowed when adding new pairings (default `64`, range `1`–`256`) |
 | `gateway.limits.max_terminal_sessions` | Maximum concurrent hosted terminal and command sessions (default `16`, range `1`–`128`; takes effect on gateway restart) |
 | `gateway.limits.max_forwards` | Maximum forwarding rules stored in this node’s configuration when creating new rules (default `64`, range `1`–`256`) |

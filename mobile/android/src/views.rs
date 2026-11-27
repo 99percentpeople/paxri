@@ -72,8 +72,17 @@ impl Mobile {
                     .keys()
                     .filter(|id| self.presence.online(id))
                     .count();
-                let subtitle = (self.client.is_some() && total > 0)
-                    .then(|| format!("{connected} of {total} connected"));
+                let subtitle = match &self.gateway_status {
+                    GatewayStatus::Stopped => Some("Gateway stopped".to_owned()),
+                    GatewayStatus::Starting => Some("Starting gateway…".to_owned()),
+                    GatewayStatus::Stopping => Some("Stopping gateway…".to_owned()),
+                    GatewayStatus::Restarting => Some("Restarting gateway…".to_owned()),
+                    GatewayStatus::Failed(_) => Some("Gateway offline".to_owned()),
+                    GatewayStatus::Running { .. } => {
+                        (self.client.is_some() && total > 0)
+                            .then(|| format!("{connected} of {total} connected"))
+                    }
+                };
                 (SharedString::from("Devices"), subtitle, None, None)
             }
             Page::Sessions(origin) => (
@@ -356,10 +365,21 @@ impl Mobile {
         peers.sort_by_key(|(_, peer, changed)| (std::cmp::Reverse(*changed), &peer.name));
         let notice = if !peers.is_empty() || self.pairing.is_some() {
             None
-        } else if self.starting_network {
-            Some(ListState::loading("Starting network…"))
+        } else if self.gateway_status.is_transitioning() {
+            Some(ListState::loading(match &self.gateway_status {
+                GatewayStatus::Restarting => "Restarting gateway…",
+                GatewayStatus::Stopping => "Stopping gateway…",
+                _ => "Starting gateway…",
+            }))
+        } else if matches!(self.gateway_status, GatewayStatus::Stopped) {
+            Some(
+                ListState::empty(Icon::Server, "Gateway stopped")
+                    .detail("Start the gateway in Settings → Gateway to connect to paired devices."),
+            )
+        } else if let GatewayStatus::Failed(error) = &self.gateway_status {
+            Some(ListState::empty(Icon::Server, "Gateway offline").detail(error.clone()))
         } else if self.client.is_none() {
-            Some(ListState::empty(Icon::Server, "Network unavailable"))
+            Some(ListState::empty(Icon::Server, "Gateway unavailable"))
         } else if self.peers.is_empty() {
             Some(ListState::empty(Icon::Monitor, "No paired devices").detail("Tap + to pair a computer."))
         } else {
@@ -390,6 +410,40 @@ impl Mobile {
             .px_3()
             .pt_2()
             .gap_2()
+            .when(
+                matches!(
+                    self.gateway_status,
+                    GatewayStatus::Stopped | GatewayStatus::Failed(_)
+                ) && !self.peers.is_empty(),
+                |page| {
+                    page.child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(ui.colors.border))
+                            .bg(rgb(ui.colors.card))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                ui.muted(match &self.gateway_status {
+                                    GatewayStatus::Failed(err) => err.clone(),
+                                    _ => "Gateway is stopped.".to_owned(),
+                                })
+                                .flex_1()
+                                .min_w_0(),
+                            )
+                            .child(
+                                ui.button(Secondary, "devices-start-gateway", "Start gateway")
+                                    .on_click(cx.listener(|_, _, _, _| GATEWAY.start())),
+                            ),
+                    )
+                },
+            )
             .when(!self.peers.is_empty(), |page| {
                 page.child(
                     filters

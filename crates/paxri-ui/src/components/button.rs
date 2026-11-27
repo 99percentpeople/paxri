@@ -31,6 +31,7 @@ pub struct Button {
     leading: Option<Icon>,
     trailing: Option<Icon>,
     pressed: bool,
+    disabled: bool,
     layout: ButtonLayout,
 }
 
@@ -67,6 +68,7 @@ impl Ui {
             leading: None,
             trailing: None,
             pressed: false,
+            disabled: false,
             layout: ButtonLayout::Label,
         }
     }
@@ -144,6 +146,11 @@ impl Button {
 
     pub fn pressed(mut self, pressed: bool) -> Self {
         self.pressed = pressed;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -233,18 +240,25 @@ impl RenderOnce for Button {
                 matches!(self.layout, ButtonLayout::Card) && self.pressed,
                 |button| button.border_color(rgb(colors.canvas.foreground)),
             )
-            .cursor_pointer()
+            .when(self.disabled, |button| {
+                button.tab_stop(false).opacity(0.45).cursor_default()
+            })
+            .when(!self.disabled, |button| button.cursor_pointer())
             .whitespace_nowrap()
             .text_role(TextRole::Label)
             .when_some(background, |button, color| button.bg(rgb(color)))
             .text_color(rgb(pair.foreground))
-            .when(!self.pressed, |button| button.hover(|s| s.bg(rgb(hover_background))))
+            .when(!self.disabled && !self.pressed, |button| {
+                button.hover(|s| s.bg(rgb(hover_background)))
+            })
             .when(
-                list_row || !matches!(self.variant, ButtonVariant::Ghost)
-                    || matches!(self.layout, ButtonLayout::Circular),
+                !self.disabled
+                    && (list_row
+                        || !matches!(self.variant, ButtonVariant::Ghost)
+                        || matches!(self.layout, ButtonLayout::Circular)),
                 |button| button.active(|s| s.bg(rgb(hover))),
             )
-            .when(focus::keyboard_focus_visible(window, cx), |button| {
+            .when(!self.disabled && focus::keyboard_focus_visible(window, cx), |button| {
                 button.focus(|s| s.border_color(rgb(focus_border)))
             })
             .when_some(self.leading, |button, icon| button.child(icon.draw(16.)))

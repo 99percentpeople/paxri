@@ -12,10 +12,17 @@ use alacritty_terminal::{
     },
     vte::ansi::{Color, CursorStyle, NamedColor, Processor, Rgb},
 };
-use portable_pty::PtySize;
 use std::{cell::RefCell, rc::Rc};
 mod redraw;
 use redraw::{Boundary, Redraw};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub cols: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
+}
 
 #[derive(Clone, Copy)]
 pub struct GridSize {
@@ -32,8 +39,8 @@ impl GridSize {
         }
     }
 
-    pub fn pty(self, cell: CellSize) -> PtySize {
-        PtySize {
+    pub fn pty(self, cell: CellSize) -> TerminalSize {
+        TerminalSize {
             rows: self.rows,
             cols: self.cols,
             pixel_width: self.cols * cell.width.round() as u16,

@@ -90,7 +90,7 @@ The ARM64 Android client uses GPUI for the device list and terminal, the Android
 
 On the **Devices** home screen, search the device list or filter by operating system. Open **Sessions** from the navigation menu for the same session search, filters, and floating terminal button as on desktop. Use the session row menu to end or rename a session. **Rename session** is also available in the terminal menu. A manual name stays with that session across app restarts. Clear the name to follow the terminal title again.
 
-While a paired device is connected, Android uses a connected-device foreground service so switching apps leaves the transport and open terminals running. The service allows five minutes for a lost connection to return. Removing the last pairing or dismissing the app from Recents stops the service.
+Android runs an embedded background gateway decoupled from the UI activity and hosted by a silent connected-device foreground service (`ConnectionService`), mirroring the desktop gateway model. Open **Settings → Gateway** to inspect status, diagnostics and the **Device ID**, **Start** / **Stop** / **Restart** the gateway, toggle **Background service** (`gateway.background_service`, keeps the gateway alive across app switches, activity recreations, and dismissing the app from Recents), toggle **Screen-off keep-alive** (`gateway.screen_off_keep_alive`, holds CPU and low-latency Wi-Fi locks while running), or open **Battery optimization** to allow unrestricted background activity. The service monitors system network changes in the background without prompting for notification permissions on Android 13+.
 
 Download `paxri-android-arm64.apk` from the rolling prerelease. Rolling builds use a fixed signing key so you can install updates over an existing fixed-signature build and keep your pairings and settings. Moving from an earlier development-signed APK requires a one-time uninstall, which clears its app data. Pull requests still produce a development-signed APK. [Rolling prerelease](../../releases/tag/rolling) · [Build runs](../../actions/workflows/builds.yml)
 
@@ -121,7 +121,7 @@ rows = [
 ]
 ```
 
-To use a private relay on Android, open **Settings → Network** and set **Relay URL** to an `http` or `https` URL with a host. Leave it blank to use automatic public relay selection. The setting is saved as `relay_url` under `[native]` in `files/node.toml` and takes effect after restarting the app.
+To use a private relay on Android, open **Settings → Network** and set **Relay URL** to an `http` or `https` URL with a host. Leave it blank to use automatic public relay selection. The setting is saved as `relay_url` under `[native]` in `files/node.toml` and takes effect after restarting the gateway in **Settings → Gateway** (or tapping **Restart gateway** below the field).
 
 The terminal header shows the active path. Public relays use Android's certificate verifier. The APK includes the verifier's network security resource so Android can retrieve signed revocation lists from the certificate authorities listed by the verifier.
 
