@@ -13,7 +13,7 @@ Each build is identified by its Git commit. Cargo uses `0.0.0-dev` as the worksp
 
 Desktop and Android share the workspace-pinned `gpui-pre` core. Linux desktop builds use the wgpu renderer with the X11 and Wayland backends. Windows uses DirectX and macOS uses Metal. Android keeps its `gpui-mobile` backend. [Shared GPUI patches](../compat/gpui-pre/LOCAL_CHANGES.md)
 
-Native CI jobs use `target/ci-native/` on every platform, with separate caches per matrix target. Local native packaging accepts `CARGO_TARGET_DIR`. Cargo output and Android build intermediates live under `target/` by default. The Android builder keeps its development keystore and the output of `--unsigned-release` in `target/android/`.
+Native CI jobs use `target/ci-native/` on every platform, with separate caches per matrix target. **Native tests** uses a separate cache for Cargo downloads and compiled dependencies. It keeps the test and gateway binaries under the default `target/` directory. Local native packaging accepts `CARGO_TARGET_DIR`. Cargo output and Android build intermediates live under `target/` by default. The Android builder keeps its development keystore and the output of `--unsigned-release` in `target/android/`.
 
 ## Run the workflow
 
@@ -23,7 +23,7 @@ Different commits can build concurrently. Rebuilds of the same commit on the sam
 
 The workflow manages all attachments on the `rolling` prerelease. It verifies every current file against its SHA-256 digest, updates the release, then deletes attachments absent from the new build. Retrying a run resumes an interrupted cleanup.
 
-You can also start **Build** manually. A manual run on another branch uploads the packages as Actions artifacts. [Build runs](../../../actions/workflows/builds.yml)
+Pushes to `ci/android-jvm-cache` run all platform builds and upload the packages and checksums as Actions artifacts without updating `rolling` or pushing images to GHCR. You can also start **Build** manually on another branch to produce the same preview artifacts. [Build runs](../../../actions/workflows/builds.yml)
 
 Both paths collect the platform artifacts once. Collection checks the filenames before generating checksums. When adding a target, update the build matrix and the expected package list together. [Package collection](../.github/actions/collect-build/action.yml)
 
@@ -40,11 +40,15 @@ Before setting up the toolchain, Android CI restores the AAR and JAR cache, chec
 
 Run `python3 mobile/android/build.py --fetch-dependencies` to prepare these files locally without the Android SDK or Rust. Update the verifier AAR in the manifest if `rustls-platform-verifier-android` changes in `Cargo.lock`.
 
+Android CI uses SDK Platform 35, Build Tools 35.0.0 and NDK r27d (`27.3.13750724`). It uses the copies on the runner when available and runs `sdkmanager` only for missing packages.
+
+The Android Rust cache stores Cargo registry and Git downloads, patched sources under `target/android/patched-sources/`, and compiled dependencies under `target/android/cargo/`. The `android-dev` and `android-release` profiles have separate cache keys. The keys also separate toolchains and NDK versions. Cargo still checks what needs rebuilding. Local workspace crates and the final native library can rebuild on a fresh checkout, and CI always packages the APK again. The Rust cache does not include APKs or signing keys.
+
 The desktop and Android terminals embed the same Cascadia Mono PL subset. Ordinary text uses the selected or system monospace font. Box drawing, blocks, Braille and common prompt symbols use the bundled face. The renderer fits box drawing, block elements and the four basic Powerline separators to the terminal grid at the selected line height and zoom. Other scripts and emoji use the installed system fonts.
 
 To regenerate the subset, run `python3 crates/paxri-ui/fonts/subset.py /path/to/CascadiaMonoPL-Regular.ttf` with fontTools and the static Regular face from Cascadia Code v2407.24. The APK and desktop packages include the SIL Open Font License. [Upstream font release](https://github.com/microsoft/cascadia-code/releases/tag/v2407.24)
 
-The `android-signing` GitHub Actions environment allows only the `main` branch. It stores `ANDROID_KEYSTORE_BASE64` (the base64-encoded PKCS#12 keystore with alias `paxri-release`) and `ANDROID_KEYSTORE_PASSWORD`. Main builds sign the APK and check its certificate SHA-256 against the public fingerprint in the workflow before uploading it. PRs and manual runs on other branches use a development key. To restore release signing in another repository, configure the same secrets from the original keystore and password. [Build workflow](../.github/workflows/builds.yml)
+The `android-signing` GitHub Actions environment allows only the `main` branch. It stores `ANDROID_KEYSTORE_BASE64` (the base64-encoded PKCS#12 keystore with alias `paxri-release`) and `ANDROID_KEYSTORE_PASSWORD`. Main builds sign the APK and check its certificate SHA-256 against the public fingerprint in the workflow before uploading it. Pull requests and builds on other branches use a development key. To restore release signing in another repository, configure the same secrets from the original keystore and password. [Build workflow](../.github/workflows/builds.yml)
 
 ## Download a build
 
@@ -59,4 +63,6 @@ gh release download rolling --pattern paxri-linux-arm64-musl.tar.gz --pattern SH
 
 ## Docker images
 
-Pushes to `main` and manual runs upload offline Docker images for Linux AMD64 and ARM64. A successful run on `main` also publishes a multi-platform image to GHCR. Use `ghcr.io/99percentpeople/paxri:dev` for the most recently packaged main build. Use `sha-<full Git commit>` or the run's `build.env` to select a particular build. [Installation and offline loading](installation.md)
+Full builds upload offline Docker images for Linux AMD64 and ARM64. The Docker jobs wait for the native jobs and package `paxri` and `paxri-gateway` from the matching Linux glibc archive in the same run. They do not download Cargo dependencies or compile Rust again. A local `docker build .` still compiles from source and reuses Cargo downloads and compiled artifacts on the same BuildKit builder.
+
+A successful run on `main` also publishes a multi-platform image to GHCR. Use `ghcr.io/99percentpeople/paxri:dev` for the most recently packaged main build. Use `sha-<full Git commit>` or the run's `build.env` to select a particular build. [Installation and offline loading](installation.md)

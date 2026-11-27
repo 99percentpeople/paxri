@@ -56,10 +56,13 @@ def patched_source(package):
     name = package["name"]
     directory = APP / "patches" / name
     patches = [directory / filename for filename in PATCH_SERIES[name]]
-    digest = hashlib.sha256(b"\0".join(patch.read_bytes() for patch in patches)).hexdigest()[:16]
-    cache = OUT / "dependencies"
+    # The locked source distinguishes Git revisions even when their versions match.
+    identity = f"{package['id']}\0{package['source']}".encode()
+    inputs = [identity, *(patch.read_bytes() for patch in patches)]
+    digest = hashlib.sha256(b"\0".join(inputs)).hexdigest()[:16]
+    cache = OUT / "patched-sources"
     cache.mkdir(exist_ok=True)
-    source = cache / f"{package['name']}-{package['version']}-{digest}"
+    source = cache / f"{name}-{package['version']}-{digest}"
     if not source.is_dir():
         with tempfile.TemporaryDirectory(dir=cache) as tmp:
             staged = Path(tmp) / "gpui"
