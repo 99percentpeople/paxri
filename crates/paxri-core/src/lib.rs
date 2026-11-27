@@ -17,6 +17,7 @@ pub mod connection;
 pub mod reverse;
 
 pub mod session;
+pub use paxri_config::limits;
 pub use session::{PeerSession, StreamKind, Transport};
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const TARGET_CONNECT: Duration = Duration::from_secs(6);

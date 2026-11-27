@@ -214,7 +214,15 @@ impl SettingsFile {
             }
             _ => anyhow::bail!("Expected a settings change"),
         }
-        checked_document(doc)
+        let (text, config) = checked_document(doc)?;
+        if matches!(change, Command::SaveForward { edit: false, .. }) {
+            let max_forwards = config.gateway.limits.max_forwards;
+            ensure!(
+                config.forwards.len() <= max_forwards,
+                "Forwarding rule limit reached ({max_forwards}). Remove an existing rule first."
+            );
+        }
+        Ok((text, config))
     }
 
     #[cfg(test)]
@@ -395,4 +403,63 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn save_forward_enforces_max_forwards_only_on_creation() -> Result<()> {
+        let id = "ab".repeat(32);
+        let mut file = SettingsFile {
+            path: PathBuf::new(),
+            text: format!(
+                "version=1\n[gateway.limits]\nmax_forwards=1\n[peers.lab]\nendpoint_id='{id}'\n"
+            ),
+        };
+        let (text, _) = file.prepare(&Command::SaveForward {
+            id: "r1".into(),
+            expected_peer: None,
+            edit: false,
+            rule: paxri_config::Forward {
+                name: None,
+                direction: Direction::Local,
+                listen: "127.0.0.1:0".parse()?,
+                peer: "lab".into(),
+                target: "127.0.0.1:8080".into(),
+            },
+        })?;
+        file.text = text;
+        let overflow = file.prepare(&Command::SaveForward {
+            id: "r2".into(),
+            expected_peer: None,
+            edit: false,
+            rule: paxri_config::Forward {
+                name: None,
+                direction: Direction::Local,
+                listen: "127.0.0.1:0".parse()?,
+                peer: "lab".into(),
+                target: "127.0.0.1:8081".into(),
+            },
+        });
+        assert!(overflow.is_err());
+        assert!(
+            file.prepare(&Command::SaveForward {
+                id: "r1".into(),
+                expected_peer: None,
+                edit: true,
+                rule: paxri_config::Forward {
+                    name: Some("Edited".into()),
+                    direction: Direction::Local,
+                    listen: "127.0.0.1:0".parse()?,
+                    peer: "lab".into(),
+                    target: "127.0.0.1:8082".into(),
+                },
+            })
+            .is_ok()
+        );
+        assert!(
+            file.prepare(&Command::RemoveForward {
+                id: "r1".into(),
+                expected_peer: None,
+            })
+            .is_ok()
+        );
+        Ok(())
+    }
 }

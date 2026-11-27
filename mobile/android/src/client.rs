@@ -229,7 +229,9 @@ impl Client {
         let weak = Arc::downgrade(&client);
         tokio::spawn(async move {
             let mut flows = tokio::task::JoinSet::new();
-            let slots = Arc::new(tokio::sync::Semaphore::new(256));
+            let slots = Arc::new(tokio::sync::Semaphore::new(
+                paxri_config::limits::DEFAULT_MAX_CONCURRENT_STREAMS,
+            ));
             let Some(client) = weak.upgrade() else { return };
             let config = client.transport.subscribe_config();
             let listeners = Arc::new(paxri_core::reverse::Listeners::new(
@@ -571,7 +573,15 @@ impl Client {
     pub async fn pair(&self, invite: Invitation, mut cancel: oneshot::Receiver<()>) -> Result<Option<Peers>> {
         let id = invite.ticket.endpoint_addr().id.to_string();
         ensure!(id != self.transport.id(), "Choose another device’s invitation");
-        ensure!(!self.devices.lock().await.peers.contains_key(&id), "Device already paired");
+        {
+            let devices = self.devices.lock().await;
+            ensure!(!devices.peers.contains_key(&id), "Device already paired");
+            ensure!(
+                devices.peers.len() < paxri_config::limits::DEFAULT_MAX_PEERS,
+                "Paired device limit reached ({}). Remove an existing device first.",
+                paxri_config::limits::DEFAULT_MAX_PEERS
+            );
+        }
         let attempt = uuid::Uuid::new_v4().simple().to_string();
         let local = self
             .transport
@@ -626,6 +636,13 @@ impl Client {
         let (snapshot, ()) = self
             .update_devices(
                 |devices| {
+                    if !devices.peers.contains_key(&id) {
+                        ensure!(
+                            devices.peers.len() < paxri_config::limits::DEFAULT_MAX_PEERS,
+                            "Paired device limit reached ({}). Remove an existing device first.",
+                            paxri_config::limits::DEFAULT_MAX_PEERS
+                        );
+                    }
                     let mut next = devices.clone();
                     next.pending_unpairs.remove(&id);
                     next.peers.insert(

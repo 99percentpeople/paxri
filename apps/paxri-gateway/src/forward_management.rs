@@ -77,7 +77,7 @@ async fn apply(
             direction,
         } => {
             let name = normalize_name(name)?;
-            Gateway::change_settings(
+            Gateway::change_settings_for_peer(
                 gateway,
                 Command::SaveForward {
                     id: String::new(),
@@ -198,3 +198,57 @@ pub(super) async fn change(
     Ok(Gateway::status_snapshot(gateway).await)
 }
 
+pub(crate) fn peer_forward_count(config: &paxri_config::Config, endpoint_id: &str) -> usize {
+    config
+        .forwards
+        .values()
+        .filter(|existing| {
+            config
+                .peers
+                .get(&existing.peer)
+                .is_some_and(|p| p.endpoint_id.eq_ignore_ascii_case(endpoint_id))
+        })
+        .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_forward_count_aggregates_aliases_for_same_identity() {
+        let id_a = "aa".repeat(32);
+        let id_b = "bb".repeat(32);
+        let cfg = paxri_config::parse(&format!(
+            "\
+version = 1
+[gateway.limits]
+max_forwards = 10
+max_forwards_per_peer = 2
+[peers.a1]
+endpoint_id = '{id_a}'
+[peers.a2]
+endpoint_id = '{id_a}'
+[peers.b]
+endpoint_id = '{id_b}'
+[forwards.r1]
+listen = '127.0.0.1:0'
+peer = 'a1'
+target = '127.0.0.1:8080'
+[forwards.r2]
+listen = '127.0.0.1:0'
+peer = 'a2'
+target = '127.0.0.1:8081'
+[forwards.r3]
+listen = '127.0.0.1:0'
+peer = 'b'
+target = '127.0.0.1:8082'
+"
+        ))
+        .unwrap();
+        assert_eq!(peer_forward_count(&cfg, &id_a.to_uppercase()), 2);
+        assert_eq!(peer_forward_count(&cfg, &id_b), 1);
+        assert_eq!(cfg.gateway.limits.effective_max_forwards_per_peer(), 2);
+        assert!(peer_forward_count(&cfg, &id_a) >= cfg.gateway.limits.effective_max_forwards_per_peer());
+    }
+}

@@ -99,6 +99,14 @@ impl Pairings {
             let _ = reply.send(decision.clone());
             return;
         }
+        if !self.pending.contains_key(&id)
+            && self.pending.len() >= paxri_config::limits::DEFAULT_MAX_PENDING_PAIRINGS
+        {
+            let _ = reply.send(Decision::Rejected(
+                "Too many pending pairing requests. Try again shortly.".into(),
+            ));
+            return;
+        }
         let pending = self.pending.entry(id).or_insert_with(|| Pending {
             request_id: request_id.clone(),
             peer,
@@ -268,6 +276,11 @@ impl Gateway {
                 {
                     name.clone()
                 } else {
+                    let max_peers = g.config.gateway.limits.max_peers;
+                    ensure!(
+                        peers.len() < max_peers,
+                        "Paired device limit reached ({max_peers}). Unpair an existing device first."
+                    );
                     let name = peer_clone.name.trim();
                     let mut alias = name.to_owned();
                     for suffix in 2.. {
@@ -350,6 +363,13 @@ impl Gateway {
         let invite = Invitation::parse(code)?;
         let id = invite.ticket.endpoint_addr().id.to_string();
         ensure!(id != self.transport.id(), "Cannot pair with this device");
+        if !self.config.is_paired(&id) {
+            let max_peers = self.config.gateway.limits.max_peers;
+            ensure!(
+                self.config.peers.len() < max_peers,
+                "Paired device limit reached ({max_peers}). Unpair an existing device first."
+            );
+        }
         let local = self.contact();
         let transport = self.transport.clone();
         let gateway = Arc::downgrade(gateway);
@@ -455,4 +475,53 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn receive_caps_pending_pairing_requests() -> Result<()> {
+        let mut pairings = Pairings {
+            token: Some("0".repeat(32)),
+            ..Default::default()
+        };
+        let mut receivers = Vec::new();
+        for i in 0..paxri_config::limits::DEFAULT_MAX_PENDING_PAIRINGS {
+            let dir = tempfile::tempdir()?;
+            let key = paxri_native::identity::init(&dir.path().join("device.key"))?;
+            let (reply, rx) = oneshot::channel();
+            receivers.push(rx);
+            pairings.receive(JoinRequest {
+                token: "0".repeat(32),
+                request_id: format!("req-{i}"),
+                peer: Contact {
+                    name: format!("Dev-{i}"),
+                    ticket: EndpointTicket::new(key.public().into()),
+                    platform: DevicePlatform::Linux,
+                    capabilities: DeviceCapabilities::default(),
+                },
+                reply,
+            });
+        }
+        assert_eq!(
+            pairings.pending.len(),
+            paxri_config::limits::DEFAULT_MAX_PENDING_PAIRINGS
+        );
+        let dir = tempfile::tempdir()?;
+        let key = paxri_native::identity::init(&dir.path().join("device.key"))?;
+        let (reply, mut rx) = oneshot::channel();
+        pairings.receive(JoinRequest {
+            token: "0".repeat(32),
+            request_id: "overflow".into(),
+            peer: Contact {
+                name: "Extra".into(),
+                ticket: EndpointTicket::new(key.public().into()),
+                platform: DevicePlatform::Linux,
+                capabilities: DeviceCapabilities::default(),
+            },
+            reply,
+        });
+        assert!(matches!(rx.try_recv(), Ok(Decision::Rejected(_))));
+        assert_eq!(
+            pairings.pending.len(),
+            paxri_config::limits::DEFAULT_MAX_PENDING_PAIRINGS
+        );
+        Ok(())
+    }
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 pub struct GatewaySettings {
     pub startup: Startup,
     pub session_keep_alive: SessionKeepAlive,
+    pub limits: crate::limits::Limits,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

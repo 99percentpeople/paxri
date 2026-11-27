@@ -99,11 +99,15 @@ pub(super) struct Terminals {
 }
 
 impl Terminals {
-    pub(super) fn new(config: watch::Receiver<Arc<Config>>, tools: SessionTools) -> Self {
+    pub(super) fn new(
+        config: watch::Receiver<Arc<Config>>,
+        tools: SessionTools,
+        max_sessions: usize,
+    ) -> Self {
         Self {
             config,
             tools,
-            slots: Arc::new(Semaphore::new(wire::managed::SESSION_LIMIT)),
+            slots: Arc::new(Semaphore::new(max_sessions.max(1))),
         }
     }
 

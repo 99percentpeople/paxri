@@ -11,7 +11,7 @@ use tokio::{
 };
 
 pub const HISTORY_LIMIT: usize = 256 * 1024;
-pub const SESSION_LIMIT: usize = 16;
+pub const SESSION_LIMIT: usize = paxri_core::limits::DEFAULT_MAX_TERMINAL_SESSIONS;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const INITIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const KEEPALIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(6);

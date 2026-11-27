@@ -7,6 +7,7 @@ use url::{Host, Url};
 pub mod file;
 pub mod gui;
 pub mod keybar;
+pub mod limits;
 pub mod shortcuts;
 pub mod peer_id;
 pub mod startup;
@@ -245,6 +246,7 @@ pub fn tcp_target(input: &str) -> Result<String, String> {
 pub fn parse(input: &str) -> Result<Config, String> {
     let mut config: Config = toml::from_str(input).map_err(|e| format!("{e}"))?;
     config.gui.validate()?;
+    config.gateway.limits.validate()?;
     if config.version != 1 {
         return Err(format!(
             "unsupported configuration version {}",

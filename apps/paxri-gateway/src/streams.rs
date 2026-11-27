@@ -24,14 +24,26 @@ pub async fn serve<S: PeerSession>(
     gateway: Arc<tokio::sync::Mutex<crate::Gateway>>,
     tools: SessionTools,
 ) {
-    let limit = Arc::new(Semaphore::new(256));
-    let terminals = Arc::new(Terminals::new(config.clone(), tools));
-    let (transport, keep_alive) = {
+    let (transport, keep_alive, limits) = {
         let state = gateway.lock().await;
-        (state.transport.clone(), state.session_keep_alive.subscribe())
+        (
+            state.transport.clone(),
+            state.session_keep_alive.subscribe(),
+            state.config.gateway.limits,
+        )
     };
+    let limit = Arc::new(Semaphore::new(limits.max_concurrent_streams));
+    let terminals = Arc::new(Terminals::new(
+        config.clone(),
+        tools,
+        limits.max_terminal_sessions,
+    ));
     let managed = Arc::new(crate::terminal::managed::Registry::new(transport, keep_alive));
-    let listeners = Arc::new(Listeners::new(config.clone(), limit.clone()));
+    let listeners = Arc::new(Listeners::with_limit(
+        config.clone(),
+        limit.clone(),
+        limits.max_reverse_listeners,
+    ));
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {

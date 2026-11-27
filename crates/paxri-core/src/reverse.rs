@@ -76,9 +76,21 @@ pub struct Listeners {
 
 impl Listeners {
     pub fn new(config: watch::Receiver<Arc<Config>>, streams: Arc<Semaphore>) -> Self {
+        Self::with_limit(
+            config,
+            streams,
+            paxri_config::limits::DEFAULT_MAX_REVERSE_LISTENERS,
+        )
+    }
+
+    pub fn with_limit(
+        config: watch::Receiver<Arc<Config>>,
+        streams: Arc<Semaphore>,
+        max_listeners: usize,
+    ) -> Self {
         Self {
             config,
-            listeners: Semaphore::new(64),
+            listeners: Semaphore::new(max_listeners.max(1)),
             streams,
         }
     }

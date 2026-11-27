@@ -26,6 +26,7 @@ pub fn read_local(path: &Path) -> Result<LocalSettings> {
         Ok(text) => {
             let settings: LocalSettings = toml::from_str(&text)?;
             settings.gui.validate().map_err(anyhow::Error::msg)?;
+            settings.gateway.limits.validate().map_err(anyhow::Error::msg)?;
             Ok(settings)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings::default()),
@@ -415,6 +416,41 @@ mod network_tests {
             SessionKeepAlive::Forever
         );
         assert!(crate::parse(&saved.replace("forever", "invalid")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_limits_load_validate_and_survive_gateway_saves() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("node.toml");
+        let initial = "\
+version = 1
+[gateway]
+startup = 'manual'
+[gateway.limits]
+max_peers = 12 # custom cap
+max_terminal_sessions = 24
+max_forwards = 20
+max_forwards_per_peer = 5
+max_reverse_listeners = 10
+max_concurrent_streams = 128
+";
+        fs::write(&path, initial)?;
+        let local = read_local(&path)?;
+        assert_eq!(local.gateway.limits.max_peers, 12);
+        assert_eq!(local.gateway.limits.max_terminal_sessions, 24);
+        assert_eq!(local.gateway.limits.max_forwards, 20);
+        assert_eq!(local.gateway.limits.effective_max_forwards_per_peer(), 5);
+        assert_eq!(local.gateway.limits.max_reverse_listeners, 10);
+        assert_eq!(local.gateway.limits.max_concurrent_streams, 128);
+
+        save_gateway(&path, initial, format!("device_name = 'srv'\n{initial}"))?;
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.contains("# custom cap"));
+        let parsed = crate::parse(&saved).unwrap();
+        assert_eq!(parsed.gateway.limits, local.gateway.limits);
+        assert!(crate::parse(&saved.replace("max_peers = 12", "max_peers = 0")).is_err());
+        assert!(crate::parse(&saved.replace("max_forwards = 20", "max_forwards = 999")).is_err());
         Ok(())
     }
 }

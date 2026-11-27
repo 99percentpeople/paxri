@@ -361,7 +361,22 @@ impl Gateway {
         }
     }
 
-    async fn change_settings(gateway: &Mutex<Self>, mut change: Command) -> Result<()> {
+    async fn change_settings(gateway: &Mutex<Self>, change: Command) -> Result<()> {
+        Self::change_settings_inner(gateway, change, false).await
+    }
+
+    pub(crate) async fn change_settings_for_peer(
+        gateway: &Mutex<Self>,
+        change: Command,
+    ) -> Result<()> {
+        Self::change_settings_inner(gateway, change, true).await
+    }
+
+    async fn change_settings_inner(
+        gateway: &Mutex<Self>,
+        mut change: Command,
+        enforce_per_peer_limit: bool,
+    ) -> Result<()> {
         let _io = lock_config_io(gateway).await;
         let (path, base_text, next_text, config, replace, bind_plan) = {
             let g = gateway.lock().await;
@@ -384,6 +399,22 @@ impl Gateway {
             } = &change
             {
                 g.check_forward_peer(id, expected_peer.as_deref())?;
+            }
+            if enforce_per_peer_limit
+                && let Command::SaveForward {
+                    edit: false,
+                    rule: Forward { peer, .. },
+                    ..
+                } = &change
+                && let Some(target_peer) = g.config.peers.get(peer)
+            {
+                let limit = g.config.gateway.limits.effective_max_forwards_per_peer();
+                let count =
+                    forward_management::peer_forward_count(&g.config, &target_peer.endpoint_id);
+                anyhow::ensure!(
+                    count < limit,
+                    "Forwarding rule limit for this device reached ({limit}). Remove an existing rule first."
+                );
             }
             if let Command::SaveForward {
                 id,
@@ -1109,7 +1140,7 @@ async fn run(
         device_info: device_info.clone(),
         listeners: BTreeMap::new(),
         reverse_routes: routes.clone(),
-        streams: Arc::new(Semaphore::new(256)),
+        streams: Arc::new(Semaphore::new(config.gateway.limits.max_concurrent_streams)),
     }));
     if let Err(e) = Gateway::init_pairing(&gateway).await {
         gateway.lock().await.pairing.message = Some(format!("Pairing code unavailable: {e:#}"));
@@ -1148,7 +1179,9 @@ async fn run(
     clients.spawn(streams::serve(
         stream_rx, stream_config, routes, gateway.clone(), tools,
     ));
-    let management = Arc::new(Semaphore::new(32));
+    let management = Arc::new(Semaphore::new(
+        paxri_config::limits::DEFAULT_MAX_MANAGEMENT_CONNECTIONS,
+    ));
     clients.spawn(platforms::fill_missing(gateway.clone()));
     clients.spawn(unpair::retry_pending(gateway.clone()));
     // Run periodic disk persistence on dedicated background tasks so the main accept loop never stalls.
