@@ -176,7 +176,14 @@ pub fn category_button(
         .gap_1()
         .child(single_line(div()).child(label))
         .when(layout == super::SettingsLayout::Mobile, |row| {
-            row.child(Icon::ChevronRight.draw(16.))
+            row.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .text_color(rgb(ui.colors.muted_foreground))
+                    .child(Icon::ChevronRight.draw(14.)),
+            )
         })
         .when_some(count, |d, n| d.child(ui.caption(n.to_string())));
     ui.button(Ghost, id, text)

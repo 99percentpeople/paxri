@@ -347,6 +347,7 @@ impl Dashboard {
             .map(|(owner, id, rule)| {
                 let owner = owner.map(String::as_str);
                 let display_name = s.peer_display_name(&rule.peer);
+                let platform = s.peer_platform(&rule.peer);
                 let title = rule.display_name(id);
                 let actions = self.port_actions(id, &title, owner, rule, display_name, cx);
                 ui.forwarding_row(
@@ -354,6 +355,7 @@ impl Dashboard {
                     &title,
                     rule,
                     display_name,
+                    platform,
                     narrow,
                     actions,
                 )

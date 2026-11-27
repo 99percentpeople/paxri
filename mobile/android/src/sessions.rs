@@ -845,6 +845,7 @@ impl Mobile {
             .when(!rows.is_empty(), |page| {
                 page.child(
                     ListView::scrollable("session-list")
+                        .divided()
                         .with_floating_action(has_action)
                         .children(rows),
                 )

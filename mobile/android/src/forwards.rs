@@ -183,7 +183,7 @@ impl Mobile {
         let mut pending = false;
         let mut failures = Vec::new();
         let mut rows = Vec::new();
-        for (id, name, _) in &options {
+        for (id, name, platform) in &options {
             let Some(entry) = self.forwards.entries.get(id) else {
                 continue;
             };
@@ -242,6 +242,7 @@ impl Mobile {
                         &title,
                         rule,
                         name,
+                        *platform,
                         narrow,
                         menu,
                     ));

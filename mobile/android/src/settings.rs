@@ -1,6 +1,6 @@
 use super::*;
 use paxri_config::{NativeChange, file, gui::GuiChange, startup::GatewayChange};
-use paxri_ui::components::{ButtonVariant, Icon, actions};
+use paxri_ui::components::{ButtonVariant, Icon, ListView, actions};
 use paxri_ui::settings::controls::theme_cards;
 use paxri_ui::{
     settings::{SettingsGroup, SettingsLayout, SettingsPage, SettingsSection, catalog},
@@ -514,58 +514,63 @@ impl Mobile {
         }
         let pages = SettingsPage::collect(groups);
         let mut body = Self::settings_column();
-        for page in pages {
-            let section = page.section;
-            if selected.is_none() {
-                body = body.child(
-                    paxri_ui::settings::controls::category_button(
-                        ui,
-                        Some(section),
-                        false,
-                        None,
-                        SettingsLayout::Mobile,
-                    )
-                    .role(Role::Button)
-                    .aria_label(section.title)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.navigate(Page::SettingsCategory(section), cx);
-                        cx.notify();
-                    })),
-                );
-            } else if selected == Some(section) {
-                body = body.child(page.render(ui, SettingsLayout::Mobile));
+        if selected.is_none() {
+            let categories = pages.into_iter().map(|page| {
+                let section = page.section;
+                paxri_ui::settings::controls::category_button(
+                    ui,
+                    Some(section),
+                    false,
+                    None,
+                    SettingsLayout::Mobile,
+                )
+                .role(Role::Button)
+                .aria_label(section.title)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.navigate(Page::SettingsCategory(section), cx);
+                    cx.notify();
+                }))
+            });
+            body = body.child(ListView::new().divided().children(categories));
+        } else {
+            for page in pages {
+                if selected == Some(page.section) {
+                    body = body.child(page.render(ui, SettingsLayout::Mobile));
+                }
             }
         }
         if selected == Some(catalog::TERMINAL_CONTROLS) {
-            body = body
-                .child(ui.separator())
-                .child(
-                    paxri_ui::settings::controls::category_button(
-                        ui,
-                        Some(keybar::SECTION),
-                        false,
-                        None,
-                        SettingsLayout::Mobile,
+            body = body.child(ui.separator()).child(
+                ListView::new()
+                    .divided()
+                    .child(
+                        paxri_ui::settings::controls::category_button(
+                            ui,
+                            Some(keybar::SECTION),
+                            false,
+                            None,
+                            SettingsLayout::Mobile,
+                        )
+                        .role(Role::Button)
+                        .aria_label("Terminal keys")
+                        .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))),
                     )
-                    .role(Role::Button)
-                    .aria_label("Terminal keys")
-                    .on_click(cx.listener(|v, _, _, cx| v.open_keybar(cx))),
-                )
-                .child(
-                    paxri_ui::settings::controls::category_button(
-                        ui,
-                        Some(catalog::SHORTCUTS),
-                        false,
-                        None,
-                        SettingsLayout::Mobile,
-                    )
-                    .role(Role::Button)
-                    .aria_label(catalog::SHORTCUTS.title)
-                    .on_click(cx.listener(|v, _, _, cx| {
-                        v.navigate(Page::SettingsCategory(catalog::SHORTCUTS), cx);
-                        cx.notify();
-                    })),
-                );
+                    .child(
+                        paxri_ui::settings::controls::category_button(
+                            ui,
+                            Some(catalog::SHORTCUTS),
+                            false,
+                            None,
+                            SettingsLayout::Mobile,
+                        )
+                        .role(Role::Button)
+                        .aria_label(catalog::SHORTCUTS.title)
+                        .on_click(cx.listener(|v, _, _, cx| {
+                            v.navigate(Page::SettingsCategory(catalog::SHORTCUTS), cx);
+                            cx.notify();
+                        })),
+                    ),
+            );
         }
         self.settings_body(
             (

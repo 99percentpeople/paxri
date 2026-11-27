@@ -232,21 +232,65 @@ impl Ui {
         open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Button {
         let id = SharedString::from(format!("show-terminal-{peer}-{}-{}", key.number, key.nonce));
-        ListItem::new(title.clone())
-            .leading(Icon::Terminal.draw(18.))
-            .detail(format!(
-                "{name} · Session {} · {}",
-                key.number,
-                location.label()
-            ))
+        let ended = location == directory::SessionLocation::Ended;
+        let dot = div().size(px(7.)).rounded_full().flex_none();
+        let dot = match location {
+            directory::SessionLocation::Open => dot.bg(rgb(self.colors.success)),
+            directory::SessionLocation::Gateway => {
+                dot.border_1().border_color(rgb(self.colors.success))
+            }
+            directory::SessionLocation::Ended => {
+                dot.border_1().border_color(rgb(self.colors.muted_foreground))
+            }
+        };
+        let detail = session_detail(title.as_ref(), name, key.number, location);
+        let heading = list_item::list_title(title.clone())
+            .when(ended, |text| text.text_color(rgb(self.colors.muted_foreground)));
+        ListItem::custom(heading)
+            .detail_icon(dot)
+            .detail(detail)
             .when_some(actions, |item, actions| item.trailing(actions))
             .button(self, id, title)
             .on_click(open)
     }
 }
 
+fn session_detail(
+    title: &str,
+    device_name: &str,
+    number: usize,
+    location: directory::SessionLocation,
+) -> String {
+    if title == device_name {
+        format!("#{number} · {}", location.label())
+    } else {
+        format!("{device_name} · #{number} · {}", location.label())
+    }
+}
+
 impl DropdownContent {
     pub fn end_session(self, end: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.item("end-session", Icon::Stop.label("End session"), end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{directory::SessionLocation, session_detail};
+
+    #[test]
+    fn session_detail_omits_duplicate_device_name_when_title_matches() {
+        assert_eq!(
+            session_detail("Studio", "Studio", 1, SessionLocation::Open),
+            "#1 · Open"
+        );
+        assert_eq!(
+            session_detail("vim", "Studio", 2, SessionLocation::Gateway),
+            "Studio · #2 · Detached"
+        );
+        assert_eq!(
+            session_detail("Studio 2", "Studio", 2, SessionLocation::Ended),
+            "Studio · #2 · Ended"
+        );
     }
 }

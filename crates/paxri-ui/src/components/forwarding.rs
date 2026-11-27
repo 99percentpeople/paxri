@@ -3,10 +3,11 @@ use super::{
     *,
 };
 use crate::theme::BUTTON_HEIGHT;
+use paxri_config::DevicePlatform;
 use paxri_control::{Direction, ForwardStatus};
 use std::net::SocketAddr;
 
-pub const NARROW_WIDTH: Pixels = px(650.);
+pub const NARROW_WIDTH: Pixels = px(700.);
 
 #[derive(Default)]
 pub struct ForwardScope {
@@ -201,11 +202,126 @@ pub fn parse_endpoints(listen: &str, target: &str) -> Result<(SocketAddr, String
     ))
 }
 
-fn columns() -> Div {
-    div().w_full().min_w_0().flex().gap_2().items_center()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForwardRowState {
+    Listening,
+    Connecting,
+    Paused,
+    Error,
 }
-fn cell() -> Div {
-    div().min_w_0().flex_1().flex().flex_col()
+
+impl ForwardRowState {
+    fn of(rule: &ForwardStatus) -> Self {
+        if !rule.enabled() {
+            Self::Paused
+        } else if rule.error.is_some() {
+            Self::Error
+        } else if rule.bound.is_some() {
+            Self::Listening
+        } else {
+            Self::Connecting
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Listening => "Listening",
+            Self::Connecting => "Connecting…",
+            Self::Paused => "Paused",
+            Self::Error => "Error",
+        }
+    }
+}
+
+fn compact_endpoint(addr: &str) -> String {
+    for prefix in ["127.0.0.1:", "[::1]:", "localhost:"] {
+        if let Some(port) = addr.strip_prefix(prefix) {
+            return format!(":{port}");
+        }
+    }
+    addr.to_owned()
+}
+
+fn compact_narrow_route(direction: Direction, listen: &str, target: &str, peer: &str) -> String {
+    let listen = compact_endpoint(listen);
+    let target = compact_endpoint(target);
+    match direction {
+        Direction::Local => format!("{listen} → {peer} {target}"),
+        Direction::Remote => format!("{peer} {listen} → {target}"),
+    }
+}
+
+fn columns() -> Div {
+    div().w_full().min_w_0().flex().gap(SPACE_3).items_center()
+}
+
+fn col_rule() -> Div {
+    div().min_w_0().flex_1().flex().items_center()
+}
+
+fn col_direction() -> Div {
+    div().w(px(76.)).flex_none().flex().items_center()
+}
+
+fn col_device() -> Div {
+    div().min_w_0().w(px(136.)).flex_none().flex().items_center()
+}
+
+fn col_route() -> Div {
+    div().min_w_0().flex_1().flex().items_center()
+}
+
+fn col_state() -> Div {
+    div().min_w_0().w(px(112.)).flex_none().flex().items_center()
+}
+
+fn state_dot(ui: Ui, state: ForwardRowState) -> Div {
+    let dot = div().size(px(7.)).rounded_full().flex_none();
+    match state {
+        ForwardRowState::Listening => dot.bg(rgb(ui.colors.success)),
+        ForwardRowState::Connecting => dot.bg(rgb(ui.colors.warning)),
+        ForwardRowState::Paused => dot
+            .border_1()
+            .border_color(rgb(ui.colors.muted_foreground)),
+        ForwardRowState::Error => dot.bg(rgb(ui.colors.destructive.background)),
+    }
+}
+
+fn state_indicator(ui: Ui, key: &str, state: ForwardRowState, error: Option<&str>) -> Stateful<Div> {
+    let text_color = match state {
+        ForwardRowState::Listening => ui.colors.canvas.foreground,
+        ForwardRowState::Connecting | ForwardRowState::Paused => ui.colors.muted_foreground,
+        ForwardRowState::Error => ui.colors.alert.foreground,
+    };
+    let tip = error.unwrap_or_else(|| state.label()).to_owned();
+    div()
+        .id((ElementId::from("state"), SharedString::from(key.to_owned())))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .tooltip(tooltip(tip.into()))
+        .child(state_dot(ui, state))
+        .child(
+            single_line(div())
+                .text_role(TextRole::Badge)
+                .text_color(rgb(text_color))
+                .child(state.label()),
+        )
+}
+
+fn direction_tag(ui: Ui, label: &'static str) -> Div {
+    div()
+        .flex_none()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(4.))
+        .bg(rgb(ui.colors.secondary.background))
+        .border_1()
+        .border_color(rgb(ui.colors.border))
+        .text_role(TextRole::Badge)
+        .text_color(rgb(ui.colors.muted_foreground))
+        .child(label)
 }
 
 impl Ui {
@@ -216,13 +332,29 @@ impl Ui {
     }
 
     pub fn forwarding_header(self) -> Div {
-        let mut header = columns();
-        for label in ["Rule / Direction", "Device", "Listen", "Target", "State"] {
-            header = header.child(cell().child(self.muted(label)));
-        }
-        ListItem::custom(header)
-            .trailing(div().w(BUTTON_HEIGHT))
-            .inset_row()
+        let label = |text: &'static str| {
+            div()
+                .text_role(TextRole::Badge)
+                .text_color(rgb(self.colors.muted_foreground))
+                .child(text)
+        };
+        let header = columns()
+            .child(col_rule().child(label("Rule")))
+            .child(col_direction().child(label("Direction")))
+            .child(col_device().child(label("Device")))
+            .child(col_route().child(label("Route")))
+            .child(col_state().child(label("State")));
+        button::row_layout(div())
+            .min_h(px(28.))
+            .py(SPACE_1)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(SPACE_2)
+            .border_1()
+            .border_color(transparent_black())
+            .child(div().min_w_0().flex_1().child(header))
+            .child(div().w(BUTTON_HEIGHT).flex_none())
     }
 
     pub fn forwarding_row(
@@ -231,51 +363,106 @@ impl Ui {
         name: &str,
         f: &ForwardStatus,
         display_name: &str,
+        platform: DevicePlatform,
         narrow: bool,
         actions: impl IntoElement,
     ) -> Div {
         let ui = self;
-        let local = f.direction == Direction::Local;
-        let direction = if local { "Forward" } else { "Reverse" };
-        let (source, destination) = if local {
-            ("This device", display_name)
-        } else {
-            (display_name, "This device")
-        };
-        let line = |column: &'static str, value: &str| {
-            single_line(div())
-                .w_full()
-                .id((ElementId::from(column), SharedString::from(key.clone())))
-                .tooltip(tooltip(value.to_owned().into()))
-                .child(value.to_owned())
-        };
-        let endpoint = |column, host: &str, address: &str| {
-            cell()
-                .child(ui.caption(host.to_owned()))
-                .child(line(column, address))
+        let state = ForwardRowState::of(f);
+        let paused = state == ForwardRowState::Paused;
+        let error = (state == ForwardRowState::Error)
+            .then_some(f.error.as_deref())
+            .flatten();
+        let direction = match f.direction {
+            Direction::Local => "Forward",
+            Direction::Remote => "Reverse",
         };
         let listen = f.bound.as_deref().unwrap_or(&f.listen);
+        let full_route = f.route_for(display_name);
+        let line = |column: &'static str, value: String, tip: String, role: TextRole| {
+            single_line(div())
+                .w_full()
+                .text_role(role)
+                .when(paused, |d| d.text_color(rgb(ui.colors.muted_foreground)))
+                .id((ElementId::from(column), SharedString::from(key.clone())))
+                .tooltip(tooltip(tip.into()))
+                .child(value)
+        };
         let title = super::list_item::list_title(name.to_owned())
+            .when(paused, |d| d.text_color(rgb(ui.colors.muted_foreground)))
             .id((ElementId::from("rule"), SharedString::from(key.clone())))
             .tooltip(tooltip(name.to_owned().into()));
         let item = if narrow {
-            ListItem::custom(title)
-                .detail(format!("{direction} · {}", f.state()))
-                .below_detail(
+            let route = compact_narrow_route(f.direction, listen, &f.target, display_name);
+            let detail = match state {
+                ForwardRowState::Listening => route,
+                ForwardRowState::Connecting => format!("{route} · Connecting…"),
+                ForwardRowState::Paused => format!("{route} · Paused"),
+                ForwardRowState::Error => format!("{route} · {}", error.unwrap_or("Error")),
+            };
+            let detail_color = if state == ForwardRowState::Error {
+                ui.colors.alert.foreground
+            } else {
+                ui.colors.muted_foreground
+            };
+            let detail_tip = match error {
+                Some(message) => format!("{direction} · {message}\n{full_route}"),
+                None => format!("{direction} · {}\n{full_route}", state.label()),
+            };
+            let body = div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(title)
+                .child(
                     div()
+                        .w_full()
+                        .min_w_0()
                         .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(ui.muted(format!("{source} / {listen}")))
-                        .child(ui.muted(format!("→ {destination} / {}", f.target))),
-                )
+                        .items_center()
+                        .gap(px(6.))
+                        .child(state_dot(ui, state))
+                        .child(
+                            single_line(div())
+                                .flex_1()
+                                .text_role(TextRole::Caption)
+                                .text_color(rgb(detail_color))
+                                .id((ElementId::from("route"), SharedString::from(key.clone())))
+                                .tooltip(tooltip(detail_tip.into()))
+                                .child(detail),
+                        ),
+                );
+            ListItem::custom(body)
         } else {
+            let route = format!(
+                "{} → {}",
+                compact_endpoint(listen),
+                compact_endpoint(&f.target)
+            );
+            let device = col_device()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .text_color(rgb(ui.colors.muted_foreground))
+                        .child(Icon::device(platform).draw(14.)),
+                )
+                .child(line(
+                    "peer",
+                    display_name.to_owned(),
+                    display_name.to_owned(),
+                    TextRole::Body,
+                ));
             let fields = columns()
-                .child(cell().child(title).child(ui.caption(direction)))
-                .child(cell().child(line("peer", display_name)))
-                .child(endpoint("listen", source, listen))
-                .child(endpoint("target", destination, &f.target))
-                .child(cell().child(line("state", f.state())));
+                .child(col_rule().child(title))
+                .child(col_direction().child(direction_tag(ui, direction)))
+                .child(device)
+                .child(col_route().child(line("route", route, full_route, TextRole::Label)))
+                .child(col_state().child(state_indicator(ui, &key, state, error)));
             ListItem::custom(fields)
         };
         item.trailing(actions)
@@ -338,7 +525,68 @@ impl RenderOnce for RuleMenu {
 
 #[cfg(test)]
 mod tests {
-    use super::{Direction, direction_help, direction_summary, endpoint_labels, parse_endpoints};
+    use super::{
+        Direction, ForwardRowState, ForwardStatus, compact_endpoint, compact_narrow_route,
+        direction_help, direction_summary, endpoint_labels, parse_endpoints,
+    };
+
+    #[test]
+    fn compact_routes_shorten_loopback_and_preserve_explicit_hosts() {
+        assert_eq!(compact_endpoint("127.0.0.1:8080"), ":8080");
+        assert_eq!(compact_endpoint("[::1]:3000"), ":3000");
+        assert_eq!(compact_endpoint("localhost:5173"), ":5173");
+        assert_eq!(compact_endpoint("0.0.0.0:8080"), "0.0.0.0:8080");
+        assert_eq!(compact_endpoint("10.0.0.5:5432"), "10.0.0.5:5432");
+        assert_eq!(
+            compact_narrow_route(Direction::Local, "127.0.0.1:8080", "127.0.0.1:3000", "Studio"),
+            ":8080 → Studio :3000"
+        );
+        assert_eq!(
+            compact_narrow_route(Direction::Remote, "127.0.0.1:9000", "127.0.0.1:3000", "Studio"),
+            "Studio :9000 → :3000"
+        );
+        assert_eq!(
+            compact_narrow_route(Direction::Local, "0.0.0.0:8080", "10.0.0.5:3000", "Studio"),
+            "0.0.0.0:8080 → Studio 10.0.0.5:3000"
+        );
+    }
+
+    #[test]
+    fn row_state_classifies_listening_connecting_paused_and_error() {
+        let base = ForwardStatus {
+            name: None,
+            listen: "127.0.0.1:8080".into(),
+            bound: None,
+            peer: "lab".into(),
+            target: "127.0.0.1:3000".into(),
+            direction: Direction::Local,
+            enabled: Some(true),
+            error: None,
+        };
+        assert_eq!(ForwardRowState::of(&base), ForwardRowState::Connecting);
+        assert_eq!(
+            ForwardRowState::of(&ForwardStatus {
+                bound: Some("127.0.0.1:8080".into()),
+                ..base.clone()
+            }),
+            ForwardRowState::Listening
+        );
+        assert_eq!(
+            ForwardRowState::of(&ForwardStatus {
+                error: Some("address in use".into()),
+                ..base.clone()
+            }),
+            ForwardRowState::Error
+        );
+        assert_eq!(
+            ForwardRowState::of(&ForwardStatus {
+                enabled: Some(false),
+                error: Some("stale".into()),
+                ..base
+            }),
+            ForwardRowState::Paused
+        );
+    }
 
     #[test]
     fn endpoint_labels_flip_with_direction_and_parse_defaults() {

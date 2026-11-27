@@ -192,7 +192,9 @@ impl Dashboard {
                 session_list_notice(total, rows.len(), initial_request, &failed),
                 |d, state| d.child(state.render(ui)),
             )
-            .when(!rows.is_empty(), |page| page.child(ListView::new().children(rows)));
+            .when(!rows.is_empty(), |page| {
+                page.child(ListView::new().divided().children(rows))
+            });
         (
             overview()
                 .py_2()
