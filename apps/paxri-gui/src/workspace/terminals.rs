@@ -126,6 +126,22 @@ impl Dashboard {
         .detach();
     }
 
+    pub(crate) fn refresh_renamed_peers(&mut self, changed_peers: &[SharedString], cx: &mut App) {
+        for peer in changed_peers {
+            if let Some(sessions) = self.terminal_sessions.get(peer) {
+                for view in sessions.open.values().filter_map(WeakEntity::upgrade) {
+                    let title = view.read(cx).title.clone();
+                    title.update(cx, |tab, cx| {
+                        if tab.clear_fallback() {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        }
+        self.assign_terminal_defaults(cx);
+    }
+
     fn assign_terminal_defaults(&mut self, cx: &mut App) {
         let mut titles = Vec::new();
         let mut reserved = Vec::new();

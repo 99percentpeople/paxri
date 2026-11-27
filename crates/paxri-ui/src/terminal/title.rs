@@ -79,6 +79,11 @@ impl TabTitle {
         self.fallback = None;
         true
     }
+
+    /// Drop a generated default label so it can be re-derived after a peer rename.
+    pub fn clear_fallback(&mut self) -> bool {
+        self.fallback.take().is_some()
+    }
 }
 
 fn missing_defaults<'a>(
@@ -173,5 +178,20 @@ mod tests {
             labels(&peer, &mut tabs),
             ["pi-1", "pi-3", "pi-4", "pi", "pi-2"]
         );
+    }
+
+    #[test]
+    fn peer_rename_refreshes_automatic_defaults_without_overwriting_explicit_titles() {
+        let old = SharedString::from("OldPC");
+        let mut tabs = [TabTitle::default(), TabTitle::default(), TabTitle::default()];
+        assert_eq!(labels(&old, &mut tabs), ["OldPC", "OldPC-1", "OldPC-2"]);
+        tabs[1].rename("manual");
+        tabs[2].set_pty("vim".into());
+
+        let renamed = SharedString::from("Studio");
+        for tab in &mut tabs {
+            tab.clear_fallback();
+        }
+        assert_eq!(labels(&renamed, &mut tabs), ["Studio", "manual", "vim"]);
     }
 }

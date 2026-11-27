@@ -218,12 +218,7 @@ impl Gateway {
     }
 
     fn contact(&self) -> Contact {
-        let name = self
-            .config
-            .device_name
-            .clone()
-            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
-        self.transport.contact(name)
+        self.transport.contact(crate::effective_device_name(&self.config))
     }
 
     fn save_peer(&mut self, peer: &Contact, request_id: &str) -> Result<String> {

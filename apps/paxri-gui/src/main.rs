@@ -430,9 +430,23 @@ impl Dashboard {
                             status.peer_online(peer)
                                 && !view.status.as_ref().is_some_and(|old| old.peer_online(peer))
                         });
+                        let renamed_peers: Vec<SharedString> = status
+                            .peers
+                            .keys()
+                            .filter(|peer| {
+                                view.status.as_ref().is_some_and(|old| {
+                                    old.peer_display_name(peer) != status.peer_display_name(peer)
+                                })
+                            })
+                            .cloned()
+                            .map(SharedString::from)
+                            .collect();
                         view.startup = status.startup;
                         view.session_keep_alive = status.session_keep_alive;
                         view.status = Some(*status);
+                        if !renamed_peers.is_empty() {
+                            view.refresh_renamed_peers(&renamed_peers, cx);
+                        }
                         if peer_newly_online {
                             view.refresh_hosted_sessions(true, cx);
                         }

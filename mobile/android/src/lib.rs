@@ -717,6 +717,23 @@ impl Mobile {
                 self.last_session_number
                     .retain(|peer, _| peers.contains_key(peer));
                 self.peers = peers;
+                let mut names_changed = false;
+                for s in self.sessions.values_mut() {
+                    if let Some(peer) = self.peers.get(&s.peer)
+                        && s.name.as_ref() != peer.name.as_str()
+                    {
+                        s.name = peer.name.clone().into();
+                        s.title.update(cx, |title, cx| {
+                            if title.clear_fallback() {
+                                cx.notify();
+                            }
+                        });
+                        names_changed = true;
+                    }
+                }
+                if names_changed {
+                    self.assign_terminal_defaults(cx);
+                }
             }
             Update::DisplayChanged => {}
             Update::DeviceNameChanged => {

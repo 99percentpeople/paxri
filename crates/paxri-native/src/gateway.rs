@@ -202,8 +202,11 @@ impl NativeTransport {
             else {
                 return false;
             };
+            let device_name = Some(peer.name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
             entry.insert(DeviceInfo {
-                device_name: (peer.platform == DevicePlatform::Android).then(|| peer.name.clone()),
+                device_name,
                 platform: peer.platform,
                 capabilities: peer.capabilities,
             });

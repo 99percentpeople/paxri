@@ -194,8 +194,8 @@ impl Client {
         let transport = Arc::new(transport);
         let mut name = crate::DEVICE_NAME.subscribe();
         transport.set_device_name(name.borrow_and_update().effective());
-        let presence = tokio::spawn(transport.clone().announce_presence());
         let mut info = transport.subscribe_device_info();
+        let presence = tokio::spawn(transport.clone().announce_presence());
         let (viewed_peer, viewed) = watch::channel(ViewedPage::default());
         let client = Arc::new(Self {
             viewed_peer,
@@ -282,6 +282,16 @@ impl Client {
                         let mut changed = false;
                         for (id, data) in info.borrow_and_update().iter() {
                             if let Some(peer) = next.peers.get_mut(id) {
+                                if let Some(name) = data
+                                    .device_name
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|name| !name.is_empty())
+                                    && peer.name != name
+                                {
+                                    peer.name = name.to_owned();
+                                    changed = true;
+                                }
                                 if data.platform != paxri_config::DevicePlatform::Unknown && peer.platform != data.platform {
                                     peer.platform = data.platform;
                                     changed = true;

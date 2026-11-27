@@ -117,6 +117,16 @@ struct Gateway {
     streams: Arc<Semaphore>,
 }
 
+fn effective_device_name(config: &Config) -> String {
+    config
+        .device_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
+}
+
 impl Gateway {
     fn canonicalize_peer(&self, selector: &mut String) -> Result<()> {
         let (name, _) = self.config.resolve_peer(selector)?;
@@ -158,6 +168,7 @@ impl Gateway {
 
     fn apply_config(&mut self, config: Config) {
         self.config = Arc::new(config);
+        self.transport.set_device_name(effective_device_name(&self.config));
         self.transport.update_config(self.config.clone());
     }
 
@@ -601,6 +612,7 @@ async fn handle_client(
             let state = gateway.lock().await;
             let mut changes = state.transport.subscribe_peer_changes();
             let mut info = state.transport.subscribe_device_info();
+            let mut config = state.transport.subscribe_config();
             let subscription = state.streams.clone().try_acquire_owned();
             drop(state);
             let Ok(_subscription) = subscription else {
@@ -617,6 +629,7 @@ async fn handle_client(
                         let event = tokio::select! {
                             event = changes.changed() => event,
                             event = info.changed() => event,
+                            event = config.changed() => event,
                         };
                         if event.is_err() { return Ok(()); }
                     }
@@ -929,6 +942,7 @@ async fn run(
         address_tx,
     )
     .await?;
+    transport.set_device_name(effective_device_name(&config));
     let routes = Routes::default();
     let mut clients = JoinSet::new();
     let stream_config = transport.subscribe_config();
