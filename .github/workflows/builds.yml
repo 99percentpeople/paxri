@@ -44,6 +44,24 @@ jobs:
       NDK_VERSION: 26.1.10909125
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore Android JVM dependencies
+        id: android-jvm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/android/dependencies/*.aar
+            target/android/dependencies/*.jar
+          key: android-jvm-v1-${{ hashFiles('mobile/android/jvm-dependencies.json') }}
+      - name: Fetch and verify Android JVM dependencies
+        run: python3 mobile/android/build.py --fetch-dependencies
+      - name: Save Android JVM dependencies
+        if: steps.android-jvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/android/dependencies/*.aar
+            target/android/dependencies/*.jar
+          key: ${{ steps.android-jvm-cache.outputs.cache-primary-key }}
       - run: rustup toolchain install ${{ env.RUSTUP_TOOLCHAIN }} --profile minimal --target aarch64-linux-android
       - name: Build the APK
         run: |

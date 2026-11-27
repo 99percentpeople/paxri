@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -16,10 +17,7 @@ OUT = APP.parents[1] / "target/android"
 DIST = APP.parents[1] / "dist/android"
 APK_BASENAME = "paxri-android-arm64"
 TARGET = "aarch64-linux-android"
-VERIFIER_HASH = "aa021794230fbc2f0be355999e2cf67398dd563de066a2e17001ffbd0b69101b"
-KOTLIN_HASH = "f31cc53f105a7e48c093683bbd5437561d1233920513774b470805641bedbc09"
-SCANNER_HASH = "4ab03353127c34e55cbb80fbc9a34031decbcfb1ec5e8f991944d2d494621a33"
-ZXING_HASH = "71de5d89341b5fcf5dd89da7f44e84d825d0e084cdf3ec77c9abe26b0f0ceb13"
+JVM_DEPENDENCIES = APP / "jvm-dependencies.json"
 
 # Entries are applied in order to the package pinned in Cargo.lock.
 PATCH_SERIES = {
@@ -35,15 +33,23 @@ def run(*args):
 
 def download(url, checksum):
     directory = OUT / "dependencies"
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
     path = directory / url.rsplit("/", 1)[1]
     if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
-        with urllib.request.urlopen(url, timeout=60) as src:
-            data = src.read()
+        print(f"Downloading {url}", flush=True)
+        try:
+            with urllib.request.urlopen(url, timeout=60) as src:
+                data = src.read()
+        except urllib.error.URLError as error:
+            raise SystemExit(f"Could not download {url}: {error}") from error
         if hashlib.sha256(data).hexdigest() != checksum:
             raise SystemExit(f"Unexpected SHA-256 for {path.name}")
         path.write_bytes(data)
     return path
+
+
+def fetch_dependencies(specs):
+    return {name: download(spec["url"], spec["sha256"]) for name, spec in specs.items()}
 
 
 def patched_source(package):
@@ -70,9 +76,16 @@ def patched_source(package):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--unsigned-release", action="store_true",
-                        help="build an aligned, non-debuggable APK for release signing")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--unsigned-release", action="store_true",
+                      help="build an aligned, non-debuggable APK for release signing")
+    mode.add_argument("--fetch-dependencies", action="store_true",
+                      help="download and verify JVM dependencies without building the APK")
     args = parser.parse_args()
+    specs = json.loads(JVM_DEPENDENCIES.read_text(encoding="utf-8"))
+    if args.fetch_dependencies:
+        fetch_dependencies(specs)
+        return
     sdk_path = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
     if not sdk_path:
         raise SystemExit("Set ANDROID_HOME to the Android SDK directory.")
@@ -84,6 +97,10 @@ def main():
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version=1", "--filter-platform", TARGET], cwd=APP))
     crates = {p["name"]: p for p in metadata["packages"]}
+    version = crates["rustls-platform-verifier-android"]["version"]
+    if not specs["verifier"]["url"].endswith(f"/rustls-platform-verifier-{version}.aar"):
+        raise SystemExit(f"Update {JVM_DEPENDENCIES.name} for rustls-platform-verifier-android {version}")
+    deps = fetch_dependencies(specs)
     sources = {name: patched_source(crates[name]) for name in PATCH_SERIES}
     override = "paths = " + json.dumps(list(sources.values()))
     # Align the extracted native library for both 4 KB and 16 KB page devices.
@@ -96,27 +113,17 @@ def main():
         run("cargo", "ndk", "-t", "arm64-v8a", "-P", "29", "rustc", "--config", override, *rustc_args)
     native = Path(metadata["target_directory"]) / TARGET / profile / "libpaxri_android.so"
     host = Path(sources["gpui-mobile"]) / "example/android/gradle/app/src/main"
-    version = crates["rustls-platform-verifier-android"]["version"]
-    aar = download("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/"
-                   f"android-release-support/maven/org/rustls/rustls-platform-verifier/{version}/"
-                   f"rustls-platform-verifier-{version}.aar", VERIFIER_HASH)
-    kotlin = download("https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/"
-                      "2.0.21/kotlin-stdlib-2.0.21.jar", KOTLIN_HASH)
-    scanner = download("https://repo.maven.apache.org/maven2/com/journeyapps/zxing-android-embedded/"
-                       "4.3.0/zxing-android-embedded-4.3.0.aar", SCANNER_HASH)
-    zxing = download("https://repo.maven.apache.org/maven2/com/google/zxing/core/"
-                     "3.5.4/core-3.5.4.jar", ZXING_HASH)
     with tempfile.TemporaryDirectory(dir=OUT) as tmp:
         tmp = Path(tmp)
         classes = tmp / "classes"
         classes.mkdir()
         dex = tmp / "dex"
         dex.mkdir()
-        with zipfile.ZipFile(aar) as bundle:
+        with zipfile.ZipFile(deps["verifier"]) as bundle:
             bundle.extract("classes.jar", tmp)
             # The verifier needs the CA-specific CRL network policy as well as its JVM classes.
             bundle.extract("res/xml/network_security_config.xml", tmp)
-        with zipfile.ZipFile(scanner) as bundle:
+        with zipfile.ZipFile(deps["scanner"]) as bundle:
             scanner_classes = bundle.extract("classes.jar", tmp / "scanner")
             for entry in bundle.namelist():
                 if entry.startswith("res/"):
@@ -134,12 +141,12 @@ def main():
         java = host / "java/dev/gpui/mobile"
         support = [java / (name + ".java") for name in
                    ("GpuiInputActivity", "GpuiPlatformView", "GpuiCamera", "GpuiVideoPlayer", "GpuiClipboard")]
-        classpath = os.pathsep.join(map(str, (platform, scanner_classes, zxing)))
+        classpath = os.pathsep.join(map(str, (platform, scanner_classes, deps["zxing"])))
         run("javac", "-proc:none", "-source", "8", "-target", "8", "-cp", classpath, "-d", classes,
             *support, *sorted(generated.rglob("*.java")), *sorted((APP / "java").rglob("*.java")))
         run("java", "-cp", tools / "lib/d8.jar", "com.android.tools.r8.D8", "--min-api", "29",
             "--lib", platform, "--output", dex, *sorted(classes.rglob("*.class")), tmp / "classes.jar",
-            kotlin, scanner_classes, zxing)
+            deps["kotlin"], scanner_classes, deps["zxing"])
         with zipfile.ZipFile(package, "a", zipfile.ZIP_DEFLATED) as apk:
             for file in sorted(dex.glob("*.dex")):
                 apk.write(file, file.name)

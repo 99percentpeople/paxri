@@ -36,6 +36,10 @@ gh run list --workflow builds.yml --branch main
 
 Android shares the root `Cargo.lock` with the desktop and headless packages. The APK builder selects `paxri-android` and uses the `android-dev` Cargo profile by default. Rolling APKs use `android-release`, a size-optimized profile for the ARM64 native library.
 
+Before setting up the toolchain, Android CI restores the AAR and JAR cache, checks the files against the SHA-256 digests in [jvm-dependencies.json](../mobile/android/jvm-dependencies.json), and downloads any missing or invalid files. On a cache miss, CI saves the verified files before building the APK. The cache key uses the manifest, so unrelated code or Cargo dependency changes do not invalidate it. The cache does not include build outputs or signing keys.
+
+Run `python3 mobile/android/build.py --fetch-dependencies` to prepare these files locally without the Android SDK or Rust. Update the verifier AAR in the manifest if `rustls-platform-verifier-android` changes in `Cargo.lock`.
+
 The desktop and Android terminals embed the same Cascadia Mono PL subset. Ordinary text uses the selected or system monospace font. Box drawing, blocks, Braille and common prompt symbols use the bundled face. The renderer fits box drawing, block elements and the four basic Powerline separators to the terminal grid at the selected line height and zoom. Other scripts and emoji use the installed system fonts.
 
 To regenerate the subset, run `python3 crates/paxri-ui/fonts/subset.py /path/to/CascadiaMonoPL-Regular.ttf` with fontTools and the static Regular face from Cascadia Code v2407.24. The APK and desktop packages include the SIL Open Font License. [Upstream font release](https://github.com/microsoft/cascadia-code/releases/tag/v2407.24)
