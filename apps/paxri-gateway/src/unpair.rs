@@ -1,57 +1,103 @@
 //! Revoke locally before contacting the other gateway. The pending notice survives restarts.
-use super::{Gateway, pairing::random_id};
+use super::{Gateway, Listener, pairing::random_id};
 use anyhow::{Result, ensure};
 use paxri_config::PendingUnpair;
 use paxri_control::Status;
 use paxri_native::gateway::pairing::UnpairAck;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinSet};
 
-impl Gateway {
-    async fn remove_identity(&mut self, id: &str, pending: Option<&PendingUnpair>) -> Result<()> {
-        let endpoint = id.parse()?;
-        let aliases: BTreeSet<_> = self
-            .config
-            .peers
-            .iter()
-            .filter(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(id))
-            .map(|(name, _)| name.as_str())
-            .collect();
-        let rules: Vec<_> = self
-            .config
-            .forwards
-            .iter()
-            .filter(|(_, r)| aliases.contains(r.peer.as_str()))
-            .map(|(name, _)| name.clone())
-            .collect();
-        let (text, config) =
-            self.file
-                .prepare_unpair(&aliases, &rules, pending.map(|p| (id, p)))?;
-        self.file.persist(text)?;
-        self.apply_config(config);
-        self.transport.forget_peer(endpoint);
-        self.pairing.forget(id);
-        for rule in rules {
-            if let Some(listener) = self.listeners.remove(&rule) {
-                listener.stop().await;
+async fn stop_listeners(listeners: Vec<Listener>) {
+    let mut stopping = JoinSet::new();
+    for listener in listeners {
+        stopping.spawn(listener.stop());
+    }
+    while stopping.join_next().await.is_some() {}
+}
+
+async fn remove_identity(
+    gateway: &Mutex<Gateway>,
+    id: &str,
+    pending: Option<PendingUnpair>,
+    message: Option<String>,
+) -> Result<()> {
+    let endpoint = id.parse()?;
+    let removed_listeners = Gateway::update_config(
+        gateway,
+        |g| {
+            let aliases: BTreeSet<_> = g
+                .config
+                .peers
+                .iter()
+                .filter(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(id))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let rules: Vec<_> = g
+                .config
+                .forwards
+                .iter()
+                .filter(|(_, r)| aliases.contains(r.peer.as_str()))
+                .map(|(name, _)| name.clone())
+                .collect();
+            let (text, config) =
+                g.file
+                    .prepare_unpair(&aliases, &rules, pending.as_ref().map(|p| (id, p)))?;
+            Ok(Some((text, config, rules)))
+        },
+        |g, rules| {
+            g.transport.forget_peer(endpoint);
+            g.pairing.forget(id);
+            if let Some(message) = message {
+                g.pairing.message = Some(message);
             }
-        }
-        Ok(())
-    }
+            rules
+                .into_iter()
+                .filter_map(|rule| g.listeners.remove(&rule))
+                .collect::<Vec<_>>()
+        },
+    )
+    .await?
+    .unwrap_or_default();
+    // Stop removed listeners concurrently after releasing gateway.lock().
+    stop_listeners(removed_listeners).await;
+    Ok(())
+}
 
-    fn clear_unpair_notice(&mut self, id: &str) -> Result<()> {
-        let (text, config) = self.file.confirm_unpair(id)?;
-        self.file.persist(text)?;
-        self.apply_config(config);
-        Ok(())
-    }
+async fn clear_unpair_notice(
+    gateway: &Mutex<Gateway>,
+    id: &str,
+    expected_notice: Option<&PendingUnpair>,
+    message: Option<String>,
+) -> Result<bool> {
+    let cleared = Gateway::update_config(
+        gateway,
+        |g| {
+            if let Some(expected) = expected_notice
+                && g.config.pending_unpairs.get(id) != Some(expected)
+            {
+                return Ok(None);
+            }
+            let (text, config) = g.file.confirm_unpair(id)?;
+            Ok(Some((text, config, ())))
+        },
+        |g, ()| {
+            if let Some(message) = message {
+                g.pairing.message = Some(message);
+            }
+        },
+    )
+    .await?;
+    Ok(cleared.is_some())
+}
 
-    pub(super) async fn receive_unpair(
-        &mut self,
-        id: &str,
-        generation: Option<&str>,
-    ) -> Result<UnpairAck> {
-        let mut names = self
+pub(super) async fn receive_unpair(
+    gateway: &Mutex<Gateway>,
+    id: &str,
+    generation: Option<&str>,
+) -> Result<UnpairAck> {
+    let message = {
+        let g = gateway.lock().await;
+        let mut names = g
             .config
             .peers
             .iter()
@@ -68,12 +114,11 @@ impl Gateway {
         if generations.next() != generation || generations.any(|id| Some(id) != generation) {
             return Ok(UnpairAck::NewerPairing);
         }
-        let display_name = self.peer_device_name(first).unwrap_or_else(|| name.clone());
-        let message = format!("{display_name} unpaired from this device.");
-        self.remove_identity(id, None).await?;
-        self.pairing.message = Some(message);
-        Ok(UnpairAck::Cleared)
-    }
+        let display_name = g.peer_device_name(first).unwrap_or_else(|| name.clone());
+        format!("{display_name} unpaired from this device.")
+    };
+    remove_identity(gateway, id, None, Some(message)).await?;
+    Ok(UnpairAck::Cleared)
 }
 
 async fn deliver(
@@ -81,23 +126,39 @@ async fn deliver(
     id: &str,
     notice: &PendingUnpair,
 ) -> Result<Option<UnpairAck>> {
-    let transport = {
-        let mut g = gateway.lock().await;
+    enum Action {
+        Skip,
+        ClearSuperseded,
+        Notify(Arc<paxri_native::gateway::NativeTransport>),
+    }
+    let action = {
+        let g = gateway.lock().await;
         if g.config.pending_unpairs.get(id) != Some(notice) {
-            return Ok(None);
+            Action::Skip
+        } else if g.config.is_paired(id) {
+            Action::ClearSuperseded
+        } else {
+            Action::Notify(g.transport.clone())
         }
-        if g.config.is_paired(id) {
+    };
+    let transport = match action {
+        Action::Skip => return Ok(None),
+        Action::ClearSuperseded => {
             // A locally restored pairing also supersedes any notice left in the file.
-            g.clear_unpair_notice(id)?;
+            clear_unpair_notice(gateway, id, Some(notice), None).await?;
             return Ok(Some(UnpairAck::NewerPairing));
         }
-        g.transport.clone()
+        Action::Notify(transport) => transport,
     };
     let ack = transport.notify_unpair(id, notice).await?;
-    let mut g = gateway.lock().await;
-    if g.config.pending_unpairs.get(id) == Some(notice) {
-        g.clear_unpair_notice(id)?;
-        g.pairing.message = Some(result_message(&notice.name, Some(ack)));
+    if clear_unpair_notice(
+        gateway,
+        id,
+        Some(notice),
+        Some(result_message(&notice.name, Some(ack))),
+    )
+    .await?
+    {
         return Ok(Some(ack));
     }
     Ok(None)
@@ -119,7 +180,7 @@ pub(super) async fn remove(
     expected_id: Option<&str>,
 ) -> Result<Status> {
     let (id, notice, online) = {
-        let mut g = gateway.lock().await;
+        let g = gateway.lock().await;
         let (name, peer) = g.config.resolve_peer(selector)?;
         let id = peer.endpoint_id.to_ascii_lowercase();
         ensure!(
@@ -138,16 +199,16 @@ pub(super) async fn remove(
                 .find_map(|p| p.pairing_id.clone()),
             request_id: random_id()?,
         };
-        g.remove_identity(&id, Some(&notice)).await?;
-        g.pairing.message = Some(result_message(&notice.name, None));
         (id, notice, online)
     };
+    let pending_message = result_message(&notice.name, None);
+    remove_identity(gateway, &id, Some(notice.clone()), Some(pending_message)).await?;
     let ack = if online {
         deliver(gateway, &id, &notice).await.ok().flatten()
     } else {
         None
     };
-    let mut status = gateway.lock().await.status();
+    let mut status = Gateway::status_snapshot(gateway).await;
     status.pairing.message = Some(result_message(&notice.name, ack));
     Ok(status)
 }

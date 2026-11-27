@@ -30,11 +30,7 @@ pub(super) async fn fill_missing(gateway: Arc<Mutex<Gateway>>) {
                 let Ok(platform) = paxri_core::peer_platform(&*transport, &name).await else {
                     return;
                 };
-                if let Err(err) = gateway
-                    .lock()
-                    .await
-                    .save_peer_platform(&name, &id, platform)
-                {
+                if let Err(err) = Gateway::save_peer_platform(&gateway, &name, &id, platform).await {
                     eprintln!("save platform for {name}: {err:#}");
                 }
             });
@@ -55,23 +51,31 @@ pub(super) async fn fill_missing(gateway: Arc<Mutex<Gateway>>) {
 }
 
 impl Gateway {
-    fn save_peer_platform(
-        &mut self,
+    async fn save_peer_platform(
+        gateway: &Mutex<Self>,
         name: &str,
         id: &str,
         platform: DevicePlatform,
     ) -> anyhow::Result<()> {
-        // Pairing may have updated the alias or supplied fresher metadata while the query was in flight.
-        if platform != DevicePlatform::Unknown && self
-            .config
-            .peers
-            .get(name)
-            .is_some_and(|p| p.endpoint_id == id && p.platform.unwrap_or_default() == DevicePlatform::Unknown)
-        {
-            let (text, config) = self.file.prepare_peer_platform(name, platform)?;
-            self.file.persist(text)?;
-            self.apply_config(config);
+        if platform == DevicePlatform::Unknown {
+            return Ok(());
         }
+        // Pairing may have updated the alias or supplied fresher metadata while the query was in flight.
+        Self::update_config(
+            gateway,
+            |g| {
+                if g.config.peers.get(name).is_some_and(|p| {
+                    p.endpoint_id == id && p.platform.unwrap_or_default() == DevicePlatform::Unknown
+                }) {
+                    let (text, config) = g.file.prepare_peer_platform(name, platform)?;
+                    Ok(Some((text, config, ())))
+                } else {
+                    Ok(None)
+                }
+            },
+            |_, ()| (),
+        )
+        .await?;
         Ok(())
     }
 }

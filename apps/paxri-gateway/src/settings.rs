@@ -217,6 +217,7 @@ impl SettingsFile {
         checked_document(doc)
     }
 
+    #[cfg(test)]
     pub fn persist(&mut self, text: String) -> Result<()> {
         self.text = paxri_config::file::save_gateway(&self.path, &self.text, text)?;
         Ok(())
@@ -239,44 +240,66 @@ impl super::Gateway {
             .collect()
     }
 
-    pub(super) fn persist_peer_info(&mut self) -> Result<()> {
-        let mut changed = self.config.peers.iter().filter_map(|(name, peer)| {
-            let info = self.device_info_for(peer)?;
-            let platform = Some(info.platform)
-                .filter(|p| *p != DevicePlatform::Unknown && Some(*p) != peer.platform);
-            let device_name = info.device_name.filter(|n| Some(n) != peer.device_name.as_ref());
-            (platform.is_some() || device_name.is_some()).then_some((name, platform, device_name))
-        }).peekable();
-        if changed.peek().is_none() { return Ok(()); }
-        let mut doc: DocumentMut = self.file.text.parse()?;
-        for (name, platform, device_name) in changed {
-            let table = peer_table(&mut doc, name)?;
-            if let Some(platform) = platform {
-                table.insert("platform", value(platform.as_str()));
-            }
-            if let Some(device_name) = device_name {
-                table.insert("device_name", value(device_name));
-            }
-        }
-        let (text, config) = checked_document(doc)?;
-        self.file.persist(text)?;
-        self.apply_config(config);
+    pub(super) async fn persist_peer_info(gateway: &tokio::sync::Mutex<Self>) -> Result<()> {
+        Self::update_config(
+            gateway,
+            |g| {
+                let mut changed = g
+                    .config
+                    .peers
+                    .iter()
+                    .filter_map(|(name, peer)| {
+                        let info = g.device_info_for(peer)?;
+                        let platform = Some(info.platform)
+                            .filter(|p| *p != DevicePlatform::Unknown && Some(*p) != peer.platform);
+                        let device_name = info
+                            .device_name
+                            .filter(|n| Some(n) != peer.device_name.as_ref());
+                        (platform.is_some() || device_name.is_some())
+                            .then_some((name, platform, device_name))
+                    })
+                    .peekable();
+                if changed.peek().is_none() {
+                    return Ok(None);
+                }
+                let mut doc: DocumentMut = g.file.text.parse()?;
+                for (name, platform, device_name) in changed {
+                    let table = peer_table(&mut doc, name)?;
+                    if let Some(platform) = platform {
+                        table.insert("platform", value(platform.as_str()));
+                    }
+                    if let Some(device_name) = device_name {
+                        table.insert("device_name", value(device_name));
+                    }
+                }
+                let (text, config) = checked_document(doc)?;
+                Ok(Some((text, config, ())))
+            },
+            |_, ()| (),
+        )
+        .await?;
         Ok(())
     }
 
-    pub(super) fn persist_peer_changes(&mut self) -> Result<()> {
-        let mut times = self.peer_change_times();
-        times.retain(|name, time| self.config.peers[name].last_status_change_ms != Some(*time));
-        if times.is_empty() {
-            return Ok(());
-        }
-        let mut doc: DocumentMut = self.file.text.parse()?;
-        for (name, time) in times {
-            peer_table(&mut doc, &name)?.insert("last_status_change_ms", value(time));
-        }
-        let (text, config) = checked_document(doc)?;
-        self.file.persist(text)?;
-        self.apply_config(config);
+    pub(super) async fn persist_peer_changes(gateway: &tokio::sync::Mutex<Self>) -> Result<()> {
+        Self::update_config(
+            gateway,
+            |g| {
+                let mut times = g.peer_change_times();
+                times.retain(|name, time| g.config.peers[name].last_status_change_ms != Some(*time));
+                if times.is_empty() {
+                    return Ok(None);
+                }
+                let mut doc: DocumentMut = g.file.text.parse()?;
+                for (name, time) in times {
+                    peer_table(&mut doc, &name)?.insert("last_status_change_ms", value(time));
+                }
+                let (text, config) = checked_document(doc)?;
+                Ok(Some((text, config, ())))
+            },
+            |_, ()| (),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -371,4 +394,5 @@ mod tests {
         );
         Ok(())
     }
+
 }

@@ -155,65 +155,93 @@ impl Pairings {
 }
 
 impl Gateway {
-    pub(super) async fn init_pairing(&mut self) -> Result<()> {
-        if let Some(code) = &self.config.pairing_code {
-            let saved = Invitation::parse(code)?;
+    pub(super) async fn init_pairing(gateway: &Mutex<Self>) -> Result<()> {
+        let (saved_code, transport_id, transport, direct_only) = {
+            let g = gateway.lock().await;
+            (
+                g.config.pairing_code.clone(),
+                g.transport.id(),
+                g.transport.clone(),
+                g.direct_only,
+            )
+        };
+        if let Some(code) = saved_code {
+            let saved = Invitation::parse(&code)?;
             ensure!(
-                saved.ticket.endpoint_addr().id.to_string() == self.transport.id(),
+                saved.ticket.endpoint_addr().id.to_string() == transport_id,
                 "Saved pairing code belongs to another device. Refresh the code."
             );
-            self.pairing.token = Some(saved.token);
+            gateway.lock().await.pairing.token = Some(saved.token);
             return Ok(());
         }
-        let ticket = self
-            .transport
-            .initial_pairing_ticket(self.direct_only)
-            .await?;
-        self.refresh_pairing(&ticket)
+        let ticket = transport.initial_pairing_ticket(direct_only).await?;
+        Self::refresh_pairing(gateway, &ticket).await
     }
 
-    pub(super) fn refresh_pairing(&mut self, ticket: &EndpointTicket) -> Result<()> {
-        ensure!(
-            !self.direct_only || !ticket.endpoint_addr().is_empty(),
-            "No address available for the pairing code"
-        );
+    pub(super) async fn refresh_pairing(
+        gateway: &Mutex<Self>,
+        ticket: &EndpointTicket,
+    ) -> Result<()> {
         let token = random_id()?;
         let code = Invitation::encode(&ticket.to_string(), &token);
-        let (text, config) = self.file.prepare_pairing_code(&code)?;
-        self.file.persist(text)?;
-        self.apply_config(config);
-        for (_, p) in std::mem::take(&mut self.pairing.pending) {
-            for reply in p.replies {
-                let _ = reply.send(Decision::Rejected("The pairing code was refreshed".into()));
-            }
-        }
-        self.pairing.replies.clear();
-        self.pairing.token = Some(token);
-        self.pairing.message = None;
+        let has_addr = !ticket.endpoint_addr().is_empty();
+        Self::update_config(
+            gateway,
+            |g| {
+                ensure!(
+                    !g.direct_only || has_addr,
+                    "No address available for the pairing code"
+                );
+                let (text, config) = g.file.prepare_pairing_code(&code)?;
+                Ok(Some((text, config, token)))
+            },
+            |g, token| {
+                for (_, p) in std::mem::take(&mut g.pairing.pending) {
+                    for reply in p.replies {
+                        let _ =
+                            reply.send(Decision::Rejected("The pairing code was refreshed".into()));
+                    }
+                }
+                g.pairing.replies.clear();
+                g.pairing.token = Some(token);
+                g.pairing.message = None;
+            },
+        )
+        .await?;
         Ok(())
     }
 
-    pub(super) fn update_peer_ticket(&mut self, ticket: EndpointTicket) -> Result<()> {
+    pub(super) async fn update_peer_ticket(
+        gateway: &Mutex<Self>,
+        ticket: EndpointTicket,
+    ) -> Result<()> {
         let id = ticket.endpoint_addr().id.to_string();
-        let Some((name, peer)) = self
-            .config
-            .peers
-            .iter()
-            .find(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(&id))
-        else {
-            return Ok(());
-        };
-        let name = name.clone();
         let text = ticket.to_string();
-        if peer.ticket.as_ref() == Some(&text) {
-            return Ok(());
-        }
-        let (updated, config) =
-            self.file
-                .prepare_peer(&name, &id, &text, None, PeerUpdate::Address)?;
-        self.file.persist(updated)?;
-        self.transport.set_peer(name, ticket);
-        self.apply_config(config);
+        Self::update_config(
+            gateway,
+            |g| {
+                let Some((name, peer)) = g
+                    .config
+                    .peers
+                    .iter()
+                    .find(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(&id))
+                else {
+                    return Ok(None);
+                };
+                if peer.ticket.as_ref() == Some(&text) {
+                    return Ok(None);
+                }
+                let name = name.clone();
+                let (updated, config) =
+                    g.file
+                        .prepare_peer(&name, &id, &text, None, PeerUpdate::Address)?;
+                Ok(Some((updated, config, (name, ticket))))
+            },
+            |g, (name, ticket)| {
+                g.transport.set_peer(name, ticket);
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -221,55 +249,77 @@ impl Gateway {
         self.transport.contact(crate::effective_device_name(&self.config))
     }
 
-    fn save_peer(&mut self, peer: &Contact, request_id: &str) -> Result<String> {
+    async fn save_peer(
+        gateway: &Mutex<Self>,
+        peer: &Contact,
+        request_id: &str,
+    ) -> Result<String> {
         let id = peer.id().to_string();
-        ensure!(id != self.transport.id(), "Cannot pair with this device");
-        let peers = &self.config.peers;
-        let alias = if let Some((name, _)) = peers
-            .iter()
-            .find(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(&id))
-        {
-            name.clone()
-        } else {
-            let name = peer.name.trim();
-            let mut alias = name.to_owned();
-            for suffix in 2.. {
-                if !peers.contains_key(&alias) {
-                    break;
-                }
-                alias = format!("{name}-{suffix}");
-            }
-            alias
-        };
-        let (text, config) = self.file.prepare_peer(
-            &alias,
-            &id,
-            &peer.ticket.to_string(),
-            Some(peer.platform),
-            PeerUpdate::Pair(Some(request_id)),
-        )?;
-        self.file.persist(text)?;
-        self.transport.set_peer(alias.clone(), peer.ticket.clone());
-        self.apply_config(config);
-        self.transport.remember_contact(peer);
-        Ok(self.peer_device_name(&self.config.peers[&alias]).unwrap_or(alias))
+        let ticket_text = peer.ticket.to_string();
+        let peer_clone = peer.clone();
+        let display = Self::update_config(
+            gateway,
+            |g| {
+                ensure!(id != g.transport.id(), "Cannot pair with this device");
+                let peers = &g.config.peers;
+                let alias = if let Some((name, _)) = peers
+                    .iter()
+                    .find(|(_, p)| p.endpoint_id.eq_ignore_ascii_case(&id))
+                {
+                    name.clone()
+                } else {
+                    let name = peer_clone.name.trim();
+                    let mut alias = name.to_owned();
+                    for suffix in 2.. {
+                        if !peers.contains_key(&alias) {
+                            break;
+                        }
+                        alias = format!("{name}-{suffix}");
+                    }
+                    alias
+                };
+                let (text, config) = g.file.prepare_peer(
+                    &alias,
+                    &id,
+                    &ticket_text,
+                    Some(peer_clone.platform),
+                    PeerUpdate::Pair(Some(request_id)),
+                )?;
+                Ok(Some((text, config, (alias, peer_clone))))
+            },
+            |g, (alias, peer)| {
+                g.transport.set_peer(alias.clone(), peer.ticket.clone());
+                g.transport.remember_contact(&peer);
+                g.peer_device_name(&g.config.peers[&alias])
+                    .unwrap_or(alias)
+            },
+        )
+        .await?
+        .context("Failed to persist paired device")?;
+        Ok(display)
     }
 
-    pub(super) fn answer_pairing(
-        &mut self,
+    pub(super) async fn answer_pairing(
+        gateway: &Mutex<Self>,
         id: &str,
         request_id: Option<&str>,
         accept: bool,
     ) -> Result<()> {
-        self.pairing.prune();
-        let (resolved_id, pending) = self.pairing.resolve_pending(id, request_id)?;
-        let resolved_id = resolved_id.to_owned();
-        let peer = pending.peer.clone();
-        let generation = pending.request_id.clone();
-        let (decision, message) = if accept {
-            let name = self.save_peer(&peer, &generation)?;
+        let (resolved_id, peer, generation, local_contact) = {
+            let mut g = gateway.lock().await;
+            g.pairing.prune();
+            let (resolved_id, pending) = g.pairing.resolve_pending(id, request_id)?;
             (
-                Decision::Accepted(self.contact()),
+                resolved_id.to_owned(),
+                pending.peer.clone(),
+                pending.request_id.clone(),
+                g.contact(),
+            )
+        };
+        let (decision, message) = if accept {
+            let name = Self::save_peer(gateway, &peer, &generation).await?;
+            (
+                Decision::Accepted(local_contact),
                 format!("Paired with {name}."),
             )
         } else {
@@ -278,19 +328,17 @@ impl Gateway {
                 format!("Declined pairing with {}.", peer.name),
             )
         };
-        let pending = self
-            .pairing
-            .pending
-            .remove(&resolved_id)
-            .expect("pending request");
-        for reply in pending.replies {
-            let _ = reply.send(decision.clone());
+        let mut g = gateway.lock().await;
+        if let Some(pending) = g.pairing.pending.remove(&resolved_id) {
+            for reply in pending.replies {
+                let _ = reply.send(decision.clone());
+            }
+            g.pairing.replies.insert(
+                (resolved_id, pending.request_id),
+                (Instant::now() + Duration::from_secs(90), decision),
+            );
         }
-        self.pairing.replies.insert(
-            (resolved_id, pending.request_id),
-            (Instant::now() + Duration::from_secs(90), decision),
-        );
-        self.pairing.message = Some(message);
+        g.pairing.message = Some(message);
         Ok(())
     }
 
@@ -315,6 +363,21 @@ impl Gateway {
             let Some(gateway) = gateway.upgrade() else {
                 return;
             };
+            let still_current = gateway
+                .lock()
+                .await
+                .pairing
+                .outgoing
+                .as_ref()
+                .is_some_and(|o| o.request_id == attempt);
+            if !still_current {
+                return;
+            }
+            let saved = match result {
+                Ok(Decision::Accepted(peer)) => Self::save_peer(&gateway, &peer, &attempt).await,
+                Ok(Decision::Rejected(reason)) => Err(anyhow::anyhow!("{reason}")),
+                Err(e) => Err(e),
+            };
             let mut g = gateway.lock().await;
             if !g
                 .pairing
@@ -324,15 +387,11 @@ impl Gateway {
             {
                 return;
             }
-            let message = match result.and_then(|decision| match decision {
-                Decision::Accepted(peer) => g.save_peer(&peer, &attempt),
-                Decision::Rejected(reason) => anyhow::bail!("{reason}"),
-            }) {
+            g.pairing.outgoing = None;
+            g.pairing.message = Some(match saved {
                 Ok(name) => format!("Paired with {name}."),
                 Err(e) => format!("Pairing failed: {e:#}"),
-            };
-            g.pairing.outgoing = None;
-            g.pairing.message = Some(message);
+            });
         });
         self.pairing.outgoing = Some(Outgoing {
             id,
@@ -395,4 +454,5 @@ mod tests {
         assert!(pairings.resolve_pending(&first_id[..3], None).is_err());
         Ok(())
     }
+
 }

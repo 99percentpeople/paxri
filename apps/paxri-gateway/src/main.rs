@@ -106,6 +106,7 @@ struct Gateway {
     user_managed: bool,
     pairing: pairing::Pairings,
     config: Arc<Config>,
+    config_io: Arc<Mutex<()>>,
     file: SettingsFile,
     direct_only: bool,
     transport: Arc<NativeTransport>,
@@ -115,6 +116,11 @@ struct Gateway {
     listeners: BTreeMap<String, Listener>,
     reverse_routes: Routes,
     streams: Arc<Semaphore>,
+}
+
+async fn lock_config_io(gateway: &Mutex<Gateway>) -> tokio::sync::OwnedMutexGuard<()> {
+    let io = gateway.lock().await.config_io.clone();
+    io.lock_owned().await
 }
 
 fn effective_device_name(config: &Config) -> String {
@@ -185,31 +191,108 @@ impl Gateway {
         Ok(())
     }
 
+    pub(crate) async fn persist_file(path: PathBuf, base: String, next: String) -> Result<String> {
+        tokio::task::spawn_blocking(move || paxri_config::file::save_gateway(&path, &base, next))
+            .await
+            .context("config persistence task panicked")?
+    }
+
+    /// Serialize a `node.toml` mutation on `config_io` and run blocking file I/O on Tokio's
+    /// blocking pool while keeping `gateway` unlocked.
+    pub(crate) async fn update_config<T, R>(
+        gateway: &Mutex<Self>,
+        prepare: impl FnOnce(&mut Self) -> Result<Option<(String, Config, T)>>,
+        commit: impl FnOnce(&mut Self, T) -> R,
+    ) -> Result<Option<R>> {
+        let _io = lock_config_io(gateway).await;
+        let prepared = {
+            let mut g = gateway.lock().await;
+            let Some((next, config, payload)) = prepare(&mut g)? else {
+                return Ok(None);
+            };
+            (g.file.path.clone(), g.file.text.clone(), next, config, payload)
+        };
+        let (path, base, next, config, payload) = prepared;
+        let saved = Self::persist_file(path, base, next).await?;
+        let mut g = gateway.lock().await;
+        g.file.text = saved;
+        g.apply_config(config);
+        Ok(Some(commit(&mut g, payload)))
+    }
+
     async fn set_forward(
-        &mut self,
+        gateway: &Mutex<Self>,
         name: &str,
         enabled: bool,
         expected_peer: Option<&str>,
     ) -> Result<()> {
-        self.check_forward_peer(name, expected_peer)?;
-        let rule = self
-            .config
-            .forwards
-            .get(name)
-            .with_context(|| format!("unknown forward {name}"))?;
-        if enabled {
-            if !self
-                .listeners
-                .get(name)
-                .is_some_and(|listener| !matches!(listener, Listener::Failed(_)))
-            {
-                let listener = self.prepare_listener(name, rule).await?;
-                self.listeners.insert(name.to_owned(), listener);
-            }
-        } else if let Some(listener) = self.listeners.remove(name) {
-            listener.stop().await;
+        let _io = lock_config_io(gateway).await;
+        enum Plan {
+            Noop,
+            Stop(Listener),
+            BindLocal(Forward),
+            StartRemote(Forward),
         }
-        Ok(())
+        let plan = {
+            let mut g = gateway.lock().await;
+            g.check_forward_peer(name, expected_peer)?;
+            let rule = g
+                .config
+                .forwards
+                .get(name)
+                .with_context(|| format!("unknown forward {name}"))?
+                .clone();
+            if enabled {
+                if g.listeners
+                    .get(name)
+                    .is_some_and(|listener| !matches!(listener, Listener::Failed(_)))
+                {
+                    Plan::Noop
+                } else if rule.direction == Direction::Local {
+                    Plan::BindLocal(rule)
+                } else {
+                    Plan::StartRemote(rule)
+                }
+            } else if let Some(listener) = g.listeners.remove(name) {
+                Plan::Stop(listener)
+            } else {
+                Plan::Noop
+            }
+        };
+        match plan {
+            Plan::Noop => Ok(()),
+            Plan::Stop(listener) => {
+                listener.stop().await;
+                Ok(())
+            }
+            Plan::BindLocal(rule) => {
+                let socket = Self::bind(name, &rule).await?;
+                let mut g = gateway.lock().await;
+                if g.config.forwards.get(name) == Some(&rule)
+                    && !g
+                        .listeners
+                        .get(name)
+                        .is_some_and(|listener| !matches!(listener, Listener::Failed(_)))
+                {
+                    let listener = g.start_listener(socket, &rule)?;
+                    g.listeners.insert(name.to_owned(), listener);
+                }
+                Ok(())
+            }
+            Plan::StartRemote(rule) => {
+                let mut g = gateway.lock().await;
+                if g.config.forwards.get(name) == Some(&rule)
+                    && !g
+                        .listeners
+                        .get(name)
+                        .is_some_and(|listener| !matches!(listener, Listener::Failed(_)))
+                {
+                    let listener = g.remote_listener(&rule);
+                    g.listeners.insert(name.to_owned(), listener);
+                }
+                Ok(())
+            }
+        }
     }
 
     async fn bind(name: &str, rule: &Forward) -> Result<TcpListener> {
@@ -227,13 +310,6 @@ impl Gateway {
             rule.target.clone(),
             self.reverse_routes.clone(),
         ))
-    }
-
-    async fn prepare_listener(&self, name: &str, rule: &Forward) -> Result<Listener> {
-        match rule.direction {
-            Direction::Local => self.start_listener(Self::bind(name, rule).await?, rule),
-            Direction::Remote => Ok(self.remote_listener(rule)),
-        }
     }
 
     fn start_listener(&self, socket: TcpListener, rule: &Forward) -> Result<Listener> {
@@ -285,141 +361,191 @@ impl Gateway {
         }
     }
 
-    async fn change_settings(&mut self, mut change: Command) -> Result<()> {
-        // Store the configured alias while holding the same lock as the settings write.
-        if let Command::SaveForward {
-            rule: Forward { peer, .. },
-            ..
-        } = &mut change
-        {
-            self.canonicalize_peer(peer)?;
-        }
-        if let Command::SaveForward {
-            id,
-            expected_peer,
-            ..
-        }
-        | Command::RemoveForward {
-            id,
-            expected_peer,
-        } = &change
-        {
-            self.check_forward_peer(id, expected_peer.as_deref())?;
-        }
-        if let Command::SaveForward { id, edit: false, .. } = &mut change
-            && id.is_empty()
-        {
-            *id = self.generate_forward_id()?;
-        }
-        let (text, config) = self.file.prepare(&change)?;
-        // Reserve any new port before saving. The active rule survives a bind or disk error.
-        let mut replace = false;
+    async fn change_settings(gateway: &Mutex<Self>, mut change: Command) -> Result<()> {
+        let _io = lock_config_io(gateway).await;
+        let (path, base_text, next_text, config, replace, bind_plan) = {
+            let g = gateway.lock().await;
+            // Store the configured alias while holding the same lock as the settings write.
+            if let Command::SaveForward {
+                rule: Forward { peer, .. },
+                ..
+            } = &mut change
+            {
+                g.canonicalize_peer(peer)?;
+            }
+            if let Command::SaveForward {
+                id,
+                expected_peer,
+                ..
+            }
+            | Command::RemoveForward {
+                id,
+                expected_peer,
+            } = &change
+            {
+                g.check_forward_peer(id, expected_peer.as_deref())?;
+            }
+            if let Command::SaveForward {
+                id,
+                edit: false,
+                ..
+            } = &mut change
+                && id.is_empty()
+            {
+                *id = g.generate_forward_id()?;
+            }
+            let (text, config) = g.file.prepare(&change)?;
+            let mut replace = false;
+            let mut bind_plan = None;
+            if let Command::SaveForward { id, edit, .. } = &change {
+                let rule = &config.forwards[id];
+                anyhow::ensure!(
+                    !g.direct_only || config.peers[&rule.peer].ticket.is_some(),
+                    "direct-only forwarding to {} requires a peer ticket",
+                    rule.peer
+                );
+                replace = !edit
+                    || g.listeners.get(id).is_some_and(|old| {
+                        if matches!(old, Listener::Failed(_)) {
+                            return true;
+                        }
+                        let prior = &g.config.forwards[id];
+                        prior.direction != rule.direction
+                            || match rule.direction {
+                                Direction::Remote => {
+                                    prior.peer != rule.peer || prior.listen != rule.listen
+                                }
+                                Direction::Local => {
+                                    prior.listen != rule.listen
+                                        && old.state().address != Some(rule.listen)
+                                }
+                            }
+                    });
+                if replace && rule.direction == Direction::Local {
+                    bind_plan = Some((id.clone(), *edit, rule.clone()));
+                }
+            }
+            (
+                g.file.path.clone(),
+                g.file.text.clone(),
+                text,
+                config,
+                replace,
+                bind_plan,
+            )
+        };
+        // Reserve any new port outside gateway.lock(). The active rule survives a bind or disk error.
         let mut socket = None;
         let mut released_local = None;
-        if let Command::SaveForward { id, edit, .. } = &change {
-            let rule = &config.forwards[id];
-            anyhow::ensure!(
-                !self.direct_only || config.peers[&rule.peer].ticket.is_some(),
-                "direct-only forwarding to {} requires a peer ticket",
-                rule.peer
-            );
-            replace = !edit
-                || self.listeners.get(id).is_some_and(|old| {
-                    if matches!(old, Listener::Failed(_)) {
-                        return true;
-                    }
-                    let prior = &self.config.forwards[id];
-                    prior.direction != rule.direction
-                        || match rule.direction {
-                            Direction::Remote => {
-                                prior.peer != rule.peer || prior.listen != rule.listen
-                            }
-                            Direction::Local => {
-                                prior.listen != rule.listen
-                                    && old.state().address != Some(rule.listen)
-                            }
+        if let Some((id, edit, rule)) = bind_plan {
+            socket = Some(match Self::bind(&id, &rule).await {
+                Ok(bound) => bound,
+                Err(err)
+                    if edit
+                        && err
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse) =>
+                {
+                    let same_port_old = {
+                        let mut g = gateway.lock().await;
+                        let matches_same_port = matches!(
+                            g.listeners.get(&id),
+                            Some(Listener::Local(old))
+                                if old.address.port() == rule.listen.port()
+                        );
+                        if matches_same_port {
+                            let prior_rule = g.config.forwards[&id].clone();
+                            let old = g.listeners.remove(&id).expect("local listener");
+                            let prior_addr = old.state().address.unwrap_or(prior_rule.listen);
+                            Some((old, prior_rule, prior_addr))
+                        } else {
+                            None
                         }
-                });
-            if replace && rule.direction == Direction::Local {
-                socket = Some(match Self::bind(id, rule).await {
-                    Ok(bound) => bound,
-                    Err(err)
-                        if *edit
-                            && err
-                                .downcast_ref::<std::io::Error>()
-                                .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
-                            && matches!(
-                                self.listeners.get(id),
-                                Some(Listener::Local(old))
-                                    if old.address.port() == rule.listen.port()
-                            ) =>
-                    {
-                        // Rebinding the same port on a different interface (e.g. 127.0.0.1 -> 0.0.0.0)
-                        // must release this rule's own listener first, restoring it on failure.
-                        let prior_rule = self.config.forwards[id].clone();
-                        let old = self.listeners.remove(id).expect("local listener");
-                        let prior_addr = old.state().address.unwrap_or(prior_rule.listen);
-                        old.stop().await;
-                        match Self::bind(id, rule).await {
-                            Ok(bound) => {
-                                released_local = Some((id.clone(), prior_rule, prior_addr));
-                                bound
-                            }
-                            Err(retry_err) => {
-                                if let Ok(restored) = TcpListener::bind(prior_addr).await
-                                    && let Ok(listener) = self.start_listener(restored, &prior_rule)
-                                {
-                                    self.listeners.insert(id.clone(), listener);
-                                }
-                                return Err(retry_err);
-                            }
-                        }
-                    }
-                    Err(err) => return Err(err),
-                });
-            }
-        }
-        if let Err(err) = self.file.persist(text) {
-            drop(socket);
-            if let Some((old_id, prior_rule, prior_addr)) = released_local
-                && let Ok(restored) = TcpListener::bind(prior_addr).await
-                && let Ok(listener) = self.start_listener(restored, &prior_rule)
-            {
-                self.listeners.insert(old_id, listener);
-            }
-            return Err(err);
-        }
-        match change {
-            Command::SaveForward { id, .. } => {
-                let rule = &config.forwards[&id];
-                if replace {
-                    if let Some(old) = self.listeners.remove(&id) {
-                        old.stop().await;
-                    }
-                    let listener = match socket {
-                        Some(socket) => self.start_listener(socket, rule)?,
-                        None => self.remote_listener(rule),
                     };
-                    self.listeners.insert(id, listener);
-                } else if let Some(listener) = self.listeners.get(&id) {
-                    listener.update_destination(rule);
-                }
-            }
-            Command::RemoveForward { id, .. } => {
-                if let Some(old) = self.listeners.remove(&id) {
+                    let Some((old, prior_rule, prior_addr)) = same_port_old else {
+                        return Err(err);
+                    };
+                    // Rebinding the same port on a different interface (e.g. 127.0.0.1 -> 0.0.0.0)
+                    // must release this rule's own listener first, restoring it on failure.
                     old.stop().await;
+                    match Self::bind(&id, &rule).await {
+                        Ok(bound) => {
+                            released_local = Some((id.clone(), prior_rule, prior_addr));
+                            bound
+                        }
+                        Err(retry_err) => {
+                            if let Ok(restored) = TcpListener::bind(prior_addr).await {
+                                let mut g = gateway.lock().await;
+                                if let Ok(listener) = g.start_listener(restored, &prior_rule) {
+                                    g.listeners.insert(id.clone(), listener);
+                                }
+                            }
+                            return Err(retry_err);
+                        }
+                    }
                 }
-            }
-            _ => {}
+                Err(err) => return Err(err),
+            });
         }
-        self.apply_config(config);
+        let saved = match Self::persist_file(path, base_text, next_text).await {
+            Ok(saved) => saved,
+            Err(err) => {
+                drop(socket);
+                if let Some((old_id, prior_rule, prior_addr)) = released_local
+                    && let Ok(restored) = TcpListener::bind(prior_addr).await
+                {
+                    let mut g = gateway.lock().await;
+                    if let Ok(listener) = g.start_listener(restored, &prior_rule) {
+                        g.listeners.insert(old_id, listener);
+                    }
+                }
+                return Err(err);
+            }
+        };
+        let to_stop = {
+            let mut g = gateway.lock().await;
+            let mut to_stop = None;
+            match change {
+                Command::SaveForward { id, .. } => {
+                    let rule = &config.forwards[&id];
+                    if replace {
+                        to_stop = g.listeners.remove(&id);
+                        let listener = match socket {
+                            Some(socket) => g.start_listener(socket, rule)?,
+                            None => g.remote_listener(rule),
+                        };
+                        g.listeners.insert(id, listener);
+                    } else if let Some(listener) = g.listeners.get(&id) {
+                        listener.update_destination(rule);
+                    }
+                }
+                Command::RemoveForward { id, .. } => {
+                    to_stop = g.listeners.remove(&id);
+                }
+                _ => {}
+            }
+            g.file.text = saved;
+            g.apply_config(config);
+            to_stop
+        };
+        if let Some(old) = to_stop {
+            old.stop().await;
+        }
         Ok(())
     }
 
-    fn status(&mut self) -> Status {
+    async fn status_snapshot(gateway: &Mutex<Self>) -> Status {
+        let path = gateway.lock().await.file.path.clone();
+        let local = tokio::task::spawn_blocking(move || paxri_config::file::read_local(&path).ok())
+            .await
+            .ok()
+            .flatten();
+        gateway.lock().await.status_with_local(local)
+    }
+
+    fn status_with_local(&mut self, local: Option<paxri_config::file::LocalSettings>) -> Status {
         let ticket = self.transport.current_ticket().to_string();
         let config = &self.config;
-        let local = paxri_config::file::read_local(&self.file.path).ok();
         let native = local.as_ref().map_or(&config.native, |p| &p.native);
         Status {
             peer_presence: true,
@@ -518,10 +644,7 @@ async fn check_peer<'a>(
     Ok((state, name))
 }
 
-async fn reconnect_peer<'a>(
-    gateway: &'a Mutex<Gateway>,
-    selector: &str,
-) -> Result<(tokio::sync::MutexGuard<'a, Gateway>, String)> {
+async fn reconnect_peer(gateway: &Mutex<Gateway>, selector: &str) -> Result<Status> {
     let (transport, name, expected_id) = {
         let state = gateway.lock().await;
         let (name, peer) = state.config.resolve_peer(selector)?;
@@ -533,16 +656,18 @@ async fn reconnect_peer<'a>(
     )
     .await
     .with_context(|| format!("Reconnecting to {name} timed out"))??;
-    let state = gateway.lock().await;
-    anyhow::ensure!(
-        state
-            .config
-            .peers
-            .get(&name)
-            .is_some_and(|p| p.endpoint_id == expected_id),
-        "Pairing changed while reconnecting to {name}"
-    );
-    Ok((state, name))
+    {
+        let state = gateway.lock().await;
+        anyhow::ensure!(
+            state
+                .config
+                .peers
+                .get(&name)
+                .is_some_and(|p| p.endpoint_id == expected_id),
+            "Pairing changed while reconnecting to {name}"
+        );
+    }
+    Ok(Gateway::status_snapshot(gateway).await)
 }
 
 async fn handle_client(
@@ -596,7 +721,7 @@ async fn handle_client(
             }
         }
         Command::Status => {
-            let status = gateway.lock().await.status();
+            let status = Gateway::status_snapshot(&gateway).await;
             paxri_control::respond(&mut socket, Ok(status)).await
         }
         Command::PeerStatus { peer, check } => {
@@ -637,33 +762,54 @@ async fn handle_client(
             }
         }
         Command::ReconnectPeer { peer } => {
-            let snapshot = reconnect_peer(&gateway, &peer)
-                .await
-                .map(|(mut state, _)| state.status());
+            let snapshot = reconnect_peer(&gateway, &peer).await;
             paxri_control::respond(&mut socket, snapshot).await
         }
         Command::SetNative { change } => {
-            let mut state = gateway.lock().await;
-            let result = paxri_config::file::set_native(&state.file.path, change, false)
-                .map(|_| state.status());
-            drop(state);
+            let result = async {
+                let _io = lock_config_io(&gateway).await;
+                let path = gateway.lock().await.file.path.clone();
+                tokio::task::spawn_blocking(move || {
+                    paxri_config::file::set_native(&path, change, false)
+                })
+                .await
+                .context("set_native task panicked")??;
+                Ok(Gateway::status_snapshot(&gateway).await)
+            }
+            .await;
             paxri_control::respond(&mut socket, result).await
         }
         Command::SetGateway { change } => {
-            let mut state = gateway.lock().await;
-            let result = paxri_config::file::set_gateway(&state.file.path, change, false)
-                .map(|updated| {
-                    state.session_keep_alive.send_replace(updated.session_keep_alive);
-                    state.status()
-                });
-            drop(state);
+            let result = async {
+                let _io = lock_config_io(&gateway).await;
+                let path = gateway.lock().await.file.path.clone();
+                let updated = tokio::task::spawn_blocking(move || {
+                    paxri_config::file::set_gateway(&path, change, false)
+                })
+                .await
+                .context("set_gateway task panicked")??;
+                gateway
+                    .lock()
+                    .await
+                    .session_keep_alive
+                    .send_replace(updated.session_keep_alive);
+                Ok(Gateway::status_snapshot(&gateway).await)
+            }
+            .await;
             paxri_control::respond(&mut socket, result).await
         }
         Command::SetGui { change } => {
-            let mut state = gateway.lock().await;
-            let result = paxri_config::file::set_gui(&state.file.path, change, false)
-                .map(|_| state.status());
-            drop(state);
+            let result = async {
+                let _io = lock_config_io(&gateway).await;
+                let path = gateway.lock().await.file.path.clone();
+                tokio::task::spawn_blocking(move || {
+                    paxri_config::file::set_gui(&path, change, false)
+                })
+                .await
+                .context("set_gui task panicked")??;
+                Ok(Gateway::status_snapshot(&gateway).await)
+            }
+            .await;
             paxri_control::respond(&mut socket, result).await
         }
         Command::Unpair { peer, expected_id } => {
@@ -674,23 +820,26 @@ async fn handle_client(
         | Command::CancelPairing
         | Command::JoinPairing { .. }
         | Command::AnswerPairing { .. } => {
-            let mut state = gateway.lock().await;
-            let result = match command {
+            let outcome = match command {
                 Command::RefreshPairingCode => {
-                    let ticket = state.transport.current_ticket();
-                    state.refresh_pairing(&ticket)
+                    let ticket = gateway.lock().await.transport.current_ticket();
+                    Gateway::refresh_pairing(&gateway, &ticket).await
                 }
-                Command::CancelPairing => state.pairing.cancel(),
-                Command::JoinPairing { code } => state.join_pairing(&code, &gateway),
+                Command::CancelPairing => gateway.lock().await.pairing.cancel(),
+                Command::JoinPairing { code } => {
+                    gateway.lock().await.join_pairing(&code, &gateway)
+                }
                 Command::AnswerPairing {
                     device_id,
                     request_id,
                     accept,
-                } => state.answer_pairing(&device_id, request_id.as_deref(), accept),
+                } => Gateway::answer_pairing(&gateway, &device_id, request_id.as_deref(), accept).await,
                 _ => unreachable!(),
-            }
-            .map(|_| state.status());
-            drop(state);
+            };
+            let result = match outcome {
+                Ok(()) => Ok(Gateway::status_snapshot(&gateway).await),
+                Err(e) => Err(e),
+            };
             paxri_control::respond(&mut socket, result).await
         }
         Command::SetForward {
@@ -698,24 +847,18 @@ async fn handle_client(
             enabled,
             expected_peer,
         } => {
-            let result = {
-                let mut gateway = gateway.lock().await;
-                gateway
-                    .set_forward(&id, enabled, expected_peer.as_deref())
-                    .await
-                    .map(|_| gateway.status())
+            let result = match Gateway::set_forward(&gateway, &id, enabled, expected_peer.as_deref()).await {
+                Ok(()) => Ok(Gateway::status_snapshot(&gateway).await),
+                Err(e) => Err(e),
             };
             paxri_control::respond(&mut socket, result).await
         }
         Command::SaveForward { .. }
         | Command::RemoveForward { .. }
         | Command::SetDeviceName { .. } => {
-            let result = {
-                let mut gateway = gateway.lock().await;
-                gateway
-                    .change_settings(command)
-                    .await
-                    .map(|_| gateway.status())
+            let result = match Gateway::change_settings(&gateway, command).await {
+                Ok(()) => Ok(Gateway::status_snapshot(&gateway).await),
+                Err(e) => Err(e),
             };
             paxri_control::respond(&mut socket, result).await
         }
@@ -949,11 +1092,12 @@ async fn run(
     let mut peer_changes = transport.subscribe_peer_changes();
     peer_changes.mark_changed();
     let mut device_info = transport.subscribe_device_info();
-    let mut gateway = Gateway {
+    let gateway = Arc::new(Mutex::new(Gateway {
         active_native: config.native.clone(),
         user_managed: options.user_managed,
         pairing: Default::default(),
         config: config.clone(),
+        config_io: Arc::new(Mutex::new(())),
         file: SettingsFile {
             path: options.config.canonicalize()?,
             text,
@@ -966,38 +1110,78 @@ async fn run(
         listeners: BTreeMap::new(),
         reverse_routes: routes.clone(),
         streams: Arc::new(Semaphore::new(256)),
-    };
-    if let Err(e) = gateway.init_pairing().await {
-        gateway.pairing.message = Some(format!("Pairing code unavailable: {e:#}"));
+    }));
+    if let Err(e) = Gateway::init_pairing(&gateway).await {
+        gateway.lock().await.pairing.message = Some(format!("Pairing code unavailable: {e:#}"));
     }
     for name in config.forwards.keys() {
-        if let Err(err) = gateway.set_forward(name, true, None).await {
+        if let Err(err) = Gateway::set_forward(&gateway, name, true, None).await {
             let message = format!("{err:#}");
             eprintln!("Starting forward {name}: {message}");
-            gateway.listeners.insert(name.clone(), Listener::Failed(message));
+            gateway
+                .lock()
+                .await
+                .listeners
+                .insert(name.clone(), Listener::Failed(message));
         }
     }
-    if options.user_managed
-        && let Err(error) =
-            paxri_config::file::record_gateway_address(&gateway.file.path, &path)
-    {
-        eprintln!("Could not record local gateway address: {error:#}");
+    if options.user_managed {
+        let config_path = gateway.lock().await.file.path.clone();
+        let ipc_path = path.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            paxri_config::file::record_gateway_address(&config_path, &ipc_path)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.into()))
+        {
+            eprintln!("Could not record local gateway address: {error:#}");
+        }
     }
     ready()?;
-    eprintln!(
-        "gateway {} ready at {}",
-        gateway.transport.id(),
-        path.display()
-    );
-    clients.spawn(terminal::watch_capabilities(gateway.transport.clone()));
-    clients.spawn(gateway.transport.clone().announce_presence());
-    let gateway = Arc::new(Mutex::new(gateway));
+    let (transport, transport_id) = {
+        let g = gateway.lock().await;
+        (g.transport.clone(), g.transport.id())
+    };
+    eprintln!("gateway {transport_id} ready at {}", path.display());
+    clients.spawn(terminal::watch_capabilities(transport.clone()));
+    clients.spawn(transport.clone().announce_presence());
     clients.spawn(streams::serve(
         stream_rx, stream_config, routes, gateway.clone(), tools,
     ));
     let management = Arc::new(Semaphore::new(32));
     clients.spawn(platforms::fill_missing(gateway.clone()));
     clients.spawn(unpair::retry_pending(gateway.clone()));
+    // Run periodic disk persistence on dedicated background tasks so the main accept loop never stalls.
+    {
+        let gateway = gateway.clone();
+        clients.spawn(async move {
+            while peer_changes.changed().await.is_ok() {
+                if let Err(err) = Gateway::persist_peer_changes(&gateway).await {
+                    eprintln!("Saving peer connection times: {err:#}");
+                }
+            }
+        });
+    }
+    {
+        let gateway = gateway.clone();
+        clients.spawn(async move {
+            while device_info.changed().await.is_ok() {
+                if let Err(err) = Gateway::persist_peer_info(&gateway).await {
+                    eprintln!("Saving peer information: {err:#}");
+                }
+            }
+        });
+    }
+    {
+        let gateway = gateway.clone();
+        clients.spawn(async move {
+            while let Some(ticket) = peer_addresses.recv().await {
+                if let Err(err) = Gateway::update_peer_ticket(&gateway, ticket).await {
+                    eprintln!("Saving peer addresses: {err:#}");
+                }
+            }
+        });
+    }
     tokio::pin!(stop);
     let (shutdown, mut requests) = tokio::sync::mpsc::channel(1);
     let shutdown = options.user_managed.then_some(shutdown);
@@ -1005,32 +1189,19 @@ async fn run(
         tokio::select! {
             result = &mut stop => break (result, None),
             Some(client) = requests.recv(), if shutdown.is_some() => break (Ok(()), Some(client)),
-            Ok(()) = peer_changes.changed() => {
-                if let Err(err) = gateway.lock().await.persist_peer_changes() {
-                    eprintln!("Saving peer connection times: {err:#}");
-                }
-            }
-            Ok(()) = device_info.changed() => {
-                if let Err(err) = gateway.lock().await.persist_peer_info() {
-                    eprintln!("Saving peer information: {err:#}");
-                }
-            }
-            Some(ticket) = peer_addresses.recv() => {
-                if let Err(err) = gateway.lock().await.update_peer_ticket(ticket) {
-                    eprintln!("Saving peer addresses: {err:#}");
-                }
-            }
             Some(request) = pair_requests.recv() => {
                 use paxri_native::gateway::pairing::Incoming;
-                let mut state = gateway.lock().await;
                 match request {
-                    Incoming::Join(join) => state.pairing.receive(join),
+                    Incoming::Join(join) => gateway.lock().await.pairing.receive(join),
                     Incoming::Unpair { authenticated_id, pairing_id, reply } => {
-                        let result = state.receive_unpair(&authenticated_id, pairing_id.as_deref()).await;
-                        let _ = reply.send(result.map_err(|e| {
-                            eprintln!("Unpairing {authenticated_id}: {e:#}");
-                            "Could not save the unpair request".into()
-                        }));
+                        let gateway = gateway.clone();
+                        clients.spawn(async move {
+                            let result = unpair::receive_unpair(&gateway, &authenticated_id, pairing_id.as_deref()).await;
+                            let _ = reply.send(result.map_err(|e| {
+                                eprintln!("Unpairing {authenticated_id}: {e:#}");
+                                "Could not save the unpair request".into()
+                            }));
+                        });
                     }
                 }
             }
@@ -1056,7 +1227,7 @@ async fn run(
         mapping.stop().await;
     }
     let result = result.and(router.shutdown().await.map_err(anyhow::Error::from));
-    if let Err(err) = gateway.lock().await.persist_peer_changes() {
+    if let Err(err) = Gateway::persist_peer_changes(&gateway).await {
         eprintln!("Saving peer connection times: {err:#}");
     }
     drop(gateway);

@@ -111,6 +111,7 @@ pub struct Client {
     transport: Arc<NativeTransport>,
     presence: tokio::task::JoinHandle<()>,
     router: iroh::protocol::Router,
+    devices_io: Mutex<()>,
     devices: Mutex<SavedDevices>,
     probing: std::sync::Mutex<BTreeMap<usize, watch::Receiver<Option<bool>>>>,
     file: PathBuf,
@@ -149,6 +150,14 @@ fn config(devices: &SavedDevices) -> Result<Arc<Config>> {
     Ok(Arc::new(serde_json::from_value(serde_json::json!({
         "version": 1, "native": {"upnp": false}, "peers": entries, "pending_unpairs": devices.pending_unpairs
     }))?))
+}
+
+fn write_devices_file(file: &Path, devices: &SavedDevices) -> Result<()> {
+    let mut temp = tempfile::NamedTempFile::new_in(file.parent().unwrap())?;
+    serde_json::to_writer(temp.as_file_mut(), devices)?;
+    temp.as_file().sync_all()?;
+    temp.persist(file)?;
+    Ok(())
 }
 
 impl Client {
@@ -202,6 +211,7 @@ impl Client {
             transport,
             presence,
             router,
+            devices_io: Mutex::new(()),
             devices: Mutex::new(devices),
             probing: Default::default(),
             file,
@@ -277,54 +287,59 @@ impl Client {
                     changed = info.changed() => {
                         if changed.is_err() { break; }
                         let Some(client) = weak.upgrade() else { break };
-                        let mut devices = client.devices.lock().await;
-                        let mut next = devices.clone();
-                        let mut changed = false;
-                        for (id, data) in info.borrow_and_update().iter() {
-                            if let Some(peer) = next.peers.get_mut(id) {
-                                if let Some(name) = data
-                                    .device_name
-                                    .as_deref()
-                                    .map(str::trim)
-                                    .filter(|name| !name.is_empty())
-                                    && peer.name != name
-                                {
-                                    peer.name = name.to_owned();
-                                    changed = true;
+                        let latest = info.borrow_and_update().clone();
+                        match client.update_devices(
+                            |devices| {
+                                let mut next = devices.clone();
+                                let mut changed = false;
+                                for (id, data) in &latest {
+                                    if let Some(peer) = next.peers.get_mut(id) {
+                                        if let Some(name) = data
+                                            .device_name
+                                            .as_deref()
+                                            .map(str::trim)
+                                            .filter(|name| !name.is_empty())
+                                            && peer.name != name
+                                        {
+                                            peer.name = name.to_owned();
+                                            changed = true;
+                                        }
+                                        if data.platform != paxri_config::DevicePlatform::Unknown && peer.platform != data.platform {
+                                            peer.platform = data.platform;
+                                            changed = true;
+                                        }
+                                        if peer.capabilities != Some(data.capabilities) {
+                                            peer.capabilities = Some(data.capabilities);
+                                            changed = true;
+                                        }
+                                    }
                                 }
-                                if data.platform != paxri_config::DevicePlatform::Unknown && peer.platform != data.platform {
-                                    peer.platform = data.platform;
-                                    changed = true;
-                                }
-                                if peer.capabilities != Some(data.capabilities) {
-                                    peer.capabilities = Some(data.capabilities);
-                                    changed = true;
-                                }
+                                Ok(changed.then_some((next, ())))
+                            },
+                            |_, _| {},
+                        ).await {
+                            Ok(Some((snapshot, ()))) => {
+                                let _ = updates.send(Update::Devices(snapshot)).await;
                             }
-                        }
-                        if changed {
-                            if let Err(e) = client.save(&next) {
-                                log::warn!("Saving peer capabilities: {e}");
-                            }
-                            *devices = next;
-                            let snapshot = devices.peers.clone();
-                            drop(devices);
-                            let _ = updates.send(Update::Devices(snapshot)).await;
+                            Ok(None) => {}
+                            Err(e) => log::warn!("Saving peer device info: {e}"),
                         }
                     }
                     ticket = changes.recv() => {
                         let (Some(ticket), Some(client)) = (ticket, weak.upgrade()) else { break };
                         let id = ticket.endpoint_addr().id.to_string();
-                        let mut devices = client.devices.lock().await;
-                        if devices.peers.get(&id).is_some_and(|old| old.ticket != ticket) {
-                            let mut next = devices.clone();
-                            next.peers.get_mut(&id).unwrap().ticket = ticket.clone();
-                            match client.save(&next) {
-                                Ok(()) => {
-                                    *devices = next;
+                        if let Err(e) = client.update_devices(
+                            |devices| {
+                                if !devices.peers.get(&id).is_some_and(|old| old.ticket != ticket) {
+                                    return Ok(None);
                                 }
-                                Err(e) => log::warn!("Saving peer address: {e}"),
-                            }
+                                let mut next = devices.clone();
+                                next.peers.get_mut(&id).unwrap().ticket = ticket.clone();
+                                Ok(Some((next, ())))
+                            },
+                            |_, _| {},
+                        ).await {
+                            log::warn!("Saving peer address: {e}");
                         }
                     }
                 }
@@ -438,17 +453,21 @@ impl Client {
             if times != latest {
                 times = latest;
                 let Some(client) = weak.upgrade() else { break };
-                let mut devices = client.devices.lock().await;
-                let mut dirty = false;
-                for (id, changed) in &times {
-                    if let Some(peer) = devices.peers.get_mut(id)
-                        && peer.last_status_change_ms.is_none_or(|old| old < *changed)
-                    {
-                        peer.last_status_change_ms = Some(*changed);
-                        dirty = true;
-                    }
-                }
-                if dirty && let Err(e) = client.write_devices(&devices) {
+                if let Err(e) = client
+                    .update_devices_file(|devices| {
+                        let mut dirty = false;
+                        for (id, changed) in &times {
+                            if let Some(peer) = devices.peers.get_mut(id)
+                                && peer.last_status_change_ms.is_none_or(|old| old < *changed)
+                            {
+                                peer.last_status_change_ms = Some(*changed);
+                                dirty = true;
+                            }
+                        }
+                        dirty
+                    })
+                    .await
+                {
                     log::warn!("Saving peer connection times: {e}");
                 }
             }
@@ -492,23 +511,57 @@ impl Client {
         }
     }
 
-    fn write_devices(&self, devices: &SavedDevices) -> Result<()> {
-        let mut temp = tempfile::NamedTempFile::new_in(self.file.parent().unwrap())?;
-        serde_json::to_writer(temp.as_file_mut(), devices)?;
-        temp.as_file().sync_all()?;
-        temp.persist(&self.file)?;
-        Ok(())
+    async fn persist_devices(&self, snapshot: SavedDevices) -> Result<()> {
+        let file = self.file.clone();
+        tokio::task::spawn_blocking(move || write_devices_file(&file, &snapshot))
+            .await
+            .context("Device state writer task failed")?
     }
 
-    fn save(&self, devices: &SavedDevices) -> Result<()> {
-        let settings = config(devices)?;
-        self.write_devices(devices)?;
+    /// Serializes disk writes through `devices_io` and never holds `devices` across `spawn_blocking`.
+    async fn update_devices_file(
+        &self,
+        mutate: impl FnOnce(&mut SavedDevices) -> bool,
+    ) -> Result<bool> {
+        let _io = self.devices_io.lock().await;
+        let next = {
+            let devices = self.devices.lock().await;
+            let mut next = devices.clone();
+            if !mutate(&mut next) {
+                return Ok(false);
+            }
+            next
+        };
+        self.persist_devices(next.clone()).await?;
+        *self.devices.lock().await = next;
+        Ok(true)
+    }
+
+    async fn update_devices<R>(
+        &self,
+        prepare: impl FnOnce(&SavedDevices) -> Result<Option<(SavedDevices, R)>>,
+        on_commit: impl FnOnce(&SavedDevices, &R),
+    ) -> Result<Option<(Peers, R)>> {
+        let _io = self.devices_io.lock().await;
+        let (next, settings, output) = {
+            let devices = self.devices.lock().await;
+            let Some((next, output)) = prepare(&devices)? else {
+                return Ok(None);
+            };
+            let settings = config(&next)?;
+            (next, settings, output)
+        };
+        self.persist_devices(next.clone()).await?;
+        let mut devices = self.devices.lock().await;
         // Presence reacts to the configuration event and must see the new address immediately.
-        for (id, peer) in &devices.peers {
+        for (id, peer) in &next.peers {
             self.transport.set_peer(id.clone(), peer.ticket.clone());
         }
         self.transport.update_config(settings);
-        Ok(())
+        on_commit(&next, &output);
+        let snapshot = next.peers.clone();
+        *devices = next;
+        Ok(Some((snapshot, output)))
     }
 
     pub async fn list(&self) -> Peers {
@@ -544,16 +597,22 @@ impl Client {
                     request_id: uuid::Uuid::new_v4().simple().to_string(),
                     pairing_id: Some(attempt),
                 };
-                let mut devices = self.devices.lock().await;
-                if devices.pending_unpairs.contains_key(&id) {
-                    // Keep an older local unpair until the remote has acknowledged it.
-                    drop(devices);
+                let saved = self
+                    .update_devices(
+                        |devices| {
+                            if devices.pending_unpairs.contains_key(&id) {
+                                // Keep an older local unpair until the remote has acknowledged it.
+                                return Ok(None);
+                            }
+                            let mut next = devices.clone();
+                            next.pending_unpairs.insert(id.clone(), notice.clone());
+                            Ok(Some((next, ())))
+                        },
+                        |_, _| {},
+                    )
+                    .await?;
+                if saved.is_none() {
                     self.transport.notify_unpair(&id, &notice).await?;
-                } else {
-                    let mut next = devices.clone();
-                    next.pending_unpairs.insert(id, notice);
-                    self.save(&next)?;
-                    *devices = next;
                 }
                 if withdrawn.is_some() { bail!("Pairing approval timed out"); }
                 return Ok(None);
@@ -564,24 +623,29 @@ impl Client {
             Decision::Rejected(reason) => bail!("{reason}"),
         };
         let id = peer.id().to_string();
-        let mut devices = self.devices.lock().await;
-        let mut next = devices.clone();
-        next.pending_unpairs.remove(&id);
-        next.peers.insert(
-            id,
-            Peer {
-                name: peer.name.clone(),
-                last_status_change_ms: Some(unix_time_ms()),
-                capabilities: Some(peer.capabilities),
-                platform: peer.platform,
-                ticket: peer.ticket.clone(),
-                generation: Some(attempt),
-            },
-        );
-        self.save(&next)?;
-        self.transport.remember_contact(&peer);
-        *devices = next;
-        Ok(Some(devices.peers.clone()))
+        let (snapshot, ()) = self
+            .update_devices(
+                |devices| {
+                    let mut next = devices.clone();
+                    next.pending_unpairs.remove(&id);
+                    next.peers.insert(
+                        id.clone(),
+                        Peer {
+                            name: peer.name.clone(),
+                            last_status_change_ms: Some(unix_time_ms()),
+                            capabilities: Some(peer.capabilities),
+                            platform: peer.platform,
+                            ticket: peer.ticket.clone(),
+                            generation: Some(attempt.clone()),
+                        },
+                    );
+                    Ok(Some((next, ())))
+                },
+                |_, _| self.transport.remember_contact(&peer),
+            )
+            .await?
+            .expect("accepted pairing always updates devices");
+        Ok(Some(snapshot))
     }
 
     pub async fn unpair(&self, id: &str, generation: Option<&str>) -> Result<Peers> {
@@ -591,27 +655,37 @@ impl Client {
     }
 
     async fn remove(&self, id: &str, generation: Option<&str>, notify_peer: bool) -> Result<UnpairAck> {
-        let mut devices = self.devices.lock().await;
-        let Some(peer) = devices.peers.get(id) else {
-            return Ok(UnpairAck::Cleared);
-        };
-        if generation != peer.generation.as_deref() {
+        let mut rejected = false;
+        let removed = self
+            .update_devices(
+                |devices| {
+                    let Some(peer) = devices.peers.get(id) else {
+                        return Ok(None);
+                    };
+                    if generation != peer.generation.as_deref() {
+                        rejected = true;
+                        return Ok(None);
+                    }
+                    let endpoint = peer.ticket.endpoint_addr().id;
+                    let mut next = devices.clone();
+                    next.peers.remove(id);
+                    if notify_peer {
+                        next.pending_unpairs.insert(id.to_owned(), PendingUnpair {
+                            name: peer.name.clone(),
+                            ticket: peer.ticket.to_string(),
+                            request_id: uuid::Uuid::new_v4().simple().to_string(),
+                            pairing_id: peer.generation.clone(),
+                        });
+                    }
+                    Ok(Some((next, endpoint)))
+                },
+                |_, endpoint| self.transport.forget_peer(*endpoint),
+            )
+            .await?;
+        if rejected {
             return Ok(UnpairAck::NewerPairing);
         }
-        let endpoint = peer.ticket.endpoint_addr().id;
-        let mut next = devices.clone();
-        next.peers.remove(id);
-        if notify_peer {
-            next.pending_unpairs.insert(id.to_owned(), PendingUnpair {
-                name: peer.name.clone(),
-                ticket: peer.ticket.to_string(),
-                request_id: uuid::Uuid::new_v4().simple().to_string(),
-                pairing_id: peer.generation.clone(),
-            });
-        }
-        self.save(&next)?;
-        self.transport.forget_peer(endpoint);
-        *devices = next;
+        let _ = removed;
         Ok(UnpairAck::Cleared)
     }
 
@@ -625,14 +699,21 @@ impl Client {
                 let Some(client) = weak.upgrade() else { return };
                 if config.borrow().pending_unpairs.get(id) != Some(notice) { continue; }
                 if client.transport.notify_unpair(id, notice).await.is_ok() {
-                    let mut devices = client.devices.lock().await;
-                    if devices.pending_unpairs.get(id) == Some(notice) {
-                        let mut next = devices.clone();
-                        next.pending_unpairs.remove(id);
-                        match client.save(&next) {
-                            Ok(()) => *devices = next,
-                            Err(error) => log::warn!("Saving unpair confirmation: {error}"),
-                        }
+                    if let Err(error) = client
+                        .update_devices(
+                            |devices| {
+                                if devices.pending_unpairs.get(id) != Some(notice) {
+                                    return Ok(None);
+                                }
+                                let mut next = devices.clone();
+                                next.pending_unpairs.remove(id);
+                                Ok(Some((next, ())))
+                            },
+                            |_, _| {},
+                        )
+                        .await
+                    {
+                        log::warn!("Saving unpair confirmation: {error}");
                     }
                 }
             }
