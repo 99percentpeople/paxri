@@ -1,5 +1,5 @@
 use super::*;
-use paxri_core::connection::{peer_state, unix_time_ms};
+use paxri_core::connection::unix_time_ms;
 use paxri_ui::components::{
     ButtonVariant::{Destructive, Ghost, Secondary},
     DeviceCounts, DropdownState, FLOATING_ACTION_CLEARANCE, Icon, ListState, ListView,
@@ -124,21 +124,45 @@ impl Mobile {
             Page::Terminal(id) => {
                 let id = *id;
                 let session = &self.sessions[&id];
-                let (title, subtitle) = session.labels(self.presence.online(&session.peer), cx);
-                let action = match session.state {
-                    SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => {
-                        let menu = self.session_menu(&session.peer, session.key, title.clone(), true, cx);
-                        Some(ui.actions_menu("terminal-actions", "Terminal actions".into(), menu)
-                            .circular_trigger().into_any_element())
+                let (title, subtitle) = self.session_labels(id, cx);
+                let action = match self
+                    .session_state(id)
+                    .map_or(SessionAction::Close, SessionState::action)
+                {
+                    SessionAction::End => {
+                        let menu = self.session_menu(
+                            &session.peer,
+                            session.key,
+                            title.clone(),
+                            Some(SessionAction::End),
+                            Some(id),
+                            cx,
+                        );
+                        Some(
+                            ui.actions_menu("terminal-actions", "Terminal actions".into(), menu)
+                                .circular_trigger()
+                                .into_any_element(),
+                        )
                     }
-                    SessionState::Stopping => None,
-                    SessionState::Ended(_) => Some(
+                    SessionAction::Cancel => Some(
+                        ui.button(Ghost, "cancel-session", Icon::Close.draw(20.))
+                            .circular()
+                            .tooltip(paxri_ui::components::tooltip("Cancel session".into()))
+                            .role(Role::Button)
+                            .aria_label("Cancel session")
+                            .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)))
+                            .into_any_element(),
+                    ),
+                    SessionAction::Close => Some(
                         ui.button(Ghost, "close-session", Icon::Close.draw(20.))
                             .circular()
                             .tooltip(paxri_ui::components::tooltip("Close session".into()))
                             .role(Role::Button)
                             .aria_label("Close session")
-                            .on_click(cx.listener(move |this, _, _, cx| this.end_session(id, cx)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.dismiss_session(id, cx);
+                                cx.notify();
+                            }))
                             .into_any_element(),
                     ),
                 };
@@ -309,7 +333,16 @@ impl Mobile {
         let mut peers: Vec<_> = self
             .peers
             .iter()
-            .filter(|(id, peer)| filters.matches(&query, &peer.name, "", id, peer.platform, peer_state(self.presence.paths_for(id), true)))
+            .filter(|(id, peer)| {
+                filters.matches(
+                    &query,
+                    &peer.name,
+                    "",
+                    id,
+                    peer.platform,
+                    self.peer_connection(id).phase().label(true),
+                )
+            })
             .map(|(id, peer)| {
                 let changed = self
                     .presence
@@ -336,12 +369,13 @@ impl Mobile {
         let matched = peers.len();
         let rows = peers.into_iter().map(|(id, peer, changed)| {
             let id = id.clone();
+            let conn = self.peer_connection(&id);
             ui.device_row(
                 id.clone(),
                 peer.platform,
                 peer.name.clone().into(),
-                self.presence.online(&id),
-                presence_detail(peer_state(self.presence.paths_for(&id), true), now, changed),
+                conn.is_connected(),
+                presence_detail(conn.phase().label(true), now, changed),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate(Page::Peer(id.clone()), cx);
@@ -450,7 +484,13 @@ impl Mobile {
                 Some((id, self.short_peer_id(id))),
             ))
             .child(ui.device_detail_sections(
-                self.connection_history.connection_section(id, paths, true, ui),
+                self.connection_history.connection_section_with_phase(
+                    id,
+                    paths,
+                    self.peer_connection(id).phase(),
+                    true,
+                    ui,
+                ),
                 counts,
                 peer.supports_forward_rules(),
                 cx.listener(move |this, _, _, cx| {
@@ -478,12 +518,13 @@ impl Mobile {
 
     fn terminal(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let toolbar = keybar_height(window, &self.keybar);
+        let connected = self.session_connected(id);
         let s = self.sessions.get_mut(&id).expect("active terminal session");
         let appearance = theme::current(cx).terminal;
         let background = s.screen.sync_appearance(Ui::new(window, cx).colors, &appearance);
         let cursor_shape = s
             .screen
-            .cursor_for_paint(s.connected(), !s.composing.text.is_empty(), window, cx);
+            .cursor_for_paint(connected, !s.composing.text.is_empty(), window, cx);
         let indicator_color = s.screen.palette.surface.foreground;
         let view = cx.entity();
         let sizing = view.clone();
@@ -509,6 +550,7 @@ impl Mobile {
                     }
                     let touchable = !DropdownState::has_open(cx);
                     this.set_touch_area(id, area, this.keybar.clone(), touchable);
+                    let connected = this.session_connected(id);
                     if let Some(s) = this.sessions.get_mut(&id) {
                         let grid = GridSize::from_viewport(bounds.size, s.screen.font.cell);
                         if s.screen.resize(grid) {
@@ -518,14 +560,13 @@ impl Mobile {
                             }));
                         }
                         let handles = s.handle_positions(scale);
-                        let connected = s.connected();
                         if this.selection_handles != Some((id, handles, connected))
                             && activity_action(&this.android, ActivityAction::SelectionHandles(id, handles, connected)).is_ok()
                         {
                             this.selection_handles = Some((id, handles, connected));
                         }
                         // The IME binds to the session registered by set_touch_area above.
-                        if this.keyboard_on_entry == Some(id) && s.connected() && touchable
+                        if this.keyboard_on_entry == Some(id) && connected && touchable
                             && !this.drawer.open && *ACTIVITY_VISIBLE.borrow()
                         {
                             this.keyboard_on_entry = None;

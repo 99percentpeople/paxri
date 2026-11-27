@@ -3,10 +3,19 @@ use crate::{Frame, Size};
 use anyhow::{Context, Result, bail, ensure};
 use paxri_core::{PeerSession, StreamKind};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::Notify,
+    time::timeout,
+};
 
 pub const HISTORY_LIMIT: usize = 256 * 1024;
 pub const SESSION_LIMIT: usize = 16;
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const INITIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+const KEEPALIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Key {
@@ -64,7 +73,15 @@ pub async fn read<T: DeserializeOwned>(r: &mut (impl AsyncRead + Unpin)) -> Resu
 }
 
 pub async fn request<S: PeerSession>(peer: S, action: Request) -> Result<(S::Stream, Vec<Key>)> {
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    request_with_timeout(peer, action, DEFAULT_REQUEST_TIMEOUT).await
+}
+
+pub async fn request_with_timeout<S: PeerSession>(
+    peer: S,
+    action: Request,
+    limit: Duration,
+) -> Result<(S::Stream, Vec<Key>)> {
+    timeout(limit, async {
         let mut stream = peer.open(StreamKind::ManagedTerminal).await?;
         write(&mut stream, &action).await?;
         match read::<Result<Vec<Key>, String>>(&mut stream)
@@ -84,6 +101,27 @@ pub async fn read_history(input: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8
     ensure!(length <= HISTORY_LIMIT, "invalid terminal history length");
     let mut bytes = vec![0; length];
     input.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
+
+/// Read replay history while requiring forward progress within `idle_timeout` per chunk.
+pub async fn read_history_with_timeout(
+    input: &mut (impl AsyncRead + Unpin),
+    idle_timeout: Duration,
+) -> Result<Vec<u8>> {
+    let length = timeout(idle_timeout, input.read_u32())
+        .await
+        .context("terminal history header timed out")?? as usize;
+    ensure!(length <= HISTORY_LIMIT, "invalid terminal history length");
+    let mut bytes = vec![0; length];
+    let mut offset = 0;
+    while offset < length {
+        let read = timeout(idle_timeout, input.read(&mut bytes[offset..]))
+            .await
+            .context("terminal history timed out")??;
+        ensure!(read > 0, "terminal history ended unexpectedly");
+        offset += read;
+    }
     Ok(bytes)
 }
 
@@ -111,15 +149,22 @@ pub enum AttachmentEvent {
 /// the shell is idle or is producing continuous output on a one-way connection.
 pub async fn attachment<F: Future<Output = Result<()>>>(
     stream: impl AsyncRead + AsyncWrite + Unpin,
-    mut input: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+    input: tokio::sync::mpsc::UnboundedReceiver<Frame>,
     heartbeat: bool,
     event: impl Fn(AttachmentEvent) -> F,
 ) -> Result<u32> {
-    use std::time::Duration;
-    use tokio::{
-        sync::{Notify, mpsc},
-        time::{sleep, timeout},
-    };
+    attachment_with_probe(stream, input, heartbeat, None, event).await
+}
+
+/// Like [`attachment`], with an optional notifier that triggers an immediate round-trip probe.
+pub async fn attachment_with_probe<F: Future<Output = Result<()>>>(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    mut input: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+    heartbeat: bool,
+    probe_now: Option<Arc<Notify>>,
+    event: impl Fn(AttachmentEvent) -> F,
+) -> Result<u32> {
+    use tokio::{sync::mpsc, time::sleep};
 
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (probe, mut probes) = mpsc::channel(1);
@@ -128,7 +173,12 @@ pub async fn attachment<F: Future<Output = Result<()>>>(
         let mut ready = false;
         loop {
             if heartbeat {
-                timeout(Duration::from_secs(8), async {
+                let limit = if ready {
+                    KEEPALIVE_PROBE_TIMEOUT
+                } else {
+                    INITIAL_PROBE_TIMEOUT
+                };
+                timeout(limit, async {
                     probe.send(()).await?;
                     acknowledged.notified().await;
                     anyhow::Ok(())
@@ -143,7 +193,15 @@ pub async fn attachment<F: Future<Output = Result<()>>>(
             if !heartbeat {
                 return std::future::pending().await;
             }
-            sleep(Duration::from_secs(10)).await;
+            tokio::select! {
+                _ = sleep(KEEPALIVE_INTERVAL) => {}
+                _ = async {
+                    match &probe_now {
+                        Some(notify) => notify.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
+            }
         }
     };
     let send = async {
@@ -252,5 +310,76 @@ mod tests {
             Frame::Exit(0).write(&mut gateway).await.unwrap();
             assert_eq!(task.await.unwrap().unwrap(), 0);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_history_with_timeout_accepts_slow_chunks_and_fails_on_stall() {
+        let (mut viewer, mut gateway) = duplex(64);
+        let writer = tokio::spawn(async move {
+            gateway.write_u32(6).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            gateway.write_all(b"abc").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            gateway.write_all(b"def").await.unwrap();
+        });
+        let history = read_history_with_timeout(&mut viewer, Duration::from_secs(5))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+        assert_eq!(history, b"abcdef");
+
+        let (mut viewer, mut gateway) = duplex(64);
+        gateway.write_u32(6).await.unwrap();
+        gateway.write_all(b"ab").await.unwrap();
+        let err = read_history_with_timeout(&mut viewer, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(err.is::<tokio::time::error::Elapsed>());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn on_demand_probe_verifies_live_stream_and_detects_stalled_stream_immediately() {
+        let (viewer, mut gateway) = duplex(256);
+        let (_input, keys) = mpsc::unbounded_channel();
+        let (events, mut observed) = mpsc::unbounded_channel();
+        let probe_now = Arc::new(Notify::new());
+        let trigger = probe_now.clone();
+        let task = tokio::spawn(async move {
+            attachment_with_probe(viewer, keys, true, Some(trigger), |e| {
+                std::future::ready(events.send(e).map_err(Into::into))
+            })
+            .await
+        });
+        assert!(read_frame(&mut gateway).await.unwrap().is_none());
+        write_heartbeat(&mut gateway).await.unwrap();
+        assert!(matches!(
+            observed.recv().await,
+            Some(AttachmentEvent::Ready)
+        ));
+
+        // Trigger an immediate liveness check well before the 10s keepalive interval.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        probe_now.notify_one();
+        assert!(
+            timeout(Duration::from_secs(1), read_frame(&mut gateway))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        write_heartbeat(&mut gateway).await.unwrap();
+
+        // A second on-demand probe without a reply fails after KEEPALIVE_PROBE_TIMEOUT.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        probe_now.notify_one();
+        assert!(
+            timeout(Duration::from_secs(1), read_frame(&mut gateway))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.is::<tokio::time::error::Elapsed>());
     }
 }

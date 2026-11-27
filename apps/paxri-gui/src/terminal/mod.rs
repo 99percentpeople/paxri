@@ -3,6 +3,10 @@ use paxri_ui::terminal::cursor;
 use paxri_ui::terminal::display;
 use paxri_ui::terminal::emulator;
 use paxri_ui::terminal::keys;
+use paxri_ui::terminal::lifecycle::{
+    LifecycleEffect, LifecycleEvent, PeerConnectionState, PeerLifecycle, SessionAction,
+    SessionState, StreamEnd,
+};
 use paxri_ui::terminal::links::TerminalLink;
 mod mouse;
 mod session;
@@ -12,11 +16,14 @@ pub(crate) use paxri_ui::terminal::title::TabTitle;
 use crate::components::{ScrollMetrics, ScrollSource, Scrollbar, Ui};
 use crate::theme::{CONTROL_RADIUS, SPACE_2, TextRole, TypographyExt, Zoom};
 use crate::theme::fonts::{CellSize, MonospaceFonts};
-use alacritty_terminal::{grid::Scroll, term::TermMode};
+use alacritty_terminal::{grid::Dimensions, grid::Scroll, term::TermMode};
 use emulator::{Emulator, GridSize};
 use gpui::{prelude::*, *};
-use session::{Output, Session};
-use std::{ops::Range, path::Path};
+use session::{Output, Session, SessionEvent};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 /// Shared by terminal views in this process. Window chrome uses the platform DPI.
 struct TerminalZoom(f32);
@@ -92,7 +99,12 @@ pub struct Terminal {
     focus: FocusHandle,
     pub(super) title: Entity<TabTitle>,
     pub(super) bell: Entity<BellState>,
+    peer: String,
+    key: paxri_control::terminal::managed::Key,
+    ipc: Option<PathBuf>,
+    runtime: tokio::runtime::Handle,
     emulator: Emulator,
+    lifecycle: PeerLifecycle,
     session: Option<Session>,
     error: Option<String>,
     marked: cursor::Preedit,
@@ -134,11 +146,14 @@ impl ScrollSource for TerminalHistory {
     }
 }
 
+const LOCAL_SESSION_ID: u64 = 0;
+
 impl Terminal {
     pub(super) fn open(
         peer: &str,
         key: paxri_control::terminal::managed::Key,
         attach: bool,
+        connection_id: u64,
         runtime: &tokio::runtime::Handle,
         ipc: Option<&Path>,
         window: &Window,
@@ -149,67 +164,25 @@ impl Terminal {
         let grid = GridSize::from_viewport(window.viewport_size(), font.cell);
         let palette =
             crate::theme::terminal_palette(appearance.scheme, crate::theme::palette(window, cx));
-        let (session, events) = Session::start(peer, key, attach, ipc, runtime);
+        let peer = peer.to_owned();
+        let ipc = ipc.map(Path::to_owned);
+        let runtime = runtime.clone();
         cx.new(|cx| {
             cx.observe_global::<TerminalZoom>(|_, cx| cx.notify()).detach();
             let focus = cx.focus_handle();
-            cx.spawn(async move |this, cx| {
-                while let Ok(event) = events.recv().await {
-                    let Ok(pending) = this.update(cx, |view: &mut Terminal, cx| {
-                        view.output(event, cx);
-                        // Coalesce ready chunks into the same frame.
-                        for event in std::iter::from_fn(|| events.try_recv().ok()).take(32) {
-                            view.output(event, cx);
-                        }
-                        let reply = view.emulator.finish_batch_with_clipboard(|_target, text| {
-                            if view.focused && crate::theme::terminal_controls(cx).remote_clipboard {
-                                let item = ClipboardItem::new_string(text);
-                                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                                if _target == alacritty_terminal::term::ClipboardType::Selection {
-                                    cx.write_to_primary(item);
-                                    return;
-                                }
-                                cx.write_to_clipboard(item);
-                            }
-                        });
-                        if let Some(title) = view.emulator.take_title_update() {
-                            view.title.update(cx, |tab, cx| {
-                                if tab.set_pty(title) {
-                                    cx.notify();
-                                }
-                            });
-                        }
-                        if view.emulator.take_bell()
-                            && crate::theme::terminal_controls(cx).terminal_bell
-                        {
-                            let play = view.bell.update(cx, |bell, cx| bell.ring(cx));
-                            if play {
-                                play_system_bell(cx);
-                            }
-                        }
-                        if !reply.is_empty() {
-                            view.send(reply);
-                        }
-                        cx.notify();
-                        view.session.as_ref().and_then(|s| s.input.pending())
-                    }) else {
-                        break;
-                    };
-                    // Backpressure a peer producing queries faster than it reads the replies.
-                    if let Some(pending) = pending {
-                        let _ = pending.recv().await;
-                    }
-                }
-            })
-            .detach();
             let mut emulator = Emulator::with_palette(grid, palette, font);
             emulator.set_default_cursor(cursor::default_style(&appearance));
-            Terminal {
+            let mut terminal = Terminal {
                 focus,
                 title: cx.new(|_| TabTitle::default()),
                 bell: cx.new(|_| BellState::default()),
+                peer,
+                key,
+                ipc,
+                runtime,
                 emulator,
-                session: Some(session),
+                lifecycle: PeerLifecycle::default(),
+                session: None,
                 error: None,
                 marked: cursor::Preedit::default(),
                 viewport: Bounds::default(),
@@ -222,24 +195,269 @@ impl Terminal {
                 hidden_pointer_at: None,
                 focused: false,
                 focus_observers: None,
-            }
+            };
+            terminal.apply_lifecycle(
+                LifecycleEvent::ConnectionChanged(PeerConnectionState::Connected { connection_id }),
+                cx,
+            );
+            terminal.apply_lifecycle(
+                LifecycleEvent::OpenSession {
+                    id: LOCAL_SESSION_ID,
+                    attach,
+                },
+                cx,
+            );
+            terminal
         })
     }
 
-    pub(super) fn is_running(&self) -> bool {
-        self.session.is_some()
+    fn grid_size(&self) -> GridSize {
+        GridSize {
+            rows: self.emulator.term.screen_lines() as u16,
+            cols: self.emulator.term.columns() as u16,
+        }
     }
 
-    pub(super) fn end(&mut self) {
-        if let Some(session) = &mut self.session { session.end(); }
+    fn spawn_stream(&mut self, attach: bool, generation: u64, cx: &mut Context<Self>) {
+        let (mut session, events) = Session::start(
+            &self.peer,
+            self.key,
+            attach,
+            self.ipc.as_deref(),
+            &self.runtime,
+        );
+        if self.viewport.size.width > px(0.) && self.viewport.size.height > px(0.) {
+            session.resize(self.grid_size().pty(self.emulator.font.cell));
+        }
+        self.session = Some(session);
+        self.error = None;
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv().await {
+                let Ok(pending) = this.update(cx, |view: &mut Terminal, cx| {
+                    if view.generation() != generation {
+                        return None;
+                    }
+                    view.output(generation, event, cx);
+                    // Coalesce ready chunks into the same frame.
+                    for event in std::iter::from_fn(|| events.try_recv().ok()).take(32) {
+                        if view.generation() != generation {
+                            break;
+                        }
+                        view.output(generation, event, cx);
+                    }
+                    let reply = view.emulator.finish_batch_with_clipboard(|_target, text| {
+                        if view.focused && crate::theme::terminal_controls(cx).remote_clipboard {
+                            let item = ClipboardItem::new_string(text);
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                            if _target == alacritty_terminal::term::ClipboardType::Selection {
+                                cx.write_to_primary(item);
+                                return;
+                            }
+                            cx.write_to_clipboard(item);
+                        }
+                    });
+                    if let Some(title) = view.emulator.take_title_update() {
+                        view.title.update(cx, |tab, cx| {
+                            if tab.set_pty(title) {
+                                cx.notify();
+                            }
+                        });
+                    }
+                    if view.emulator.take_bell()
+                        && crate::theme::terminal_controls(cx).terminal_bell
+                    {
+                        let play = view.bell.update(cx, |bell, cx| bell.ring(cx));
+                        if play {
+                            play_system_bell(cx);
+                        }
+                    }
+                    if !reply.is_empty() {
+                        view.send(reply);
+                    }
+                    cx.notify();
+                    view.session.as_ref().and_then(|s| s.input.pending())
+                }) else {
+                    break;
+                };
+                // Backpressure a peer producing queries faster than it reads the replies.
+                if let Some(pending) = pending {
+                    let _ = pending.recv().await;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn spawn_end(&mut self, generation: u64, cx: &mut Context<Self>) {
+        let address = self
+            .ipc
+            .clone()
+            .unwrap_or_else(paxri_control::default_address);
+        let peer = self.peer.clone();
+        let key = self.key;
+        let job = self.runtime.spawn(async move {
+            paxri_control::managed_terminal(
+                &address,
+                peer,
+                paxri_control::terminal::managed::Request::End(key),
+            )
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let end = match job.await {
+                Ok(Ok(_)) => StreamEnd::Exited(0),
+                Ok(Err(e)) if e.is::<paxri_control::terminal::managed::Rejected>() => {
+                    StreamEnd::Rejected(format!("{e:#}"))
+                }
+                Ok(Err(e)) if e.is::<tokio::time::error::Elapsed>() => StreamEnd::TimedOut,
+                Ok(Err(e)) => StreamEnd::Disconnected(format!("{e:#}")),
+                Err(e) => StreamEnd::Disconnected(e.to_string()),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.apply_lifecycle(
+                    LifecycleEvent::StreamEnded {
+                        id: LOCAL_SESSION_ID,
+                        generation,
+                        end,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn session_state(&self) -> Option<&SessionState> {
+        self.lifecycle.session_state(LOCAL_SESSION_ID)
+    }
+
+    fn generation(&self) -> u64 {
+        self.lifecycle
+            .session(LOCAL_SESSION_ID)
+            .map_or(0, |s| s.generation)
+    }
+
+    pub(super) fn on_connection_changed(
+        &mut self,
+        state: PeerConnectionState,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_lifecycle(LifecycleEvent::ConnectionChanged(state), cx);
+    }
+
+    fn apply_lifecycle(&mut self, event: LifecycleEvent, cx: &mut Context<Self>) {
+        let effects = self.lifecycle.handle(event);
+        let mut dispatch_pending = false;
+        for effect in effects {
+            match effect {
+                LifecycleEffect::SpawnCreate { generation, .. } => {
+                    self.spawn_stream(false, generation, cx);
+                }
+                LifecycleEffect::SpawnAttach { generation, .. } => {
+                    self.spawn_stream(true, generation, cx);
+                }
+                LifecycleEffect::SpawnEnd { generation, .. } => {
+                    self.spawn_end(generation, cx);
+                }
+                LifecycleEffect::AbortJob { .. } => {
+                    self.session = None;
+                    if let Some(SessionState::Ended(reason)) = self.session_state() {
+                        self.error = Some(reason.clone());
+                    }
+                }
+                LifecycleEffect::SendExit { .. } => {
+                    if let Some(session) = &mut self.session {
+                        session.end();
+                    }
+                }
+                LifecycleEffect::DismissSession { .. } => {
+                    self.session = None;
+                    self.error = None;
+                    cx.emit(ShellExited);
+                }
+                LifecycleEffect::StopInput { .. } => {
+                    self.marked.clear();
+                    if let Some(SessionState::Ended(reason)) = self.session_state() {
+                        self.error = Some(reason.clone());
+                    }
+                }
+                LifecycleEffect::ClearComposing { .. } => {
+                    self.marked.clear();
+                }
+                LifecycleEffect::ScheduleRetry { id } => {
+                    let timer = self
+                        .runtime
+                        .spawn(async { tokio::time::sleep(std::time::Duration::from_secs(1)).await });
+                    cx.spawn(async move |this, cx| {
+                        let _ = timer.await;
+                        let _ = this.update(cx, |view, cx| {
+                            view.apply_lifecycle(LifecycleEvent::RetryTimerElapsed { id }, cx);
+                        });
+                    })
+                    .detach();
+                }
+                LifecycleEffect::DispatchPending => {
+                    dispatch_pending = true;
+                }
+                _ => {}
+            }
+        }
+        if dispatch_pending {
+            self.apply_lifecycle(
+                LifecycleEvent::DispatchPending {
+                    active_session: Some(LOCAL_SESSION_ID),
+                    visible: true,
+                },
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    pub(super) fn is_running(&self) -> bool {
+        self.session_state().is_some_and(SessionState::is_open)
+    }
+
+    pub(super) fn is_confirmed_on_host(&self) -> bool {
+        self.session_state()
+            .is_some_and(SessionState::is_confirmed_on_host)
+    }
+
+    pub(super) fn action(&self) -> SessionAction {
+        self.session_state()
+            .map_or(SessionAction::Close, SessionState::action)
+    }
+
+    pub(super) fn end(&mut self, cx: &mut Context<Self>) {
+        self.apply_lifecycle(LifecycleEvent::UserStop { id: LOCAL_SESSION_ID }, cx);
     }
 
     pub(super) fn has_exited(&self) -> bool {
-        self.session.is_none() && self.error.is_none()
+        self.session_state().is_none_or(SessionState::is_ended) && self.error.is_none()
     }
 
     pub(super) fn is_bell_ringing(&self, cx: &App) -> bool {
         self.bell.read(cx).is_ringing()
+    }
+
+    fn status_banner(&self) -> Option<String> {
+        if let Some(error) = &self.error {
+            return Some(error.clone());
+        }
+        match self.session_state()? {
+            SessionState::Initializing => Some("Starting session…".into()),
+            SessionState::Attaching => Some("Connecting…".into()),
+            SessionState::Reconnecting => match self.lifecycle.connection() {
+                PeerConnectionState::Connected { .. } => Some("Reconnecting…".into()),
+                PeerConnectionState::Initializing | PeerConnectionState::Reconnecting => {
+                    Some("Reconnecting device…".into())
+                }
+                PeerConnectionState::Stopping => Some("Connection stopping…".into()),
+                PeerConnectionState::Disconnected => Some("Device offline".into()),
+            },
+            SessionState::Stopping => Some("Stopping session…".into()),
+            SessionState::Active | SessionState::Ended(_) => None,
+        }
     }
 
     fn resize(&mut self, available: Bounds<Pixels>, cx: &mut Context<Self>) -> Bounds<Pixels> {
@@ -255,27 +473,76 @@ impl Terminal {
         }
         bounds
     }
-    fn output(&mut self, event: Output, cx: &mut Context<Self>) {
+    fn output(&mut self, generation: u64, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
-            Output::Replay(bytes) => {
+            SessionEvent::HostConfirmed => {
+                self.apply_lifecycle(
+                    LifecycleEvent::HostConfirmed {
+                        id: LOCAL_SESSION_ID,
+                        generation,
+                    },
+                    cx,
+                );
+            }
+            SessionEvent::Connected => {
+                self.apply_lifecycle(
+                    LifecycleEvent::SessionConnected {
+                        id: LOCAL_SESSION_ID,
+                        generation,
+                    },
+                    cx,
+                );
+            }
+            SessionEvent::Output(Output::Replay(bytes)) => {
+                self.apply_lifecycle(
+                    LifecycleEvent::HostConfirmed {
+                        id: LOCAL_SESSION_ID,
+                        generation,
+                    },
+                    cx,
+                );
+                let appearance = crate::theme::current(cx).terminal;
+                let mut fresh = Emulator::with_palette(
+                    self.grid_size(),
+                    self.emulator.palette,
+                    self.emulator.font.clone(),
+                );
+                fresh.set_default_cursor(cursor::default_style(&appearance));
+                self.emulator = fresh;
                 self.emulator.process(&bytes);
                 let _ = self.emulator.finish_batch();
                 let _ = self.emulator.take_bell();
             }
-            Output::Bytes(bytes) => self.emulator.process(&bytes),
-            Output::Error(error) => {
+            SessionEvent::Output(Output::Bytes(bytes)) => {
+                self.apply_lifecycle(
+                    LifecycleEvent::SessionConnected {
+                        id: LOCAL_SESSION_ID,
+                        generation,
+                    },
+                    cx,
+                );
+                self.emulator.process(&bytes);
+            }
+            SessionEvent::Output(Output::Error(error)) => {
                 if self.is_running() {
                     self.error = Some(format!("Terminal I/O: {error}"));
                 }
             }
-            Output::Exited(result) => {
+            SessionEvent::Output(Output::Exited(_)) => {}
+            SessionEvent::Ended(end) => {
                 self.session = None;
-                match result {
-                    Ok(_) => {
-                        self.error = None;
-                        cx.emit(ShellExited);
-                    }
-                    Err(e) => self.error = Some(format!("Session error: {e}")),
+                let exited_cleanly = matches!(end, StreamEnd::Exited(_));
+                self.apply_lifecycle(
+                    LifecycleEvent::StreamEnded {
+                        id: LOCAL_SESSION_ID,
+                        generation,
+                        end,
+                    },
+                    cx,
+                );
+                if exited_cleanly && self.session_state().is_some_and(SessionState::is_ended) {
+                    self.error = None;
+                    cx.emit(ShellExited);
                 }
             }
         }
@@ -400,7 +667,11 @@ impl Terminal {
     }
 
     fn write(&mut self, bytes: Vec<u8>, window: &Window) {
-        if self.is_running() && !bytes.is_empty() {
+        if self
+            .session_state()
+            .is_some_and(|s| s.is_open() && !s.is_stopping())
+            && !bytes.is_empty()
+        {
             self.hidden_pointer_at = self.typing_pointer_position(window);
             self.cancel_touch();
             self.touch.handles = false;
@@ -528,7 +799,7 @@ impl Render for Terminal {
             .on_modifiers_changed(cx.listener(|view, e: &ModifiersChangedEvent, window, cx| {
                 view.update_hovered_link(window.mouse_position(), e.modifiers, cx);
             }))
-            .when_some(self.error.clone(), |d, error| {
+            .when_some(self.status_banner(), |d, message| {
                 d.child(
                     div()
                         .flex_none()
@@ -539,7 +810,7 @@ impl Render for Terminal {
                         .items_center()
                         .bg(rgb(ui.colors.canvas.background))
                         .text_color(rgb(ui.colors.canvas.foreground))
-                        .child(div().flex_1().text_role(TextRole::Body).child(error)),
+                        .child(div().flex_1().text_role(TextRole::Body).child(message)),
                 )
             })
             .child(

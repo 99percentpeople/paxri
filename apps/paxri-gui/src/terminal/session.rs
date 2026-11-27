@@ -1,13 +1,21 @@
 use async_channel::{Receiver, Sender, TrySendError};
 use paxri_control::terminal::{
     self as wire,
-    pty::{self, ExitStatus, PtySize},
+    pty::{self, PtySize},
 };
 use std::path::Path;
 use tokio::{runtime::Handle, task::JoinHandle};
 
 pub use pty::Output;
+use paxri_ui::terminal::lifecycle::StreamEnd;
 use wire::managed::{Key, Request};
+
+pub enum SessionEvent {
+    HostConfirmed,
+    Connected,
+    Output(Output),
+    Ended(StreamEnd),
+}
 
 pub struct Session {
     io: pty::Session,
@@ -66,36 +74,89 @@ impl Session {
         attach: bool,
         ipc: Option<&Path>,
         runtime: &Handle,
-    ) -> (Self, Receiver<Output>) {
+    ) -> (Self, Receiver<SessionEvent>) {
         let (io, keys, sizes) = pty::Session::channels();
         let (output, events) = async_channel::bounded(32);
         let address = ipc
             .map(Path::to_owned)
             .unwrap_or_else(paxri_control::default_address);
         let peer = peer.to_owned();
-        let (end, stop) = tokio::sync::oneshot::channel();
+        let (end, mut stop) = tokio::sync::oneshot::channel();
         let task = runtime.spawn(async move {
             let result = async {
                 // The first layout supplies the content area after tabs and padding.
-                let size = sizes.recv().await?;
+                let size = tokio::select! {
+                    biased;
+                    _ = &mut stop => {
+                        if attach {
+                            let _ = paxri_control::managed_terminal(&address, peer, Request::End(key)).await;
+                        }
+                        return Ok(0);
+                    }
+                    size = sizes.recv() => size?,
+                };
                 let request = if attach {
                     Request::Attach(key, size.into())
                 } else {
                     Request::Create(key, size.into())
                 };
-                let (mut stream, _) =
-                    paxri_control::managed_terminal(&address, peer, request).await?;
-                let history = wire::managed::read_history(&mut stream).await?;
+                let (mut stream, _) = tokio::select! {
+                    biased;
+                    _ = &mut stop => {
+                        if attach {
+                            let _ = paxri_control::managed_terminal(&address, peer, Request::End(key)).await;
+                        }
+                        return Ok(0);
+                    }
+                    res = paxri_control::managed_terminal(&address, peer.clone(), request) => res?,
+                };
+                let _ = output.send(SessionEvent::HostConfirmed).await;
+                let history = tokio::select! {
+                    biased;
+                    _ = &mut stop => {
+                        let _ = paxri_control::managed_terminal(&address, peer, Request::End(key)).await;
+                        return Ok(0);
+                    }
+                    res = wire::managed::read_history_with_timeout(
+                        &mut stream,
+                        std::time::Duration::from_secs(5),
+                    ) => res?,
+                };
                 if !history.is_empty() {
-                    output.send(Output::Replay(history)).await?;
+                    output
+                        .send(SessionEvent::Output(Output::Replay(history)))
+                        .await?;
                 }
-                wire::managed::client(stream, keys, sizes, &output, stop).await
+                let _ = output.send(SessionEvent::Connected).await;
+                let (pty_tx, pty_rx) = async_channel::bounded(32);
+                let forward = {
+                    let output = output.clone();
+                    async move {
+                        while let Ok(item) = pty_rx.recv().await {
+                            if output.send(SessionEvent::Output(item)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                };
+                let run = async move {
+                    let res = wire::managed::client(stream, keys, sizes, &pty_tx, stop).await;
+                    drop(pty_tx);
+                    res
+                };
+                let (res, ()) = tokio::join!(run, forward);
+                res
             }
             .await;
-            let status = result
-                .map(ExitStatus::with_exit_code)
-                .map_err(|e| std::io::Error::other(format!("{e:#}")));
-            let _ = output.send(Output::Exited(status)).await;
+            let end = match result {
+                Ok(code) => StreamEnd::Exited(code),
+                Err(ref e) if e.is::<wire::managed::Rejected>() => {
+                    StreamEnd::Rejected(format!("{e:#}"))
+                }
+                Err(ref e) if e.is::<tokio::time::error::Elapsed>() => StreamEnd::TimedOut,
+                Err(e) => StreamEnd::Disconnected(format!("{e:#}")),
+            };
+            let _ = output.send(SessionEvent::Ended(end)).await;
         });
         let input = Input {
             sender: io.input.clone(),

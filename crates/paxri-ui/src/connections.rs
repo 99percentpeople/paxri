@@ -356,6 +356,7 @@ mod tests {
     fn rates_use_elapsed_time_and_expire_with_the_history() {
         let mut path = PeerConnection {
             protocol: "test".into(),
+            connection_id: None,
             streams: Default::default(),
             path: PathKind::Direct,
             address: None,
@@ -400,10 +401,37 @@ fn connection_host(address: &str) -> String {
 }
 
 impl ConnectionHistory {
-    pub fn connection_section(&self, peer_id: &str, paths: Option<&[PeerConnection]>, presence: bool, ui: Ui) -> Div {
+    pub fn connection_section(
+        &self,
+        peer_id: &str,
+        paths: Option<&[PeerConnection]>,
+        presence: bool,
+        ui: Ui,
+    ) -> Div {
+        let phase = if paths.is_some_and(|paths| !paths.is_empty()) {
+            paxri_core::connection::ConnectionPhase::Connected
+        } else {
+            paxri_core::connection::ConnectionPhase::Disconnected
+        };
+        self.connection_section_with_phase(peer_id, paths, phase, presence, ui)
+    }
+
+    pub fn connection_section_with_phase(
+        &self,
+        peer_id: &str,
+        paths: Option<&[PeerConnection]>,
+        phase: paxri_core::connection::ConnectionPhase,
+        presence: bool,
+        ui: Ui,
+    ) -> Div {
         let mut list = ui.section().child(heading("Connection"));
         let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
-            return list.child(ui.muted(paxri_core::connection::peer_state(paths, presence)));
+            let label = if paths.is_none() {
+                "Unavailable"
+            } else {
+                phase.label(presence)
+            };
+            return list.child(ui.muted(label));
         };
         for (i, path) in paths.iter().enumerate() {
             let streams = path
@@ -484,6 +512,7 @@ mod reconnect_tests {
     fn reconnect_toast_formats_path_and_latency() {
         let mut conn = PeerConnection {
             protocol: "Shared connection".into(),
+            connection_id: None,
             path: PathKind::Direct,
             address: Some("192.168.1.2:4433".into()),
             rtt_ms: Some(0),

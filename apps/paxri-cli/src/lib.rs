@@ -216,8 +216,27 @@ async fn dispatch(command: Command, selected: Option<PathBuf>) -> Result<u32> {
             command,
             Command::Config { .. } | Command::Identity { .. } | Command::Probe { .. }
         );
-    let active = if discover {
-        gateway::discover(None, None).await?
+    let auto_start = discover
+        && matches!(
+            command,
+            Command::Cp(..)
+                | Command::Shell { .. }
+                | Command::Exec { .. }
+                | Command::Connect { .. }
+                | Command::Pair { .. }
+                | Command::Ticket
+                | Command::Forward { .. }
+        );
+    let active = if auto_start {
+        Some(gateway::ensure_running(None, None).await?)
+    } else if discover {
+        let found = gateway::discover(None, None).await?;
+        if found.is_none() && gateway::is_manual_startup(None) {
+            anyhow::bail!(
+                "Gateway is not running (startup is set to manual). Run `paxri gateway start` first."
+            );
+        }
+        found
     } else {
         None
     };

@@ -35,6 +35,22 @@ impl PeerSessions {
 }
 
 impl Dashboard {
+    pub(crate) fn sync_peer_connections(&self, status: &paxri_control::Status, cx: &mut App) {
+        use paxri_ui::terminal::lifecycle::PeerConnectionState;
+        for (peer, sessions) in &self.terminal_sessions {
+            let phase = status.peer_phase(peer);
+            let conn_id = status
+                .peer_connection_id(peer)
+                .or_else(|| status.peer_online(peer).then_some(1));
+            let state = PeerConnectionState::from_phase(phase, conn_id);
+            for weak in sessions.open.values() {
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |terminal, cx| terminal.on_connection_changed(state, cx));
+                }
+            }
+        }
+    }
+
     pub(crate) fn end_listed_session(
         &mut self,
         peer: &SharedString,
@@ -55,7 +71,7 @@ impl Dashboard {
         if let Some(view) = sessions.open.get(&key).and_then(WeakEntity::upgrade)
             && view.read(cx).is_running()
         {
-            view.update(cx, |terminal, _| terminal.end());
+            view.update(cx, |terminal, cx| terminal.end(cx));
             return;
         }
         if !sessions.hosted.contains(&key) || !sessions.ending.insert(key) {
@@ -134,7 +150,13 @@ impl Dashboard {
             for (key, weak) in &sessions.open {
                 if let Some(view) = weak.upgrade() {
                     let view = view.read(cx);
-                    if view.is_running() && let Err(e) = self.session_titles.set(&sessions.title_scope, *key, view.title.read(cx)) {
+                    if view.is_confirmed_on_host()
+                        && let Err(e) = self.session_titles.set(
+                            &sessions.title_scope,
+                            *key,
+                            view.title.read(cx),
+                        )
+                    {
                         eprintln!("Saving session title: {e}");
                     }
                 }
@@ -223,7 +245,7 @@ impl Dashboard {
                 if let Err(e) = self.session_titles.retain(&sessions.title_scope, |k| k != key) {
                     eprintln!("Removing session title: {e}");
                 }
-            } else if terminal.is_running() {
+            } else if terminal.is_confirmed_on_host() {
                 if let Err(e) =
                     self.session_titles
                         .set(&sessions.title_scope, key, terminal.title.read(cx))
@@ -251,7 +273,21 @@ impl Workspace {
         let dashboard = self.dashboard.read(cx);
         let runtime = dashboard.runtime.clone();
         let ipc = dashboard.active_address();
-        let view = Terminal::open(&peer, key, attach, &runtime, ipc.as_deref(), w, cx);
+        let connection_id = dashboard
+            .status
+            .as_ref()
+            .and_then(|s| s.peer_connection_id(&peer))
+            .unwrap_or(1);
+        let view = Terminal::open(
+            &peer,
+            key,
+            attach,
+            connection_id,
+            &runtime,
+            ipc.as_deref(),
+            w,
+            cx,
+        );
         App::subscribe(cx, &view, Self::terminal_exited).detach();
         self.dashboard.update(cx, |d, cx| {
             d.register_terminal(peer.clone(), key, &view, cx)

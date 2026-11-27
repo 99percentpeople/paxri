@@ -11,7 +11,9 @@ use iroh::{
 use paxri_config::{Config, DeviceInfo};
 use paxri_core::{
     PeerSession, StreamKind,
-    connection::{ConnectionTraffic, PathKind, PeerConnection, unix_time_ms},
+    connection::{
+        ConnectionEvent, ConnectionPhase, ConnectionTraffic, PathKind, PeerConnection, unix_time_ms,
+    },
     session::{IncomingStream, PROTOCOL},
 };
 use std::{
@@ -81,8 +83,16 @@ impl AsyncWrite for NativeStream {
 }
 
 impl NativeSession {
+    pub fn id(&self) -> usize {
+        self.conn.stable_id()
+    }
+
     pub fn same_connection(&self, other: &Self) -> bool {
         self.token == other.token && self.conn.remote_id() == other.conn.remote_id()
+    }
+
+    pub async fn closed(&self) {
+        self.conn.closed().await;
     }
 
     /// Retire this specific connection after a failed application-level round trip.
@@ -137,6 +147,7 @@ impl NativeSession {
         let stats = self.conn.stats();
         PeerConnection {
             protocol: "Shared connection".into(),
+            connection_id: Some(self.conn.stable_id() as u64),
             path,
             address,
             rtt_ms,
@@ -165,34 +176,177 @@ impl PeerSession for NativeSession {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+enum SlotState {
+    #[default]
+    Disconnected,
+    Initializing,
+    Connected(NativeSession),
+    Reconnecting,
+    Stopping,
+}
+
+impl SlotState {
+    fn phase(&self) -> ConnectionPhase {
+        match self {
+            Self::Disconnected => ConnectionPhase::Disconnected,
+            Self::Initializing => ConnectionPhase::Initializing,
+            Self::Connected(session) if session.conn.close_reason().is_none() => {
+                ConnectionPhase::Connected
+            }
+            Self::Connected(_) => ConnectionPhase::Disconnected,
+            Self::Reconnecting => ConnectionPhase::Reconnecting,
+            Self::Stopping => ConnectionPhase::Stopping,
+        }
+    }
+
+    fn live(&self) -> Option<NativeSession> {
+        match self {
+            Self::Connected(session) if session.conn.close_reason().is_none() => {
+                Some(session.clone())
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct PhaseEvents(watch::Sender<u64>);
+
+impl PhaseEvents {
+    fn notify(&self) {
+        self.0.send_modify(|seq| *seq = seq.wrapping_add(1));
+    }
+
+    pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.0.subscribe()
+    }
+}
+
 #[derive(Debug, Default)]
 struct Slot {
-    selected: watch::Sender<Option<NativeSession>>,
+    state: watch::Sender<SlotState>,
     dial: AsyncMutex<()>,
     admission: AsyncMutex<()>,
 }
-impl Slot {
-    fn live(&self) -> Option<NativeSession> {
-        self.selected
-            .borrow()
-            .as_ref()
-            .filter(|s| s.conn.close_reason().is_none())
-            .cloned()
-    }
 
-    fn clear(&self, session: &NativeSession, changes: &PeerChanges) {
-        self.selected.send_if_modified(|selected| {
-            if selected
-                .as_ref()
-                .is_some_and(|s| s.conn.stable_id() == session.conn.stable_id())
+struct PhaseGuard {
+    slot: Arc<Slot>,
+    expected: ConnectionPhase,
+    phases: PhaseEvents,
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        let mut changed = false;
+        self.slot.state.send_if_modified(|state| {
+            if state.phase() == self.expected
+                && state.phase().apply(ConnectionEvent::Closed)
+                    == Some(ConnectionPhase::Disconnected)
             {
-                *selected = None;
-                changes.record(session.conn.remote_id());
+                *state = SlotState::Disconnected;
+                changed = true;
                 true
             } else {
                 false
             }
         });
+        if changed {
+            self.phases.notify();
+        }
+    }
+}
+
+impl Slot {
+    fn phase(&self) -> ConnectionPhase {
+        self.state.borrow().phase()
+    }
+
+    fn live(&self) -> Option<NativeSession> {
+        self.state.borrow().live()
+    }
+
+    fn begin_event(
+        self: &Arc<Self>,
+        event: ConnectionEvent,
+        phases: &PhaseEvents,
+    ) -> Result<PhaseGuard> {
+        let current = self.phase();
+        let next = current
+            .apply(event)
+            .with_context(|| format!("invalid connection transition {current:?} + {event:?}"))?;
+        let slot_state = match next {
+            ConnectionPhase::Initializing => SlotState::Initializing,
+            ConnectionPhase::Reconnecting => SlotState::Reconnecting,
+            ConnectionPhase::Stopping => SlotState::Stopping,
+            ConnectionPhase::Disconnected => SlotState::Disconnected,
+            ConnectionPhase::Connected => {
+                anyhow::bail!("Connected requires a NativeSession")
+            }
+        };
+        self.state.send_replace(slot_state);
+        phases.notify();
+        Ok(PhaseGuard {
+            slot: self.clone(),
+            expected: next,
+            phases: phases.clone(),
+        })
+    }
+
+    fn clear(&self, session: &NativeSession, changes: &PeerChanges, phases: &PhaseEvents) {
+        let mut changed = false;
+        self.state.send_if_modified(|state| {
+            if matches!(
+                state,
+                SlotState::Connected(s) if s.conn.stable_id() == session.conn.stable_id()
+            ) {
+                *state = SlotState::Disconnected;
+                changes.record(session.conn.remote_id());
+                changed = true;
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            phases.notify();
+        }
+    }
+
+    fn retire(&self, session: &NativeSession, changes: &PeerChanges, phases: &PhaseEvents) -> bool {
+        let mut retired = None;
+        self.state.send_if_modified(|state| {
+            let phase = state.phase();
+            if let SlotState::Connected(current) = state
+                && current.conn.stable_id() == session.conn.stable_id()
+                && phase.apply(ConnectionEvent::BeginStop) == Some(ConnectionPhase::Stopping)
+            {
+                retired = Some(current.clone());
+                *state = SlotState::Stopping;
+                true
+            } else {
+                false
+            }
+        });
+        let Some(current) = retired else {
+            return false;
+        };
+        phases.notify();
+        current.close_unresponsive();
+        self.state.send_if_modified(|state| {
+            if matches!(state, SlotState::Stopping)
+                && state.phase().apply(ConnectionEvent::Closed)
+                    == Some(ConnectionPhase::Disconnected)
+            {
+                *state = SlotState::Disconnected;
+                true
+            } else {
+                false
+            }
+        });
+        changes.record(current.conn.remote_id());
+        phases.notify();
+        true
     }
 }
 
@@ -219,6 +373,7 @@ pub(super) struct Connections {
     incoming: mpsc::Sender<IncomingStream<NativeSession>>,
     peer_addresses: mpsc::Sender<EndpointTicket>,
     pub(super) changes: PeerChanges,
+    pub(super) phase_events: PhaseEvents,
     pub(super) local_info: watch::Sender<DeviceInfo>,
     pub(super) peer_info: watch::Sender<super::PeerDeviceInfo>,
     headers: Arc<Semaphore>,
@@ -236,6 +391,7 @@ impl Connections {
             peer_addresses,
             slots: Default::default(),
             changes: PeerChanges::default(),
+            phase_events: PhaseEvents::default(),
             local_info: watch::channel(local_info).0,
             peer_info: Default::default(),
             config,
@@ -258,15 +414,41 @@ impl Connections {
         self.slots.lock().expect("peer sessions").get(&id)?.live()
     }
 
+    pub(super) fn phase(&self, id: EndpointId) -> ConnectionPhase {
+        self.slots
+            .lock()
+            .expect("peer sessions")
+            .get(&id)
+            .map_or(ConnectionPhase::Disconnected, |slot| slot.phase())
+    }
+
+    pub(super) fn state_snapshot(&self, id: EndpointId) -> (ConnectionPhase, Option<u64>) {
+        let Some(slot) = self.slots.lock().expect("peer sessions").get(&id).cloned() else {
+            return (ConnectionPhase::Disconnected, None);
+        };
+        let state = slot.state.borrow();
+        let phase = state.phase();
+        let conn_id = state.live().map(|s| s.id() as u64);
+        (phase, conn_id)
+    }
+
+    pub(super) fn retire(&self, id: EndpointId, session: &NativeSession) -> bool {
+        let slot = self.slots.lock().expect("peer sessions").get(&id).cloned();
+        slot.is_some_and(|slot| slot.retire(session, &self.changes, &self.phase_events))
+    }
+
     pub(super) fn forget(&self, id: EndpointId) {
         let slot = self.slots.lock().expect("peer sessions").remove(&id);
-        if let Some(session) = slot.and_then(|slot| slot.selected.send_replace(None)) {
+        if let Some(SlotState::Connected(session)) =
+            slot.map(|slot| slot.state.send_replace(SlotState::Stopping))
+        {
             session.conn.close(1u32.into(), b"device unpaired");
         }
         self.peer_info.send_if_modified(|info| info.remove(&id.to_string()).is_some());
         self.changes.0.send_modify(|times| {
             times.remove(&id.to_string());
         });
+        self.phase_events.notify();
     }
 
     pub(super) fn snapshot(&self) -> BTreeMap<EndpointId, PeerConnection> {
@@ -286,18 +468,17 @@ impl Connections {
         if let Some(s) = slot.live() {
             return Ok(s);
         }
-        let mut selected = slot.selected.subscribe();
+        let mut selected = slot.state.subscribe();
         let ready = async {
-            let current = selected
-                .wait_for(|s| s.as_ref().is_some_and(|s| s.conn.close_reason().is_none()))
-                .await?;
-            Ok(current.as_ref().expect("selected session").clone())
+            let current = selected.wait_for(|s| s.live().is_some()).await?;
+            Ok(current.live().expect("selected session"))
         };
         let dial = async {
             let _dial = slot.dial.lock().await;
             if let Some(current) = slot.live() {
                 return Ok(current);
             }
+            let _phase = slot.begin_event(ConnectionEvent::BeginInitialize, &self.phase_events)?;
             let conn = super::addresses::dial(ep, addr, PROTOCOL).await.context(
                 "shared peer protocol handshake failed; both gateways must support paxri/session/1"
             )?;
@@ -330,8 +511,9 @@ impl Connections {
             ep.network_change().await;
             if let Some(previous) = slot.live() {
                 previous.conn.close(0u32.into(), b"reconnecting");
-                slot.clear(&previous, &self.changes);
+                slot.clear(&previous, &self.changes, &self.phase_events);
             }
+            let _phase = slot.begin_event(ConnectionEvent::BeginReconnect, &self.phase_events)?;
             let conn = super::addresses::dial(ep, addr, PROTOCOL).await.context(
                 "shared peer protocol handshake failed; both gateways must support paxri/session/1",
             )?;
@@ -423,8 +605,10 @@ impl Connections {
         tokio::spawn(async move {
             let receive = super::device_info::receive(rx, |info| {
                 // Only the currently selected connection may update this identity.
-                let selected = slot.selected.borrow();
-                if selected.as_ref().is_some_and(|s| s.conn.stable_id() == conn.stable_id()) {
+                if slot
+                    .live()
+                    .is_some_and(|s| s.conn.stable_id() == conn.stable_id())
+                {
                     super::device_info::record(&peers, conn.remote_id(), info);
                 }
             });
@@ -447,7 +631,9 @@ impl Connections {
                     .lock()
                     .expect("peer sessions")
                     .get(&conn.remote_id())
-                    .is_some_and(|current| Arc::ptr_eq(current, slot)),
+                    .is_some_and(|current| Arc::ptr_eq(current, slot))
+                && slot.phase().apply(ConnectionEvent::Established)
+                    == Some(ConnectionPhase::Connected),
             "peer no longer paired"
         );
         let session = NativeSession {
@@ -456,11 +642,12 @@ impl Connections {
             connected_at_ms: unix_time_ms(),
             activity: Default::default(),
         };
-        let old = slot.selected.send_replace(Some(session.clone()));
-        if old.as_ref().is_none_or(|s| s.conn.close_reason().is_some()) {
+        let old = slot.state.send_replace(SlotState::Connected(session.clone()));
+        if old.live().is_none() {
             self.changes.record(session.conn.remote_id());
         }
-        if let Some(old) = old {
+        self.phase_events.notify();
+        if let SlotState::Connected(old) = old {
             old.conn.close(0u32.into(), b"replaced session")
         }
         drop(grants);
@@ -472,6 +659,7 @@ impl Connections {
         let incoming = self.incoming.clone();
         let headers = self.headers.clone();
         let changes = self.changes.clone();
+        let phases = self.phase_events.clone();
         let slot = slot.clone();
         tokio::spawn(async move {
             let mut tasks = JoinSet::new();
@@ -497,7 +685,7 @@ impl Connections {
                     }
                 }
             }
-            slot.clear(&session, &changes);
+            slot.clear(&session, &changes, &phases);
         });
         Ok(())
     }
@@ -511,12 +699,13 @@ impl ProtocolHandler for Connections {
     }
     async fn shutdown(&self) {
         for slot in self.slots.lock().expect("peer sessions").values() {
-            let selected = slot.selected.borrow().clone();
-            if let Some(session) = selected {
+            let old = slot.state.send_replace(SlotState::Stopping);
+            if let SlotState::Connected(session) = old {
                 session.conn.close(0u32.into(), b"gateway stopped");
-                slot.clear(&session, &self.changes);
+                self.changes.record(session.conn.remote_id());
             }
         }
+        self.phase_events.notify();
     }
 }
 
@@ -595,22 +784,30 @@ mod tests {
                 .await
                 .map_err(anyhow::Error::from)
         };
-        let mut selected = pa.paired_slot(b.id())?.selected.subscribe();
+        let mut selected = pa.paired_slot(b.id())?.state.subscribe();
         timeout(Duration::from_secs(25), async {
             pb.admit(next().await?).await?;
-            let first = selected.wait_for(|s| s.is_some()).await?.clone().unwrap();
+            let first = selected
+                .wait_for(|s| s.live().is_some())
+                .await?
+                .live()
+                .unwrap();
             let mut terminal = first.open(StreamKind::Terminal).await?;
             let remote_terminal = streams_b.recv().await.unwrap();
             assert_eq!(remote_terminal.kind, StreamKind::Terminal);
             first.conn.close(0u32.into(), b"link lost");
-            selected.wait_for(Option::is_none).await?;
+            selected.wait_for(|s| s.live().is_none()).await?;
             // Only A initiates connections. B stays at the same address, refuses two
             // attempts, then accepts the next retry without notifying A.
             for _ in 0..2 {
                 next().await?.close(1u32.into(), b"unavailable");
             }
             pb.admit(next().await?).await?;
-            let restored = selected.wait_for(|s| s.is_some()).await?.clone().unwrap();
+            let restored = selected
+                .wait_for(|s| s.live().is_some())
+                .await?
+                .live()
+                .unwrap();
             assert_ne!(restored.token, first.token);
             assert!(terminal.read_u8().await.is_err());
             assert!(restored.status().streams.is_empty());
@@ -722,6 +919,43 @@ mod tests {
             let mut rx = at_a.recv().await.unwrap();
             tx.write_u8(53).await?;
             assert_eq!(rx.stream.read_u8().await?, 53);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        ra.shutdown().await?;
+        rb.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retire_and_shutdown_enforce_stopping_and_disconnected_phases() -> Result<()> {
+        let a = endpoint().await?;
+        let b = endpoint().await?;
+        let (pa, _at_a, _grants_a) = pool(&a, &b);
+        let (pb, _at_b, _grants_b) = pool(&b, &a);
+        let ra = Router::builder(a.clone())
+            .accept(PROTOCOL, pa.clone())
+            .spawn();
+        let rb = Router::builder(b.clone())
+            .accept(PROTOCOL, pb.clone())
+            .spawn();
+        timeout(Duration::from_secs(10), async {
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Disconnected);
+            let session = pa.get(&a, b.addr()).await?;
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Connected);
+            assert!(pa.retire(b.id(), &session));
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Disconnected);
+            assert!(pa.live(b.id()).is_none());
+            // Retiring the already-retired session is a no-op.
+            assert!(!pa.retire(b.id(), &session));
+            // Re-establishing after retire succeeds cleanly.
+            let fresh = pa.get(&a, b.addr()).await?;
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Connected);
+            assert!(!fresh.same_connection(&session));
+            // Shutdown moves the slot into Stopping and prevents late installs.
+            pa.shutdown().await;
+            assert_eq!(pa.phase(b.id()), ConnectionPhase::Stopping);
+            assert!(pa.live(b.id()).is_none());
             Ok::<_, anyhow::Error>(())
         })
         .await??;

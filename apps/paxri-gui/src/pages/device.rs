@@ -93,6 +93,7 @@ impl Dashboard {
                             },
                         );
                         view.connection_history.record(paths);
+                        view.sync_peer_connections(&status, cx);
                         view.status = Some(status);
                         view.refresh_hosted_sessions(true, cx);
                         view.refresh_forward_directory(cx);
@@ -199,9 +200,10 @@ impl Dashboard {
             .py_2()
             .child(header)
             .child(ui.device_detail_sections(
-                self.connection_history.connection_section(
+                self.connection_history.connection_section_with_phase(
                     id,
                     status.connections_for(peer),
+                    status.peer_phase(peer),
                     status.peer_presence,
                     ui,
                 ),

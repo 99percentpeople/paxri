@@ -204,8 +204,9 @@ impl Mobile {
     }
 
     pub(super) fn set_touch_area(&mut self, id: u64, rect: [i32; 5], keys: Arc<KeybarSettings>, touchable: bool) {
+        let connected = self.session_connected(id);
         let drag = self.sessions.get(&id).is_some_and(|s| {
-            s.screen.mouse_enabled(s.connected())
+            s.screen.mouse_enabled(connected)
                 && TouchMouseDrag::requested(*s.screen.term.mode())
         });
         DRAG_SESSION.store(if drag { id } else { 0 }, Ordering::Relaxed);
@@ -228,6 +229,7 @@ impl Mobile {
         if self.page != Page::Terminal(id) {
             return;
         }
+        let connected = self.session_connected(id);
         let Some(s) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -238,7 +240,7 @@ impl Mobile {
                     self.open_link_modal(link.uri, cx);
                     return;
                 }
-                if s.connected() {
+                if connected {
                     if s.screen.mouse_enabled(true) {
                         let mode = *s.screen.term.mode();
                         let cell = s.screen.mouse_cell(x, y);
@@ -251,7 +253,7 @@ impl Mobile {
                     self.show_terminal_keyboard(id);
                 }
             }
-            Gesture::Keyboard | Gesture::Tap { .. } if s.connected() => {
+            Gesture::Keyboard | Gesture::Tap { .. } if connected => {
                 if let Gesture::Tap { x, y } = gesture
                     && s.screen.mouse_enabled(true)
                 {
@@ -284,7 +286,7 @@ impl Mobile {
                 let bytes = match action {
                     0 => {
                         s.screen.term.selection = None;
-                        if s.screen.mouse_enabled(s.connected()) {
+                        if s.screen.mouse_enabled(connected) {
                             s.touch_mouse.begin(mode, cell)
                         } else {
                             Vec::new()
@@ -312,7 +314,7 @@ impl Mobile {
                 s.screen.term.selection = None;
             }
             Gesture::Paste => {
-                if s.connected() {
+                if connected {
                     match gpui_mobile::packages::clipboard::get_text() {
                         Ok(Some(text)) => {
                             let bytes = s.screen.paste_bytes(&text);
@@ -326,7 +328,7 @@ impl Mobile {
             }
             Gesture::Scroll { dy, x, y, fling } => {
                 let mode = *s.screen.term.mode();
-                let target = s.screen.wheel_target(s.connected(), false);
+                let target = s.screen.wheel_target(connected, false);
                 let cell = s.screen.font.cell;
                 let steps = s.wheel.steps(target, point(0., dy / cell.height));
                 if steps.1 == 0 {

@@ -360,6 +360,24 @@ pub async fn open(ipc: Option<&Path>, config: Option<PathBuf>) -> Result<Option<
     apply(Action::Start, ipc, Some(config)).await
 }
 
+/// Ensure a local gateway is running for CLI commands. Honors `gateway.startup = "manual"`
+/// by refusing to auto-launch and returning an actionable message instead.
+pub async fn ensure_running(ipc: Option<&Path>, config: Option<PathBuf>) -> Result<Status> {
+    match open(ipc, config).await? {
+        Some(status) => Ok(status),
+        None => bail!(
+            "Gateway is not running (startup is set to manual). Run `paxri gateway start` first."
+        ),
+    }
+}
+
+pub(crate) fn is_manual_startup(config: Option<PathBuf>) -> bool {
+    profile(config)
+        .ok()
+        .and_then(|path| file::startup(&path).ok())
+        .is_some_and(|mode| mode == Startup::Manual)
+}
+
 #[cfg(windows)]
 pub fn startup_report(path: &Path) -> Vec<String> {
     startup::inspect(path)
@@ -402,4 +420,32 @@ pub async fn cli(action: Action, ipc: Option<&Path>, config: Option<PathBuf>) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_running_rejects_auto_start_when_startup_is_manual() -> Result<()> {
+        let dir = tempfile::Builder::new().prefix("paxri-cli-manual-").tempdir()?;
+        let config = dir.path().join("node.toml");
+        fs::write(&config, "version = 1\n[gateway]\nstartup = \"manual\"\n")?;
+        #[cfg(unix)]
+        let ipc = dir.path().join("gateway.sock");
+        #[cfg(windows)]
+        let ipc = PathBuf::from(format!("paxri-test-{}", dir.path().file_name().unwrap().to_string_lossy()));
+
+        assert!(is_manual_startup(Some(config.clone())));
+        let error = ensure_running(Some(&ipc), Some(config)).await.unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("startup is set to manual")
+                && message.contains("paxri gateway start"),
+            "unexpected error: {message}"
+        );
+        #[cfg(unix)]
+        assert!(!ipc.exists(), "manual startup must not launch a gateway");
+        Ok(())
+    }
 }

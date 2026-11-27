@@ -191,17 +191,30 @@ impl Workspace {
             .flex()
             .flex_none()
             .px_1()
-            .when(
-                matches!(&self.active, Page::Terminal { view, .. } if view.read(cx).is_running()),
-                |row| {
-                    row.child(
-                        ui.end_session_button()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Page::Terminal { view, .. } = &this.active {
-                                    view.update(cx, |terminal, _| terminal.end());
-                                }
-                            })),
-                    )
+            .when_some(
+                match &self.active {
+                    Page::Terminal { view, .. } if view.read(cx).is_running() => {
+                        Some(view.read(cx).action())
+                    }
+                    _ => None,
+                },
+                |row, action| {
+                    let button = match action {
+                        paxri_ui::terminal::lifecycle::SessionAction::End => {
+                            ui.end_session_button()
+                        }
+                        paxri_ui::terminal::lifecycle::SessionAction::Cancel => {
+                            ui.icon_button(Ghost, "cancel-session", Icon::Close, "Cancel session")
+                        }
+                        paxri_ui::terminal::lifecycle::SessionAction::Close => {
+                            ui.icon_button(Ghost, "close-session", Icon::Close, "Close session")
+                        }
+                    };
+                    row.child(button.on_click(cx.listener(|this, _, _, cx| {
+                        if let Page::Terminal { view, .. } = &this.active {
+                            view.update(cx, |terminal, cx| terminal.end(cx));
+                        }
+                    })))
                 },
             )
             .when(self.active != Page::Home, |row| {

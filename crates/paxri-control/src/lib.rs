@@ -208,6 +208,8 @@ pub struct PeerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<paxri_config::DeviceCapabilities>,
     pub state: String,
+    #[serde(default)]
+    pub phase: ConnectionPhase,
     pub connections: Option<Vec<PeerConnection>>,
 }
 
@@ -252,6 +254,9 @@ pub struct Status {
     /// Absent when connected to an older gateway. An empty list is a known idle peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_connections: Option<BTreeMap<String, Vec<PeerConnection>>>,
+    /// Current transport lifecycle phase per peer alias. Absent on older gateways.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub peer_connection_phases: BTreeMap<String, ConnectionPhase>,
     /// Last pairing or Connected/Idle transition by peer alias, in Unix milliseconds.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_last_status_change_ms: BTreeMap<String, i64>,
@@ -262,7 +267,10 @@ pub struct Status {
 
 pub use paxri_core::{
     StreamKind,
-    connection::{ConnectionTraffic, PathKind, PeerConnection, TrafficRates, format_bytes, unix_time_ms},
+    connection::{
+        ConnectionEvent, ConnectionPhase, ConnectionTraffic, PathKind, PeerConnection,
+        TrafficRates, format_bytes, unix_time_ms,
+    },
 };
 
 impl Status {
@@ -288,8 +296,27 @@ impl Status {
         self.peer_connections.as_ref()?.get(peer).map(Vec::as_slice)
     }
 
+    pub fn peer_phase(&self, peer: &str) -> ConnectionPhase {
+        if let Some(&phase) = self.peer_connection_phases.get(peer) {
+            phase
+        } else if self.peer_online(peer) {
+            ConnectionPhase::Connected
+        } else {
+            ConnectionPhase::Disconnected
+        }
+    }
+
+    pub fn peer_connection_id(&self, peer: &str) -> Option<u64> {
+        self.connections_for(peer)?
+            .first()
+            .and_then(|conn| conn.connection_id)
+    }
+
     pub fn peer_state(&self, peer: &str) -> &'static str {
-        paxri_core::connection::peer_state(self.connections_for(peer), self.peer_presence)
+        if self.connections_for(peer).is_none() {
+            return "Unavailable";
+        }
+        self.peer_phase(peer).label(self.peer_presence)
     }
 
     pub fn peer_online(&self, peer: &str) -> bool {

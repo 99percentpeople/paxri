@@ -4,6 +4,7 @@ pub mod display;
 pub mod emulator;
 mod grid_glyph;
 pub mod keys;
+pub mod lifecycle;
 pub mod links;
 pub mod preview;
 pub mod mouse;

@@ -46,8 +46,8 @@ paxri gateway startup gui
 
 | Mode | Startup behavior |
 | --- | --- |
-| `manual` | Start from the CLI or the desktop |
-| `gui` | Start when the desktop app opens, the default |
+| `manual` | Start explicitly with `paxri gateway start` or from the desktop; CLI commands exit with a reminder when stopped |
+| `gui` | Start on demand when the desktop app opens or a CLI command runs, the default |
 | `login` | Start when the current user signs in |
 | `system` | Start at boot with the configured user identity and OS registration privileges |
 

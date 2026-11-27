@@ -20,13 +20,40 @@ use paxri_native::{
     },
 };
 use paxri_terminal::Frame;
+use paxri_ui::terminal::lifecycle::PeerConnectionState;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, mpsc, oneshot, watch},
     time::timeout,
 };
 
 use crate::{AttachmentId, Update};
+
+const ATTACH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CREATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const HISTORY_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const SLOW_ATTACH_PROBE_DELAY: Duration = Duration::from_secs(3);
+
+/// Raised when the underlying peer connection is closed or superseded by a newer one.
+#[derive(Debug)]
+pub(crate) struct ConnectionReplaced;
+
+impl std::fmt::Display for ConnectionReplaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Terminal connection was replaced")
+    }
+}
+
+impl std::error::Error for ConnectionReplaced {}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -55,6 +82,7 @@ struct SavedDevices {
 #[derive(Default)]
 pub struct Presence {
     pub paths: BTreeMap<String, Vec<PeerConnection>>,
+    pub states: BTreeMap<String, PeerConnectionState>,
     pub changed_at: BTreeMap<String, i64>,
 }
 
@@ -63,8 +91,12 @@ impl Presence {
         self.paths.get(id).map(Vec::as_slice)
     }
 
+    pub fn state_for(&self, id: &str) -> PeerConnectionState {
+        self.states.get(id).copied().unwrap_or_default()
+    }
+
     pub fn online(&self, id: &str) -> bool {
-        self.paths_for(id).is_some_and(|paths| !paths.is_empty())
+        self.state_for(id).is_connected()
     }
 }
 
@@ -80,6 +112,7 @@ pub struct Client {
     presence: tokio::task::JoinHandle<()>,
     router: iroh::protocol::Router,
     devices: Mutex<SavedDevices>,
+    probing: std::sync::Mutex<BTreeMap<usize, watch::Receiver<Option<bool>>>>,
     file: PathBuf,
 }
 
@@ -170,6 +203,7 @@ impl Client {
             presence,
             router,
             devices: Mutex::new(devices),
+            probing: Default::default(),
             file,
         });
         tokio::spawn(Self::watch_connections(
@@ -289,14 +323,74 @@ impl Client {
         Ok(client)
     }
 
-    pub async fn refresh_network(&self) {
-        self.router.endpoint().network_change().await;
+    pub fn refresh_presence(&self) {
         self.transport.refresh_presence();
     }
 
-    pub async fn reconnect(&self, id: &str) -> Result<Vec<PeerConnection>> {
-        self.transport.reconnect_peer(id).await?;
-        Ok(self.transport.connections().remove(id).unwrap_or_default())
+    /// Run a single-flight round-trip health check on `connection`. Retires the connection
+    /// immediately if it does not respond within [`CONNECTION_PROBE_TIMEOUT`].
+    pub async fn verify_connection(
+        self: &Arc<Self>,
+        peer: &str,
+        connection: &gateway::NativeSession,
+    ) -> bool {
+        let conn_id = connection.id();
+        let mut rx = {
+            let mut probing = self.probing.lock().expect("probing map");
+            if let Some(existing) = probing.get(&conn_id) {
+                existing.clone()
+            } else {
+                let (tx, rx) = watch::channel(None);
+                probing.insert(conn_id, rx.clone());
+                let client = self.clone();
+                let peer = peer.to_owned();
+                let connection = connection.clone();
+                tokio::spawn(async move {
+                    let probe = paxri_terminal::managed::request_with_timeout(
+                        connection.clone(),
+                        paxri_terminal::managed::Request::List,
+                        CONNECTION_PROBE_TIMEOUT,
+                    )
+                    .await;
+                    let alive = probe.is_ok();
+                    if !alive && client.transport.retire_session(&peer, &connection) {
+                        log::warn!("Retiring unresponsive connection to {peer}");
+                        client.transport.refresh_presence();
+                    }
+                    let _ = tx.send(Some(alive));
+                    client.probing.lock().expect("probing map").remove(&conn_id);
+                });
+                rx
+            }
+        };
+        rx.wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|value| *value)
+            .unwrap_or(false)
+    }
+
+    pub async fn refresh_network(self: &Arc<Self>) {
+        self.router.endpoint().network_change().await;
+        self.transport.refresh_presence();
+        let live = self.transport.live_sessions();
+        let mut checks = tokio::task::JoinSet::new();
+        for (peer, session) in live {
+            let client = self.clone();
+            checks.spawn(async move {
+                client.verify_connection(&peer, &session).await;
+            });
+        }
+        while checks.join_next().await.is_some() {}
+    }
+
+    pub async fn reconnect(&self, id: &str) -> Result<(Vec<PeerConnection>, PeerConnectionState)> {
+        let session = self.transport.reconnect_peer(id).await?;
+        let paths = self.transport.connections().remove(id).unwrap_or_default();
+        let state = PeerConnectionState::Connected {
+            connection_id: session.id() as u64,
+        };
+        Ok((paths, state))
     }
 
     pub fn watch_peer(&self, id: Option<&str>, list_interval: Option<Duration>) {
@@ -323,12 +417,14 @@ impl Client {
             return;
         };
         let mut changes = transport.subscribe_peer_changes();
+        let mut phases = transport.subscribe_phase_changes();
         let mut config = transport.subscribe_config();
         let mut times = BTreeMap::new();
         let mut foreground = crate::ACTIVITY_VISIBLE.subscribe();
         let mut last_service_state = None;
         loop {
             let latest = changes.borrow_and_update().clone();
+            let _ = *phases.borrow_and_update();
             if times != latest {
                 times = latest;
                 let Some(client) = weak.upgrade() else { break };
@@ -350,6 +446,11 @@ impl Client {
             let page = viewed.borrow_and_update().clone();
             let mut interval = Duration::from_secs(60);
             let paths = transport.connections();
+            let states: BTreeMap<String, PeerConnectionState> = transport
+                .connection_states()
+                .into_iter()
+                .map(|(id, (phase, conn_id))| (id, PeerConnectionState::from_phase(phase, conn_id)))
+                .collect();
             let state = (!paths.is_empty(), paths.values().any(|links| !links.is_empty()));
             if last_service_state != Some(state) {
                 connection_state(state.0, state.1);
@@ -358,6 +459,7 @@ impl Client {
             if visible {
                 let snapshot = Presence {
                     paths,
+                    states,
                     changed_at: times.clone(),
                 };
                 // Sample the visible connection's graphs each second. The list only needs to age its labels.
@@ -371,6 +473,7 @@ impl Client {
             }
             tokio::select! {
                 result = changes.changed() => if result.is_err() { break; },
+                result = phases.changed() => if result.is_err() { break; },
                 result = config.changed() => if result.is_err() { break; },
                 result = viewed.changed() => if result.is_err() { break; },
                 result = foreground.changed() => if result.is_err() { break; },
@@ -533,25 +636,52 @@ impl Client {
         }
     }
 
-    pub async fn manage_terminal(&self, peer: &str, request: paxri_terminal::managed::Request) -> Result<Vec<paxri_terminal::managed::Key>> {
+    pub async fn manage_terminal(
+        self: &Arc<Self>,
+        peer: &str,
+        request: paxri_terminal::managed::Request,
+    ) -> Result<Vec<paxri_terminal::managed::Key>> {
         let session = self.transport.online_session(peer)?;
-        paxri_terminal::managed::request(session, request).await.map(|(_, keys)| keys)
+        let limit = match request {
+            paxri_terminal::managed::Request::End(_) => ATTACH_REQUEST_TIMEOUT,
+            _ => CREATE_REQUEST_TIMEOUT,
+        };
+        let result =
+            paxri_terminal::managed::request_with_timeout(session.clone(), request, limit).await;
+        if result
+            .as_ref()
+            .is_err_and(|e| e.is::<tokio::time::error::Elapsed>())
+        {
+            self.verify_connection(peer, &session).await;
+        }
+        result.map(|(_, keys)| keys)
     }
 
     pub fn spawn_terminal(
         self: Arc<Self>,
         rt: &tokio::runtime::Handle,
         peer: String,
+        expected_connection_id: u64,
         action: paxri_terminal::managed::Request,
         out: Sender<Update>,
         id: AttachmentId,
-    ) -> (mpsc::UnboundedSender<Frame>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        mpsc::UnboundedSender<Frame>,
+        Arc<Notify>,
+        tokio::task::JoinHandle<()>,
+    ) {
         use paxri_terminal::managed::{Rejected, Request};
         let (input, keys) = mpsc::unbounded_channel();
+        let probe_now = Arc::new(Notify::new());
+        let trigger = probe_now.clone();
         let job = rt.spawn(async move {
             let mut changes = self.transport.subscribe_peer_changes();
             let connection = match self.transport.online_session(&peer) {
-                Ok(connection) => connection,
+                Ok(connection) if connection.id() as u64 == expected_connection_id => connection,
+                Ok(_) => {
+                    let _ = out.send(Update::End(id, Err(ConnectionReplaced.into()))).await;
+                    return;
+                }
                 Err(error) => {
                     let _ = out.send(Update::End(id, Err(error))).await;
                     return;
@@ -559,18 +689,38 @@ impl Client {
             };
             let run = async {
                 if matches!(action, Request::End(_)) {
-                    paxri_terminal::managed::request(connection.clone(), action).await.map(|_| 0)
+                    paxri_terminal::managed::request_with_timeout(
+                        connection.clone(),
+                        action,
+                        ATTACH_REQUEST_TIMEOUT,
+                    )
+                    .await
+                    .map(|_| 0)
                 } else {
-                    self.terminal(&peer, connection.clone(), action, keys, out.clone(), id).await
+                    self.terminal(
+                        &peer,
+                        connection.clone(),
+                        action,
+                        keys,
+                        trigger,
+                        out.clone(),
+                        id,
+                    )
+                    .await
                 }
             };
-            // A replaced connection also invalidates an in-flight attach or history replay.
+            // A closed or replaced connection invalidates an in-flight attach or history replay immediately.
             let replaced = async {
-                loop {
-                    changes.changed().await?;
-                    if !self.transport.online_session(&peer).is_ok_and(|s| s.same_connection(&connection)) {
-                        bail!("Terminal connection was replaced");
-                    }
+                tokio::select! {
+                    _ = connection.closed() => bail!(ConnectionReplaced),
+                    result = async {
+                        loop {
+                            changes.changed().await?;
+                            if !self.transport.online_session(&peer).is_ok_and(|s| s.same_connection(&connection)) {
+                                bail!(ConnectionReplaced);
+                            }
+                        }
+                    } => result,
                 }
             };
             let mut result = tokio::select! {
@@ -581,26 +731,12 @@ impl Client {
                 .as_ref()
                 .is_err_and(|e| e.is::<tokio::time::error::Elapsed>())
             {
-                let client = self.clone();
-                let peer = peer.clone();
-                tokio::spawn(async move {
-                    // A single stalled viewer should not tear down working port forwards.
-                    // Only retire its connection if a separate gateway request also times out.
-                    let probe = timeout(
-                        Duration::from_secs(8),
-                        paxri_terminal::managed::request(connection.clone(), Request::List),
-                    )
-                    .await;
-                    if probe.is_err()
-                        && client
-                            .transport
-                            .online_session(&peer)
-                            .is_ok_and(|s| s.same_connection(&connection))
-                    {
-                        connection.close_unresponsive();
-                        client.transport.refresh_presence();
-                    }
-                });
+                // A single stalled viewer should not tear down working port forwards.
+                // Wait for the single-flight connection probe to finish before reporting End
+                // so the UI never retries against a dead connection that is about to be retired.
+                if !self.verify_connection(&peer, &connection).await {
+                    result = Err(ConnectionReplaced.into());
+                }
             }
             if let Request::Attach(key, _) | Request::End(key) = action
                 && result.as_ref().is_err_and(|e| e.is::<Rejected>())
@@ -617,15 +753,16 @@ impl Client {
             }
             let _ = out.send(Update::End(id, result)).await;
         });
-        (input, job)
+        (input, probe_now, job)
     }
 
     async fn terminal(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         session: gateway::NativeSession,
         action: paxri_terminal::managed::Request,
         input: mpsc::UnboundedReceiver<Frame>,
+        probe_now: Arc<Notify>,
         out: Sender<Update>,
         attachment_id: AttachmentId,
     ) -> Result<u32> {
@@ -639,10 +776,32 @@ impl Client {
             "This device does not host an interactive shell"
         );
         use paxri_terminal::managed::{self, AttachmentEvent, Request};
-        let (mut stream, _) = managed::request(session, action).await?;
-        let history = timeout(Duration::from_secs(15), managed::read_history(&mut stream))
-            .await
-            .context("Terminal history timed out")??;
+        let ready = Arc::new(Notify::new());
+        // If attaching does not reach Ready quickly, start probing the shared connection
+        // in parallel so a half-open connection is retired without waiting for serial timeouts.
+        let _watchdog = AbortOnDrop(tokio::spawn({
+            let client = self.clone();
+            let peer = id.to_owned();
+            let session = session.clone();
+            let ready = ready.clone();
+            async move {
+                tokio::select! {
+                    _ = ready.notified() => {}
+                    _ = tokio::time::sleep(SLOW_ATTACH_PROBE_DELAY) => {
+                        client.verify_connection(&peer, &session).await;
+                    }
+                }
+            }
+        }));
+        let request_timeout = match action {
+            Request::Create(..) => CREATE_REQUEST_TIMEOUT,
+            _ => ATTACH_REQUEST_TIMEOUT,
+        };
+        let (mut stream, _) = managed::request_with_timeout(session, action, request_timeout).await?;
+        if matches!(action, Request::Create(..)) {
+            out.send(Update::HostConfirmed(attachment_id)).await?;
+        }
+        let history = managed::read_history_with_timeout(&mut stream, HISTORY_IDLE_TIMEOUT).await?;
         let (Request::Attach(..) | Request::Create(..)) = action else {
             bail!("Invalid interactive terminal request");
         };
@@ -651,12 +810,16 @@ impl Client {
         }
 
         let out = &out;
-        managed::attachment(stream, input, true, |event| async move {
-            out.send(match event {
-                AttachmentEvent::Ready => Update::Connected(attachment_id),
+        let ready_signal = &ready;
+        managed::attachment_with_probe(stream, input, true, Some(probe_now), |event| async move {
+            let update = match event {
+                AttachmentEvent::Ready => {
+                    ready_signal.notify_one();
+                    Update::Connected(attachment_id)
+                }
                 AttachmentEvent::Output(bytes) => Update::Output(attachment_id, bytes, false),
-            })
-            .await?;
+            };
+            out.send(update).await?;
             Ok(())
         })
         .await

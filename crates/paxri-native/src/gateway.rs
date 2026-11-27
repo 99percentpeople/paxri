@@ -22,6 +22,7 @@ mod lan_mapping;
 pub use lan_mapping::LanMapping;
 pub mod pairing;
 pub use connections::{NativeSession, NativeStream};
+pub use paxri_core::connection::ConnectionPhase;
 pub struct NativeTransport {
     endpoint: Endpoint,
     connections: Arc<connections::Connections>,
@@ -49,6 +50,60 @@ impl NativeTransport {
         let address = peers.get(peer).context("unknown peer")?;
         self.connections.live(address.id)
             .with_context(|| format!("{peer} is offline"))
+    }
+
+    pub fn live_sessions(&self) -> Vec<(String, NativeSession)> {
+        self.peers
+            .read()
+            .expect("peer map")
+            .iter()
+            .filter_map(|(name, dest)| {
+                self.connections
+                    .live(dest.id)
+                    .map(|session| (name.clone(), session))
+            })
+            .collect()
+    }
+
+    pub fn connection_phase(&self, peer: &str) -> ConnectionPhase {
+        self.peers
+            .read()
+            .expect("peer map")
+            .get(peer)
+            .map_or(ConnectionPhase::Disconnected, |dest| {
+                self.connections.phase(dest.id)
+            })
+    }
+
+    pub fn connection_phases(&self) -> BTreeMap<String, ConnectionPhase> {
+        self.peers
+            .read()
+            .expect("peer map")
+            .iter()
+            .map(|(name, dest)| (name.clone(), self.connections.phase(dest.id)))
+            .collect()
+    }
+
+    pub fn connection_states(&self) -> BTreeMap<String, (ConnectionPhase, Option<u64>)> {
+        self.peers
+            .read()
+            .expect("peer map")
+            .iter()
+            .map(|(name, dest)| (name.clone(), self.connections.state_snapshot(dest.id)))
+            .collect()
+    }
+
+    pub fn subscribe_phase_changes(&self) -> watch::Receiver<u64> {
+        self.connections.phase_events.subscribe()
+    }
+
+    /// Retire a specific unresponsive connection immediately, moving the peer slot through
+    /// stopping to disconnected and notifying presence watchers synchronously.
+    pub fn retire_session(&self, peer: &str, session: &NativeSession) -> bool {
+        let Some(id) = self.peers.read().expect("peer map").get(peer).map(|dest| dest.id) else {
+            return false;
+        };
+        self.connections.retire(id, session)
     }
 
     pub async fn reconnect_peer(&self, peer: &str) -> Result<NativeSession> {

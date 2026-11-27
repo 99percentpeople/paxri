@@ -22,6 +22,11 @@ pub(super) async fn show_peer(
                 .await?
                 .and_then(|s| s.ipc_path)
             else {
+                if gateway::is_manual_startup(None) {
+                    anyhow::bail!(
+                        "Gateway is not running (startup is set to manual). Run `paxri gateway start` first."
+                    );
+                }
                 return Err(e);
             };
             peer_status(&other, selector, check).await?

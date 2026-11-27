@@ -144,12 +144,14 @@ impl Gateway {
     fn peer_status(&self, selector: &str) -> Result<PeerStatus> {
         let (name, peer) = self.config.resolve_peer(selector)?;
         let session = self.transport.online_session(name).ok();
+        let phase = self.transport.connection_phase(name);
         Ok(PeerStatus {
             peer: name.clone(),
             device_id: peer.endpoint_id.clone(),
             platform: self.peer_platform(peer).unwrap_or_default(),
             capabilities: self.device_info_for(peer).map(|i| i.capabilities),
-            state: if session.is_some() { "Connected" } else { "Offline" }.into(),
+            state: phase.label(true).into(),
+            phase,
             connections: Some(session.map(|s| s.status()).into_iter().collect()),
         })
     }
@@ -430,6 +432,7 @@ impl Gateway {
             device_name: config.device_name.clone(),
             ticket,
             peer_connections: Some(self.transport.connections()),
+            peer_connection_phases: self.transport.connection_phases(),
             peer_last_status_change_ms: self.peer_change_times(),
             peer_platforms: config
                 .peers
@@ -704,8 +707,8 @@ async fn handle_client(
             paxri_control::respond(&mut socket, result).await
         }
         Command::ManagedTerminal { peer, action } => {
-            use paxri_terminal::managed::{Request, request};
-            let (session, permit) = {
+            use paxri_terminal::managed::{Request, request, request_with_timeout};
+            let (transport, session, permit) = {
                 let state = gateway.lock().await;
                 let session = state.transport.online_session(&peer).and_then(|session| {
                     if state.config.peers.get(&peer).and_then(|p| state.device_info_for(p))
@@ -714,13 +717,36 @@ async fn handle_client(
                     }
                     Ok(session)
                 });
-                (session, state.streams.clone().try_acquire_owned())
+                (
+                    state.transport.clone(),
+                    session,
+                    state.streams.clone().try_acquire_owned(),
+                )
             };
             drop(management_slot);
             let opened = async {
                 let permit = permit.context("gateway stream limit reached")?;
-                let (stream, keys) = request(session?, action).await?;
-                anyhow::Ok((permit, stream, keys))
+                let session = session?;
+                match request(session.clone(), action).await {
+                    Ok((stream, keys)) => anyhow::Ok((permit, stream, keys)),
+                    Err(error) => {
+                        if error.is::<tokio::time::error::Elapsed>() {
+                            let peer = peer.clone();
+                            tokio::spawn(async move {
+                                let probe = request_with_timeout(
+                                    session.clone(),
+                                    Request::List,
+                                    std::time::Duration::from_secs(3),
+                                )
+                                .await;
+                                if probe.is_err() && transport.retire_session(&peer, &session) {
+                                    transport.refresh_presence();
+                                }
+                            });
+                        }
+                        Err(error)
+                    }
+                }
             }.await;
             let (_permit, mut stream, keys) = match opened {
                 Ok(result) => result,
@@ -783,24 +809,48 @@ async fn handle_client(
                     .with_context(|| format!("stream to {peer}/{target}"));
             }
             let opened = async {
-                match open {
-                    Command::OpenTerminal { peer, size } => {
-                        terminal::open_shell(transport.online_session(&peer)?, size).await
+                use paxri_core::{PeerSession, StreamKind, Transport};
+                let peer = match &open {
+                    Command::OpenTerminal { peer, .. }
+                    | Command::Exec { peer, .. }
+                    | Command::ExecPipe { peer, .. }
+                    | Command::OpenFiles { peer } => peer.clone(),
+                    _ => unreachable!(),
+                };
+                // Drive the peer connection state machine (Disconnected/Initializing/Reconnecting -> Connected)
+                // uniformly across shell, exec, file transfer, and port forwarding.
+                let session = transport.session(&peer).await?;
+                let result = match open {
+                    Command::OpenTerminal { size, .. } => {
+                        terminal::open_shell(session.clone(), size).await
                     }
                     Command::Exec {
-                        peer,
-                        size,
-                        invocation,
-                    } => terminal::open(transport.online_session(&peer)?, Some(size), invocation).await,
-                    Command::ExecPipe { peer, invocation } => {
-                        terminal::open(transport.online_session(&peer)?, None, invocation).await
+                        size, invocation, ..
+                    } => terminal::open(session.clone(), Some(size), invocation).await,
+                    Command::ExecPipe { invocation, .. } => {
+                        terminal::open(session.clone(), None, invocation).await
                     }
-                    Command::OpenFiles { peer } => {
-                        use paxri_core::{StreamKind, Transport};
-                        transport.open(&peer, StreamKind::Files).await
-                    }
+                    Command::OpenFiles { .. } => session.open(StreamKind::Files).await,
                     _ => unreachable!(),
+                };
+                if let Err(ref error) = result
+                    && error.is::<tokio::time::error::Elapsed>()
+                {
+                    let transport = transport.clone();
+                    let session = session.clone();
+                    tokio::spawn(async move {
+                        let probe = paxri_terminal::managed::request_with_timeout(
+                            session.clone(),
+                            paxri_terminal::managed::Request::List,
+                            std::time::Duration::from_secs(3),
+                        )
+                        .await;
+                        if probe.is_err() && transport.retire_session(&peer, &session) {
+                            transport.refresh_presence();
+                        }
+                    });
                 }
+                result
             };
             use tokio::io::AsyncReadExt;
             let opened = tokio::select! {

@@ -390,6 +390,7 @@ impl Dashboard {
                             Some((status.peers.get(alias)?.as_str(), paths.as_slice()))
                         });
                         view.connection_history.record(paths);
+                        view.sync_peer_connections(&status, cx);
                         view.watch_presence(&status, cx);
                         if let Some(peer) = saved_peer && view.forward_filters.scope.device.is_some() {
                             view.forward_filters.scope.device = Some(peer);

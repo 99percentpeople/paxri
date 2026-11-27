@@ -11,9 +11,71 @@ pub fn unix_time_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Explicit lifecycle phase of a paired peer's shared transport connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionPhase {
+    #[default]
+    Disconnected,
+    Initializing,
+    Connected,
+    Reconnecting,
+    Stopping,
+}
+
+/// Event driving transitions of [`ConnectionPhase`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    BeginInitialize,
+    BeginReconnect,
+    Established,
+    BeginStop,
+    Closed,
+}
+
+impl ConnectionPhase {
+    pub fn is_connected(self) -> bool {
+        matches!(self, Self::Connected)
+    }
+
+    pub fn label(self, presence: bool) -> &'static str {
+        match self {
+            Self::Disconnected if presence => "Offline",
+            Self::Disconnected => "Disconnected",
+            Self::Initializing => "Connecting…",
+            Self::Connected => "Connected",
+            Self::Reconnecting => "Reconnecting…",
+            Self::Stopping => "Stopping…",
+        }
+    }
+
+    /// Apply a single transport lifecycle event, returning the next valid phase if allowed.
+    pub fn apply(self, event: ConnectionEvent) -> Option<Self> {
+        let next = match (self, event) {
+            (Self::Stopping, ConnectionEvent::Closed) => Self::Disconnected,
+            (Self::Stopping, _) => return None,
+            (_, ConnectionEvent::BeginStop) => Self::Stopping,
+            (Self::Disconnected, ConnectionEvent::BeginInitialize) => Self::Initializing,
+            (
+                Self::Disconnected | Self::Initializing | Self::Connected | Self::Reconnecting,
+                ConnectionEvent::BeginReconnect,
+            ) => Self::Reconnecting,
+            (
+                Self::Disconnected | Self::Initializing | Self::Connected | Self::Reconnecting,
+                ConnectionEvent::Established,
+            ) => Self::Connected,
+            (_, ConnectionEvent::Closed) => Self::Disconnected,
+            _ => return None,
+        };
+        Some(next)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerConnection {
     pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub streams: BTreeMap<StreamKind, usize>,
     pub path: PathKind,
@@ -135,5 +197,33 @@ impl PeerConnection {
         parts.extend(self.rtt_label());
         parts.extend(self.stream_labels());
         parts.join(" · ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionEvent, ConnectionPhase};
+
+    #[test]
+    fn connection_phase_transitions_enforce_stopping_barrier_and_lifecycle_order() {
+        let phase = ConnectionPhase::Disconnected;
+        let phase = phase.apply(ConnectionEvent::BeginInitialize).unwrap();
+        assert_eq!(phase, ConnectionPhase::Initializing);
+        let phase = phase.apply(ConnectionEvent::Established).unwrap();
+        assert_eq!(phase, ConnectionPhase::Connected);
+        let phase = phase.apply(ConnectionEvent::BeginReconnect).unwrap();
+        assert_eq!(phase, ConnectionPhase::Reconnecting);
+        let phase = phase.apply(ConnectionEvent::Established).unwrap();
+        assert_eq!(phase, ConnectionPhase::Connected);
+        let phase = phase.apply(ConnectionEvent::BeginStop).unwrap();
+        assert_eq!(phase, ConnectionPhase::Stopping);
+        // Stopping blocks new dials or installations until Closed finishes teardown.
+        assert_eq!(phase.apply(ConnectionEvent::BeginInitialize), None);
+        assert_eq!(phase.apply(ConnectionEvent::Established), None);
+        assert_eq!(phase.apply(ConnectionEvent::BeginReconnect), None);
+        assert_eq!(
+            phase.apply(ConnectionEvent::Closed),
+            Some(ConnectionPhase::Disconnected)
+        );
     }
 }

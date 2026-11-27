@@ -1,10 +1,15 @@
 use super::*;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use paxri_ui::components::directory::{
-    DeviceOption, SessionLocation, named_session_entries, session_list_notice,
+    DeviceOption, named_session_entries, session_list_notice,
 };
 use paxri_ui::components::{DropdownContent, Icon, ListView};
 use paxri_ui::terminal::title::next_session_number;
+
+pub(super) use paxri_ui::terminal::lifecycle::{
+    LifecycleEffect, LifecycleEvent, PeerConnectionState, PeerLifecycle, SessionAction,
+    SessionState, StreamEnd,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AttachmentId {
@@ -13,11 +18,10 @@ pub(crate) struct AttachmentId {
 }
 
 pub(super) struct Session {
-    pub(super) attachment: AttachmentId,
+    pub(super) id: u64,
     pub(super) key: SessionKey,
     pub(super) peer: String,
     pub(super) name: SharedString,
-    pub(super) state: SessionState,
     pub(super) screen: Emulator,
     pub(super) bell: paxri_ui::terminal::bell::BellState,
     pub(super) wheel: paxri_ui::terminal::mouse::Wheel,
@@ -25,16 +29,9 @@ pub(super) struct Session {
     pub(super) composing: Preedit,
     pub(super) title: Entity<TabTitle>,
     pub(super) input: mpsc::UnboundedSender<Frame>,
+    pub(super) probe_now: Arc<tokio::sync::Notify>,
     pub(super) job: Option<JoinHandle<()>>,
-    pub(super) retry_at: std::time::Instant,
-}
-
-pub(super) enum SessionState {
-    Connecting,
-    Connected,
-    Reconnecting,
-    Stopping,
-    Ended(String),
+    pub(super) attempt_started_at: std::time::Instant,
 }
 
 impl Session {
@@ -51,37 +48,12 @@ impl Session {
         }
     }
 
-    pub(super) fn connected(&self) -> bool {
-        matches!(self.state, SessionState::Connected)
-    }
-
-    pub(super) fn detach(&mut self) {
+    pub(super) fn abort_job(&mut self) {
         if let Some(job) = self.job.take() {
             job.abort();
         }
-        // A result or replay from the old stream may already be in the UI queue.
-        self.attachment.generation += 1;
         self.composing.clear();
-        self.retry_at = std::time::Instant::now();
-        if !matches!(self.state, SessionState::Stopping) {
-            self.state = SessionState::Reconnecting;
-        }
-    }
-
-    pub(super) fn labels(&self, online: bool, cx: &App) -> (SharedString, String) {
-        let number = self.key.number;
-        let subtitle = match &self.state {
-            SessionState::Connected => format!("Session {number}"),
-            SessionState::Connecting => format!("Session {number} · Connecting…"),
-            SessionState::Reconnecting if !online => format!("Session {number} · Device offline"),
-            SessionState::Reconnecting => format!("Session {number} · Reconnecting…"),
-            SessionState::Stopping if !online => {
-                format!("Session {number} · Device offline · Stop pending")
-            }
-            SessionState::Stopping => format!("Session {number} · Stopping…"),
-            SessionState::Ended(reason) => format!("Session {number} · {reason}"),
-        };
-        (self.title.read(cx).label(&self.name), subtitle)
+        self.attempt_started_at = std::time::Instant::now();
     }
 }
 
@@ -94,6 +66,253 @@ impl Drop for Session {
 }
 
 impl Mobile {
+    pub(super) fn peer_connection(&self, peer: &str) -> PeerConnectionState {
+        self.lifecycles
+            .get(peer)
+            .map(PeerLifecycle::connection)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn session_state(&self, id: u64) -> Option<&SessionState> {
+        let session = self.sessions.get(&id)?;
+        self.lifecycles.get(&session.peer)?.session_state(id)
+    }
+
+    pub(super) fn session_generation_matches(&self, att: AttachmentId) -> bool {
+        let Some(session) = self.sessions.get(&att.session) else {
+            return false;
+        };
+        self.lifecycles
+            .get(&session.peer)
+            .and_then(|lifecycle| lifecycle.session(att.session))
+            .is_some_and(|managed| managed.generation == att.generation)
+    }
+
+    pub(super) fn session_connected(&self, id: u64) -> bool {
+        self.session_state(id).is_some_and(SessionState::is_active)
+    }
+
+    pub(super) fn session_labels(&self, id: u64, cx: &App) -> (SharedString, String) {
+        let session = &self.sessions[&id];
+        let connection = self.peer_connection(&session.peer);
+        let subtitle = self
+            .session_state(id)
+            .map(|state| state.subtitle(session.key.number, connection))
+            .unwrap_or_else(|| format!("Session {}", session.key.number));
+        (session.title.read(cx).label(&session.name), subtitle)
+    }
+
+    pub(super) fn emit_lifecycle(
+        &mut self,
+        peer: &str,
+        event: LifecycleEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let effects = self
+            .lifecycles
+            .entry(peer.to_owned())
+            .or_default()
+            .handle(event);
+        self.apply_lifecycle_effects(peer, effects, cx);
+    }
+
+    pub(super) fn dispatch_all_pending(&mut self, cx: &mut Context<Self>) {
+        let peers: Vec<String> = self.lifecycles.keys().cloned().collect();
+        let active_session = match self.page {
+            Page::Terminal(id) => Some(id),
+            _ => None,
+        };
+        let visible = *ACTIVITY_VISIBLE.borrow();
+        for peer in peers {
+            self.emit_lifecycle(
+                &peer,
+                LifecycleEvent::DispatchPending {
+                    active_session,
+                    visible,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn spawn_session_task(
+        &mut self,
+        id: u64,
+        generation: u64,
+        connection_id: u64,
+        action: TerminalRequest,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if let Some(old) = session.job.take() {
+            old.abort();
+        }
+        let attachment = AttachmentId {
+            session: id,
+            generation,
+        };
+        let (input, probe_now, job) = client.spawn_terminal(
+            &self.rt,
+            session.peer.clone(),
+            connection_id,
+            action,
+            self.updates.clone(),
+            attachment,
+        );
+        session.input = input;
+        session.probe_now = probe_now;
+        session.attempt_started_at = std::time::Instant::now();
+        session.job = Some(job);
+    }
+
+    fn apply_lifecycle_effects(
+        &mut self,
+        peer: &str,
+        effects: Vec<LifecycleEffect>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut dispatch_pending = false;
+        for effect in effects {
+            match effect {
+                LifecycleEffect::SpawnCreate {
+                    id,
+                    generation,
+                    connection_id,
+                } => {
+                    if let Some(session) = self.sessions.get(&id) {
+                        let grid = session.grid_size();
+                        let action = TerminalRequest::Create(
+                            session.key,
+                            PtySize {
+                                rows: grid.rows,
+                                cols: grid.cols,
+                            },
+                        );
+                        self.spawn_session_task(id, generation, connection_id, action);
+                    }
+                }
+                LifecycleEffect::SpawnAttach {
+                    id,
+                    generation,
+                    connection_id,
+                } => {
+                    if let Some(session) = self.sessions.get(&id) {
+                        let grid = session.grid_size();
+                        let action = TerminalRequest::Attach(
+                            session.key,
+                            PtySize {
+                                rows: grid.rows,
+                                cols: grid.cols,
+                            },
+                        );
+                        self.spawn_session_task(id, generation, connection_id, action);
+                    }
+                }
+                LifecycleEffect::SpawnEnd {
+                    id,
+                    generation,
+                    connection_id,
+                } => {
+                    if let Some(session) = self.sessions.get(&id) {
+                        let action = TerminalRequest::End(session.key);
+                        self.spawn_session_task(id, generation, connection_id, action);
+                    }
+                }
+                LifecycleEffect::SendExit { id } => {
+                    if let Some(session) = self.sessions.get(&id) {
+                        let _ = session.input.send(Frame::Exit(0));
+                    }
+                }
+                LifecycleEffect::ProbeStream { id } => {
+                    if let Some(session) = self.sessions.get(&id) {
+                        session.probe_now.notify_one();
+                    }
+                }
+                LifecycleEffect::AbortJob { id } => {
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        session.abort_job();
+                    }
+                }
+                LifecycleEffect::ClearComposing { id } => {
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        session.composing.clear();
+                    }
+                }
+                LifecycleEffect::StartInput { id } => {
+                    if self.page == Page::Terminal(id)
+                        && let Some(session) = self.sessions.get(&id)
+                    {
+                        Self::start_input(session);
+                    }
+                }
+                LifecycleEffect::StopInput { id } => {
+                    if self.page == Page::Terminal(id) {
+                        gpui_mobile::set_text_input_callback(None);
+                        gpui_mobile::hide_keyboard();
+                    }
+                }
+                LifecycleEffect::ScheduleRetry { id } => {
+                    let updates = self.updates.clone();
+                    let peer = peer.to_owned();
+                    self.rt.spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let _ = updates.send(Update::RetrySession(peer, id)).await;
+                    });
+                }
+                LifecycleEffect::DismissSession {
+                    id,
+                    remove_hosted,
+                    toast_gone,
+                } => {
+                    if toast_gone && self.page == Page::Terminal(id) {
+                        Toast::show("Session has ended on the gateway", self.window, cx);
+                    }
+                    if let Some(removed) = self.sessions.remove(&id) {
+                        if remove_hosted {
+                            self.remove_hosted(&removed.peer, removed.key);
+                        }
+                        if self.page == Page::Terminal(id) {
+                            self.navigate(self.terminal_return.clone(), cx);
+                        }
+                    }
+                }
+                LifecycleEffect::SyncDefaults => {
+                    self.assign_terminal_defaults(cx);
+                }
+                LifecycleEffect::DispatchPending => {
+                    dispatch_pending = true;
+                }
+                LifecycleEffect::RefreshPresence => {
+                    if let Some(client) = &self.client {
+                        client.refresh_presence();
+                    }
+                }
+            }
+        }
+        if dispatch_pending {
+            let active_session = match self.page {
+                Page::Terminal(id) => Some(id),
+                _ => None,
+            };
+            let visible = *ACTIVITY_VISIBLE.borrow();
+            let next = self
+                .lifecycles
+                .entry(peer.to_owned())
+                .or_default()
+                .handle(LifecycleEvent::DispatchPending {
+                    active_session,
+                    visible,
+                });
+            if !next.is_empty() {
+                self.apply_lifecycle_effects(peer, next, cx);
+            }
+        }
+    }
+
     pub(super) fn assign_terminal_defaults(&mut self, cx: &mut App) {
         let titles = self
             .sessions
@@ -123,7 +342,9 @@ impl Mobile {
             .collect();
         TabTitle::assign_with_reserved(&titles, reserved, cx);
         for s in self.sessions.values() {
-            if !matches!(s.state, SessionState::Ended(_))
+            if self
+                .session_state(s.id)
+                .is_some_and(SessionState::is_confirmed_on_host)
                 && let Err(e) = self.session_names.set(&s.peer, s.key, s.title.read(cx))
             {
                 log::warn!("Saving session title: {e}");
@@ -139,7 +360,7 @@ impl Mobile {
                 Page::Peer(selected) if selected == peer => {}
                 _ => continue,
             }
-            if !self.presence.online(peer)
+            if !self.peer_connection(peer).is_connected()
                 || !saved.capabilities.is_some_and(|c| c.managed_terminals)
                 || self.listing_peers.contains_key(peer)
             {
@@ -163,19 +384,18 @@ impl Mobile {
     }
 
     pub(super) fn end_session(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.get_mut(&id) else {
+        let Some(peer) = self.sessions.get(&id).map(|s| s.peer.clone()) else {
             return;
         };
-        match session.state {
-            SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting => {
-                session.state = SessionState::Stopping;
-                let _ = session.input.send(Frame::Exit(0));
-                self.retry_sessions();
-            }
-            SessionState::Stopping => return,
-            SessionState::Ended(_) => self.dismiss_session(id, cx),
-        }
+        self.emit_lifecycle(&peer, LifecycleEvent::UserStop { id }, cx);
         cx.notify();
+    }
+
+    pub(super) fn dismiss_session(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(peer) = self.sessions.get(&id).map(|s| s.peer.clone()) else {
+            return;
+        };
+        self.emit_lifecycle(&peer, LifecycleEvent::Dismiss { id }, cx);
     }
 
     pub(super) fn remove_hosted(&mut self, peer: &str, key: SessionKey) {
@@ -190,51 +410,6 @@ impl Mobile {
         }
     }
 
-    pub(super) fn retry_sessions(&mut self) {
-        let Some(client) = &self.client else { return };
-        if !*ACTIVITY_VISIBLE.borrow() {
-            return;
-        }
-        let now = std::time::Instant::now();
-        for session in self.sessions.values_mut() {
-            if session.job.is_some()
-                || session.retry_at > now
-                || !self.presence.online(&session.peer)
-            {
-                continue;
-            }
-            let action = match session.state {
-                SessionState::Reconnecting => {
-                    let grid = session.grid_size();
-                    TerminalRequest::Attach(
-                        session.key,
-                        PtySize {
-                            rows: grid.rows,
-                            cols: grid.cols,
-                        },
-                    )
-                }
-                SessionState::Stopping => TerminalRequest::End(session.key),
-                _ => continue,
-            };
-            let (input, job) = client.clone().spawn_terminal(
-                &self.rt,
-                session.peer.clone(),
-                action,
-                self.updates.clone(),
-                session.attachment,
-            );
-            session.input = input;
-            session.job = Some(job);
-        }
-    }
-
-    pub(super) fn dismiss_session(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.sessions.remove(&id).is_some() && self.page == Page::Terminal(id) {
-            self.navigate(self.terminal_return.clone(), cx);
-        }
-    }
-
     pub(super) fn open(
         &mut self,
         peer: String,
@@ -244,20 +419,22 @@ impl Mobile {
     ) {
         if let Some(key) = saved_key
             && let Some(existing) = self.sessions.values().find(|s| {
-                s.peer == peer && s.key == key && !matches!(s.state, SessionState::Ended(_))
+                s.peer == peer
+                    && s.key == key
+                    && self.session_state(s.id).is_some_and(SessionState::is_open)
             })
         {
-            self.navigate(Page::Terminal(existing.attachment.session), cx);
+            self.navigate(Page::Terminal(existing.id), cx);
             cx.notify();
             return;
         }
-        let Some(client) = self.client.clone() else {
+        if self.client.is_none() {
             return;
-        };
+        }
         let Some(saved) = self.peers.get(&peer) else {
             return;
         };
-        if !saved.supports_shell() || !self.presence.online(&peer) {
+        if !saved.supports_shell() || !self.peer_connection(&peer).is_connected() {
             return;
         }
         let name = saved.name.clone().into();
@@ -278,36 +455,32 @@ impl Mobile {
                 }
             }
         };
-        self.sessions
-            .retain(|_, s| s.peer != peer || s.key != key || !matches!(s.state, SessionState::Ended(_)));
+        let stale_ids: Vec<u64> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                s.peer == peer
+                    && s.key == key
+                    && self.session_state(s.id).is_none_or(SessionState::is_ended)
+            })
+            .map(|s| s.id)
+            .collect();
+        for stale in stale_ids {
+            self.emit_lifecycle(&peer, LifecycleEvent::Dismiss { id: stale }, cx);
+        }
         self.generation += 1;
         let id = self.generation;
         let font = self.font.clone().scaled(self.terminal_zoom);
         let grid = initial_size(window, font.cell, &self.keybar);
-        let size = PtySize {
-            cols: grid.cols,
-            rows: grid.rows,
-        };
-        let action = if saved_key.is_some() {
-            TerminalRequest::Attach(key, size)
-        } else {
-            TerminalRequest::Create(key, size)
-        };
-        let attachment = AttachmentId {
-            session: id,
-            generation: 0,
-        };
-        let (input, job) =
-            client.spawn_terminal(&self.rt, peer.clone(), action, self.updates.clone(), attachment);
         let title = self.session_names.get(&peer, key).cloned().unwrap_or_default();
+        let (input, _) = mpsc::unbounded_channel();
         self.sessions.insert(
             id,
             Session {
-                attachment,
+                id,
                 key,
-                peer,
+                peer: peer.clone(),
                 name,
-                state: SessionState::Connecting,
                 screen: Emulator::with_palette(grid, &Ui::new(window, cx).colors.terminal, font),
                 bell: Default::default(),
                 wheel: Default::default(),
@@ -315,17 +488,29 @@ impl Mobile {
                 composing: Preedit::default(),
                 title: cx.new(|_| title),
                 input,
-                job: Some(job),
-                retry_at: std::time::Instant::now(),
+                probe_now: Arc::new(tokio::sync::Notify::new()),
+                job: None,
+                attempt_started_at: std::time::Instant::now(),
             },
         );
-        self.assign_terminal_defaults(cx);
+        self.emit_lifecycle(
+            &peer,
+            LifecycleEvent::OpenSession {
+                id,
+                attach: saved_key.is_some(),
+            },
+            cx,
+        );
+        if self.session_state(id).is_none() {
+            self.sessions.remove(&id);
+            return;
+        }
         self.navigate(Page::Terminal(id), cx);
         cx.notify();
     }
 
     pub(super) fn start_input(s: &Session) {
-        let id = s.attachment.session;
+        let id = s.id;
         gpui_mobile::set_text_input_callback(Some(Box::new(move |text| {
             if text.is_empty() {
                 return;
@@ -339,7 +524,8 @@ impl Mobile {
         peer: &str,
         key: SessionKey,
         title: SharedString,
-        can_end: bool,
+        action: Option<SessionAction>,
+        local: Option<u64>,
         cx: &Context<Self>,
     ) -> DropdownContent {
         let peer = peer.to_owned();
@@ -360,13 +546,40 @@ impl Mobile {
                 });
             },
         );
-        if !can_end {
+        let Some(action) = action else {
             return menu;
-        }
+        };
         let view = cx.weak_entity();
-        menu.end_session(move |_, cx| {
-            let _ = view.update(cx, |v, cx| v.end_listed_session(&peer, key, cx));
-        })
+        match action {
+            SessionAction::End => menu.end_session(move |_, cx| {
+                let _ = view.update(cx, |v, cx| v.end_listed_session(&peer, key, cx));
+            }),
+            SessionAction::Cancel => menu.item(
+                "cancel-session",
+                Icon::Close.label("Cancel session"),
+                move |_, cx| {
+                    let _ = view.update(cx, |v, cx| {
+                        if let Some(id) = local {
+                            v.end_session(id, cx);
+                        } else {
+                            v.end_listed_session(&peer, key, cx);
+                        }
+                    });
+                },
+            ),
+            SessionAction::Close => menu.item(
+                "close-session",
+                Icon::Close.label("Close session"),
+                move |_, cx| {
+                    let _ = view.update(cx, |v, cx| {
+                        if let Some(id) = local {
+                            v.dismiss_session(id, cx);
+                            cx.notify();
+                        }
+                    });
+                },
+            ),
+        }
     }
 
     pub(super) fn rename_session(
@@ -411,10 +624,17 @@ impl Mobile {
     }
 
     fn end_listed_session(&mut self, peer: &str, key: SessionKey, cx: &mut Context<Self>) {
-        if let Some(s) = self.sessions.values().find(|s| {
-            s.peer == peer && s.key == key && !matches!(s.state, SessionState::Ended(_))
-        }) {
-            self.end_session(s.attachment.session, cx);
+        if let Some(id) = self
+            .sessions
+            .values()
+            .find(|s| {
+                s.peer == peer
+                    && s.key == key
+                    && self.session_state(s.id).is_some_and(SessionState::is_open)
+            })
+            .map(|s| s.id)
+        {
+            self.end_session(id, cx);
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -453,7 +673,7 @@ impl Mobile {
         let mut shown = 0;
         let mut initial_request = false;
         for (peer, p) in &self.peers {
-            let available = self.presence.online(peer) && p.supports_shell();
+            let available = self.peer_connection(peer).is_connected() && p.supports_shell();
             if available && filters.scope.device.as_ref().is_none_or(|v| v == peer) {
                 initial_request |=
                     self.listing_peers.contains_key(peer) && !self.hosted.contains_key(peer);
@@ -469,8 +689,8 @@ impl Mobile {
                 (
                     s.key,
                     s.title.read(cx).label(&s.name),
-                    !matches!(s.state, SessionState::Ended(_)),
-                    s.attachment.session,
+                    self.session_state(s.id).is_some_and(SessionState::is_open),
+                    s.id,
                 )
             });
             let entries = named_session_entries(
@@ -508,7 +728,7 @@ impl Mobile {
         let targets = devices
             .iter()
             .filter(|(id, _, _)| {
-                self.presence.online(id)
+                self.peer_connection(id).is_connected()
                     && self.peers[id].supports_shell()
                     && filters.scope.device.as_ref().is_none_or(|v| v == id)
             })
@@ -523,7 +743,8 @@ impl Mobile {
         let mut total = 0;
         let mut initial_request = false;
         for (peer, name, _) in &devices {
-            let available = self.presence.online(peer) && self.peers[peer].supports_shell();
+            let available =
+                self.peer_connection(peer).is_connected() && self.peers[peer].supports_shell();
             if available && filters.scope.device.as_ref().is_none_or(|v| v == peer) {
                 if self.session_list_errors.contains(peer) {
                     failed.push(name.as_str());
@@ -542,8 +763,8 @@ impl Mobile {
                 (
                     s.key,
                     s.title.read(cx).label(&s.name),
-                    !matches!(s.state, SessionState::Ended(_)),
-                    s.attachment.session,
+                    self.session_state(s.id).is_some_and(SessionState::is_open),
+                    s.id,
                 )
             });
             let entries = named_session_entries(
@@ -563,12 +784,14 @@ impl Mobile {
                     "session-actions-{peer}-{}-{}",
                     key.number, key.nonce
                 ));
-                let can_end = state != SessionLocation::Ended
-                    && !local
-                        .and_then(|id| self.sessions.get(&id))
-                        .is_some_and(|s| matches!(s.state, SessionState::Stopping))
-                    && !self.ending_hosted.contains(&(peer.clone(), key));
-                let content = self.session_menu(&peer, key, title.clone(), can_end, cx);
+                let action = if let Some(local_id) = local {
+                    self.session_state(local_id).map(SessionState::action)
+                } else if !self.ending_hosted.contains(&(peer.clone(), key)) {
+                    Some(SessionAction::End)
+                } else {
+                    None
+                };
+                let content = self.session_menu(&peer, key, title.clone(), action, local, cx);
                 let actions = ui.actions_menu(id, format!("Actions for {title}").into(), content);
                 let target = peer.clone();
                 rows.push(ui.session_row(
