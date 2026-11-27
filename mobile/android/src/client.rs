@@ -114,6 +114,7 @@ pub struct Client {
     devices_io: Mutex<()>,
     devices: Mutex<SavedDevices>,
     probing: std::sync::Mutex<BTreeMap<usize, watch::Receiver<Option<bool>>>>,
+    relay_url: Option<String>,
     file: PathBuf,
 }
 
@@ -137,7 +138,7 @@ impl Peer {
     }
 }
 
-fn config(devices: &SavedDevices) -> Result<Arc<Config>> {
+fn config(devices: &SavedDevices, relay_url: Option<&str>) -> Result<Arc<Config>> {
     let entries: BTreeMap<_, _> = devices.peers
         .iter()
         .map(|(id, peer)| {
@@ -148,7 +149,8 @@ fn config(devices: &SavedDevices) -> Result<Arc<Config>> {
         })
         .collect();
     Ok(Arc::new(serde_json::from_value(serde_json::json!({
-        "version": 1, "native": {"upnp": false}, "peers": entries, "pending_unpairs": devices.pending_unpairs
+        "version": 1, "native": {"upnp": false, "relay_url": relay_url},
+        "peers": entries, "pending_unpairs": devices.pending_unpairs
     }))?))
 }
 
@@ -173,6 +175,7 @@ impl Client {
 
     pub async fn start(
         dir: &Path,
+        relay_url: Option<String>,
         updates: Sender<Update>,
         connection_state: impl Fn(bool, bool) + Send + 'static,
     ) -> Result<Arc<Self>> {
@@ -189,7 +192,7 @@ impl Client {
         let (addresses, mut changes) = mpsc::channel(16);
         let (transport, router, _) = gateway::start(
             key,
-            config(&devices)?,
+            config(&devices, relay_url.as_deref())?,
             false,
             paxri_config::DeviceCapabilities {
                 forward_rules: Some(false),
@@ -214,6 +217,7 @@ impl Client {
             devices_io: Mutex::new(()),
             devices: Mutex::new(devices),
             probing: Default::default(),
+            relay_url,
             file,
         });
         tokio::spawn(Self::watch_connections(
@@ -550,7 +554,7 @@ impl Client {
             let Some((next, output)) = prepare(&devices)? else {
                 return Ok(None);
             };
-            let settings = config(&next)?;
+            let settings = config(&next, self.relay_url.as_deref())?;
             (next, settings, output)
         };
         self.persist_devices(next.clone()).await?;

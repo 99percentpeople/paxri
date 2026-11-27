@@ -1,29 +1,36 @@
 use super::*;
-use paxri_config::{file, gui::GuiChange};
+use paxri_config::{NativeChange, file, gui::GuiChange};
 use paxri_ui::settings::controls::theme_cards;
 use paxri_ui::{
     settings::{SettingsGroup, SettingsLayout, SettingsPage, SettingsSection, catalog},
-    theme::{Appearance, GuiSettings},
+    theme::Appearance,
 };
 use std::path::PathBuf;
+
+const CONFIG_FILE: &str = "node.toml";
+const LEGACY_GUI_FILE: &str = "gui.toml";
 
 fn path(android: &AndroidApp) -> anyhow::Result<PathBuf> {
     android
         .internal_data_path()
-        .map(|dir| dir.join("gui.toml"))
+        .map(|dir| dir.join(CONFIG_FILE))
         .ok_or_else(|| anyhow::anyhow!("App storage unavailable"))
 }
 
-pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
+pub(super) fn load(android: &AndroidApp) -> anyhow::Result<file::LocalSettings> {
     let path = path(android)?;
-    let settings = if path.try_exists()? {
-        file::read_gui(&path)?
+    let legacy_gui = path.with_file_name(LEGACY_GUI_FILE);
+    if !path.try_exists()? && legacy_gui.try_exists()? {
+        std::fs::rename(&legacy_gui, &path)?;
+    }
+    let mut settings = if path.try_exists()? {
+        file::read_local(&path)?
     } else {
-        GuiSettings::default()
+        file::LocalSettings::default()
     };
-    // Import the previous pinch/stepper preference once. The shared GUI config owns subsequent edits.
+    // Import the previous pinch/stepper preference once. The shared config owns subsequent edits.
     let legacy = path.with_file_name("terminal-font-size");
-    let settings = if settings.terminal.font_size.is_none()
+    if settings.gui.terminal.font_size.is_none()
         && let Ok(text) = std::fs::read_to_string(&legacy)
         && let Some(size) = text
             .trim()
@@ -31,17 +38,15 @@ pub(super) fn load(android: &AndroidApp) -> anyhow::Result<GuiSettings> {
             .ok()
             .filter(|v| theme::TerminalAppearance::FONT_SIZES.contains(v))
     {
-        file::set_gui(&path, GuiChange::FontSize(Some(size)), true)?
-    } else {
-        settings
-    };
+        settings.gui = file::set_gui(&path, GuiChange::FontSize(Some(size)), true)?;
+    }
     if legacy.exists()
         && let Err(error) = std::fs::remove_file(legacy)
     {
         log::warn!("Retiring old font size preference: {error}");
     }
-    if settings.keybar.is_none() {
-        return file::set_gui(&path, GuiChange::Keybar(KeybarSettings::default()), true);
+    if settings.gui.keybar.is_none() {
+        settings.gui = file::set_gui(&path, GuiChange::Keybar(KeybarSettings::default()), true)?;
     }
     Ok(settings)
 }
@@ -88,6 +93,47 @@ impl Mobile {
         }
         self.name_input
             .update(cx, |input, cx| input.set_text(&value, cx));
+    }
+
+    pub(super) fn commit_relay_url(&mut self, cx: &mut Context<Self>) {
+        let input = self.relay_input.read(cx);
+        if input.is_composing() {
+            return;
+        }
+        let value = input.text().trim().to_owned();
+        if value == self.saved_relay {
+            self.relay_input
+                .update(cx, |input, cx| input.set_text(&value, cx));
+            return;
+        }
+        let change = NativeChange::RelayUrl((!value.is_empty()).then_some(value));
+        match path(&self.android).and_then(|path| file::set_native(&path, change, true)) {
+            Ok(native) => {
+                let saved = native
+                    .relay_url
+                    .as_ref()
+                    .map(|url| url.as_str().to_owned())
+                    .unwrap_or_default();
+                let changed = saved != self.saved_relay;
+                self.saved_relay = saved.clone();
+                self.relay_input
+                    .update(cx, |input, cx| input.set_text(&saved, cx));
+                if changed {
+                    let message = if self.saved_relay == self.active_relay {
+                        "Relay URL restored to active setting"
+                    } else if self.saved_relay.is_empty() {
+                        "Automatic public relay saved. Restart the app to apply."
+                    } else {
+                        "Relay URL saved. Restart the app to apply."
+                    };
+                    Toast::show(message, self.window, cx);
+                }
+                cx.notify();
+            }
+            Err(error) => {
+                Toast::show(format!("{error:#}"), self.window, cx);
+            }
+        }
     }
 
     pub(super) fn change_gui(&mut self, change: GuiChange, cx: &mut Context<Self>) -> bool {
@@ -158,7 +204,20 @@ impl Mobile {
                 });
         }
 
-        let mut groups = vec![device, appearance, terminal];
+        let mut network = SettingsGroup::new(catalog::NETWORK);
+        if selected == Some(catalog::NETWORK) {
+            network.setting(
+                catalog::RELAY,
+                paxri_ui::settings::controls::setting_field(self.relay_input.clone()),
+            );
+            let note = if self.saved_relay != self.active_relay {
+                "Restart the app to apply saved changes."
+            } else {
+                "Network changes take effect at the next app start."
+            };
+            network.footer = Some(ui.caption(note).pt(theme::SPACE_1).into_any_element());
+        }
+        let mut groups = vec![device, network, appearance, terminal];
         if selected == Some(catalog::TERMINAL_CONTROLS) {
             let view = cx.entity().downgrade();
             let change = move |change, _: &mut Window, cx: &mut App| {

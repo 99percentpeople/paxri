@@ -180,6 +180,9 @@ struct Mobile {
     drawer: Drawer,
     modal: Option<Modal>,
     name_input: Entity<paxri_ui::components::input::Input>,
+    relay_input: Entity<paxri_ui::components::input::Input>,
+    saved_relay: String,
+    active_relay: String,
     keybar: Arc<KeybarSettings>,
     key_editor: Option<keybar::Editor>,
     terminal_settings: paxri_ui::settings::terminal::TerminalSettings,
@@ -279,6 +282,8 @@ impl Mobile {
                 }
                 if field == this.name_input {
                     this.commit_device_name(cx);
+                } else if field == this.relay_input {
+                    this.commit_relay_url(cx);
                 }
                 this.editing_input = None;
                 gpui_mobile::set_text_input_callback(None);
@@ -486,6 +491,8 @@ impl Mobile {
         {
             if self.name_input == input {
                 self.commit_device_name(cx);
+            } else if self.relay_input == input {
+                self.commit_relay_url(cx);
             } else if let Some(field) = self
                 .terminal_settings
                 .numbers
@@ -1137,13 +1144,21 @@ fn android_main(android: AndroidApp) {
     *BRIDGE.lock().unwrap() = Some(controls.clone());
     CAN_GO_BACK.store(false, Ordering::Release);
     Application::with_platform(platform.into_rc()).run(move |cx| {
-        let (preferences, settings_error) = match settings::load(&android) {
+        let (local_settings, settings_error) = match settings::load(&android) {
             Ok(settings) => (settings, None),
             Err(error) => (
-                theme::GuiSettings::default(),
+                paxri_config::file::LocalSettings::default(),
                 Some(format!("Loading settings: {error:#}")),
             ),
         };
+        let preferences = local_settings.gui;
+        let initial_relay = local_settings
+            .native
+            .relay_url
+            .as_ref()
+            .map(|url| url.as_str().to_owned())
+            .unwrap_or_default();
+        let startup_relay = (!initial_relay.is_empty()).then(|| initial_relay.clone());
         *HARDWARE_CONTROLS.lock().unwrap() = preferences.controls.clone();
         theme::install(preferences, cx);
         let activity = android.clone();
@@ -1158,7 +1173,7 @@ fn android_main(android: AndroidApp) {
         handle.spawn(async move {
             let result = async {
                 let dir = disk.ok_or_else(|| anyhow::anyhow!("App storage unavailable"))?;
-                Client::start(&dir, events.clone(), move |paired, connected| {
+                Client::start(&dir, startup_relay, events.clone(), move |paired, connected| {
                     if let Err(error) = activity_action(
                         &network_activity,
                         ActivityAction::DeviceConnections { paired, connected },
@@ -1219,12 +1234,18 @@ fn android_main(android: AndroidApp) {
                 let names = DEVICE_NAME.borrow().clone();
                 let name_input = paxri_ui::components::input::Input::setting(&names.system, cx);
                 name_input.update(cx, |input, cx| input.set_text(&names.custom, cx));
+                let relay_input = paxri_ui::components::input::Input::setting(
+                    "Automatic public relay",
+                    cx,
+                );
+                relay_input.update(cx, |input, cx| input.set_text(&initial_relay, cx));
                 use gpui_mobile::KeyboardType;
                 let device_filters = DeviceFilters::new("Search devices…", cx);
                 let forward_filters = ForwardFilters::for_forwards(cx);
                 let session_filters = SessionFilters::new("Search sessions…", cx);
                 let mut inputs = vec![
                     (name_input.clone(), KeyboardType::Default),
+                    (relay_input.clone(), KeyboardType::Default),
                     (forward_filters.search.clone(), KeyboardType::Default),
                     (device_filters.search.clone(), KeyboardType::Default),
                     (session_filters.search.clone(), KeyboardType::Default),
@@ -1248,6 +1269,9 @@ fn android_main(android: AndroidApp) {
                 }
                 Mobile {
                     name_input,
+                    relay_input,
+                    saved_relay: initial_relay.clone(),
+                    active_relay: initial_relay,
                     terminal_zoom: load_terminal_zoom(&android),
                     session_names: paxri_ui::terminal::title::SessionTitles::open(
                         android

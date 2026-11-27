@@ -109,7 +109,7 @@ On the computer, open **Devices** and choose **Pair a device** (the floating **+
 
 The device list shows connection state and the last observed change. Open a connected computer to see its direct or relay path, upload and download rates, and round-trip latency, or choose **Reconnect** from its top-bar menu to re-check reachability and renegotiate a faster path. Tap the floating terminal button at the bottom right to start a session, then tap the terminal to open the keyboard. Drag one finger to scroll or pinch with two fingers to zoom. The phone remembers the zoom level. The back arrow returns to the device’s session list and keeps the shell running. Reopen a session to continue, start another shell, or choose **End session** in the top bar to release it. Sessions last while the Android app process is running. On the Android terminal toolbar, hold an arrow key, Backspace, Delete, Page Up, Page Down, or Space to repeat it at the system keyboard rate. Release it or slide off the key to stop. Hold Ctrl, Alt or Shift while pressing another key, or tap a modifier to latch it for the next key. Tap a latched modifier again to cancel. Modifiers can be combined with each other, the software keyboard, and the terminal toolbar. The PTY resizes when the keyboard opens or closes. The app keeps the screen awake while it is in the foreground.
 
-In **Settings → Terminal keys**, edit each row as a comma-separated list. The preview updates as you type. Add or remove individual keys in the text field. Use **Add row** for a new row or tap the trash icon beside a row to delete it. Use `Comma` for a literal comma. Key vibration, height steps and row removal apply immediately to open sessions. Text fields save when you finish editing or leave the page. **Restore defaults** restores the two default rows at 40 dp, with ↑ above ↓ and PgUp above PgDn. The Android app stores the layout in its private `files/gui.toml`, with one inner array per row. For example:
+In **Settings → Terminal keys**, edit each row as a comma-separated list. The preview updates as you type. Add or remove individual keys in the text field. Use **Add row** for a new row or tap the trash icon beside a row to delete it. Use `Comma` for a literal comma. Key vibration, height steps and row removal apply immediately to open sessions. Text fields save when you finish editing or leave the page. **Restore defaults** restores the two default rows at 40 dp, with ↑ above ↓ and PgUp above PgDn. The Android app stores its settings in its private `files/node.toml` (migrated automatically from earlier `files/gui.toml` installs), with one inner array per row. For example:
 
 ```toml
 [gui.keybar]
@@ -120,6 +120,8 @@ rows = [
   ["Keys", "Shift", "Backspace", "Enter", "Left", "Down", "Right", "PageDown"],
 ]
 ```
+
+To use a private relay on Android, open **Settings → Network** and set **Relay URL** to an `http` or `https` URL with a host. Leave it blank to use automatic public relay selection. The setting is saved as `relay_url` under `[native]` in `files/node.toml` and takes effect after restarting the app.
 
 The terminal header shows the active path. Public relays use Android's certificate verifier. The APK includes the verifier's network security resource so Android can retrieve signed revocation lists from the certificate authorities listed by the verifier.
 

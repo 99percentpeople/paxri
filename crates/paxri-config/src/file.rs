@@ -27,6 +27,10 @@ pub fn read_local(path: &Path) -> Result<LocalSettings> {
             let settings: LocalSettings = toml::from_str(&text)?;
             settings.gui.validate().map_err(anyhow::Error::msg)?;
             settings.gateway.limits.validate().map_err(anyhow::Error::msg)?;
+            if let Some(relay) = &settings.native.relay_url {
+                crate::check_relay_url(relay)
+                    .map_err(|error| anyhow::anyhow!("native.relay_url {error}"))?;
+            }
             Ok(settings)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(LocalSettings::default()),
@@ -289,7 +293,14 @@ pub fn set_native(path: &Path, change: crate::NativeChange, create: bool) -> Res
             NativeChange::LanPortMapping(enabled) => {
                 ("lan_port_mapping", Some(toml_edit::Value::from(enabled)))
             }
-            NativeChange::RelayUrl(url) => ("relay_url", url.map(toml_edit::Value::from)),
+            NativeChange::RelayUrl(url) => {
+                let validated = url
+                    .as_deref()
+                    .map(crate::validate_relay_url)
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?;
+                ("relay_url", validated.map(|u| toml_edit::Value::from(u.as_str())))
+            }
         };
         if let Some(mut value) = value {
             if let Some(old) = native.get(key).and_then(Item::as_value) {
@@ -451,6 +462,64 @@ max_concurrent_streams = 128
         assert_eq!(parsed.gateway.limits, local.gateway.limits);
         assert!(crate::parse(&saved.replace("max_peers = 12", "max_peers = 0")).is_err());
         assert!(crate::parse(&saved.replace("max_forwards = 20", "max_forwards = 999")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn relay_url_validation_normalizes_and_shares_node_toml_with_gui() -> Result<()> {
+        assert_eq!(
+            crate::validate_relay_url("https://relay.example.org")
+                .unwrap()
+                .as_str(),
+            "https://relay.example.org/"
+        );
+        assert_eq!(
+            crate::validate_relay_url("http://127.0.0.1:3340")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:3340/"
+        );
+        let bad_url = crate::validate_relay_url("not a url").unwrap_err();
+        assert_eq!(bad_url, "Relay URL \"not a url\" is not a valid URL");
+        let bad_scheme = crate::validate_relay_url("ftp://relay.example.org").unwrap_err();
+        assert_eq!(bad_scheme, "Relay URL requires an HTTP(S) URL with a host");
+        assert!(crate::validate_relay_url("mailto:user@example.org").is_err());
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("node.toml");
+        set_gui(&path, GuiChange::Appearance(crate::gui::Appearance::Dark), true)?;
+        let native = set_native(
+            &path,
+            NativeChange::RelayUrl(Some("https://relay.example.org".into())),
+            true,
+        )?;
+        assert_eq!(
+            native.relay_url.as_ref().map(url::Url::as_str),
+            Some("https://relay.example.org/")
+        );
+
+        let local = read_local(&path)?;
+        assert_eq!(local.gui.appearance, crate::gui::Appearance::Dark);
+        assert_eq!(
+            local.native.relay_url.as_ref().map(url::Url::as_str),
+            Some("https://relay.example.org/")
+        );
+
+        let before = fs::read_to_string(&path)?;
+        let err = set_native(&path, NativeChange::RelayUrl(Some("not a url".into())), true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Relay URL \"not a url\" is not a valid URL");
+        assert_eq!(fs::read_to_string(&path)?, before);
+
+        let cleared = set_native(&path, NativeChange::RelayUrl(None), true)?;
+        assert!(cleared.relay_url.is_none());
+        let local = read_local(&path)?;
+        assert_eq!(local.gui.appearance, crate::gui::Appearance::Dark);
+        assert!(local.native.relay_url.is_none());
+
+        fs::write(&path, "version = 1\n[native]\nrelay_url = 'ftp://invalid'\n")?;
+        assert!(read_local(&path).is_err());
         Ok(())
     }
 }
