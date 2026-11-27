@@ -287,7 +287,7 @@ pub async fn start(
             (no_relay || config.native.lan_port_mapping)
                 && invite.ticket.endpoint_addr().id == key.public()
         });
-    let public = crate::public_relays(&config.native, no_relay).await;
+    let public = crate::deferred_public_relays(&config.native, no_relay);
     let bind = |reuse_saved: bool| -> Result<_> {
         let mut builder =
             crate::builder(key.clone(), &config.native, no_relay, true, public.as_ref());

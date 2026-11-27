@@ -89,6 +89,13 @@ impl PublicRelays {
         config
     }
 
+    pub(crate) fn deferred() -> Self {
+        Self {
+            candidates: RelayMode::Default.relay_map(),
+            selected: None,
+        }
+    }
+
     pub(crate) async fn rank() -> Self {
         let candidates = RelayMode::Default.relay_map();
         let times = latencies(&candidates, DnsResolver::new()).await;
@@ -117,15 +124,20 @@ impl PublicRelays {
             let mut interfaces = ep.watch_network_interfaces();
             let mut reports = ep.net_report();
             let mut last_observations = None;
+            let mut rank_now = self.selected.is_none();
             loop {
                 let connected =
                     |items: &[iroh::endpoint::RelayStatus]| items.iter().any(|r| r.is_connected());
-                let mut deadline = Instant::now()
-                    + if connected(&status.get()) {
-                        RECHECK
-                    } else {
-                        RETRY
-                    };
+                let mut deadline = if std::mem::take(&mut rank_now) {
+                    Instant::now()
+                } else {
+                    Instant::now()
+                        + if connected(&status.get()) {
+                            RECHECK
+                        } else {
+                            RETRY
+                        }
+                };
                 loop {
                     tokio::select! {
                         _ = ep.closed() => return,
@@ -355,6 +367,44 @@ mod tests {
         .await??;
         ep.close().await;
         second.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deferred_ranking_selects_reachable_relay_in_background() -> Result<()> {
+        use iroh::endpoint::presets;
+        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+        use std::net::Ipv4Addr;
+
+        let mut config = ServerConfig::default();
+        config.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, 0)));
+        let server = Server::spawn(config).await?;
+        let live: RelayUrl = format!("http://{}", server.http_addr().unwrap()).parse()?;
+        let dead: RelayUrl = "http://127.0.0.1:1".parse()?;
+        let candidates = RelayMap::from_iter([dead.clone(), live.clone()]);
+        let deferred = PublicRelays {
+            candidates: candidates.clone(),
+            selected: None,
+        };
+        let ep = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(candidates))
+            .bind()
+            .await?;
+        deferred.monitor(ep.clone());
+        timeout(Duration::from_secs(12), async {
+            let mut changes = ep.watch_addr();
+            loop {
+                let urls: Vec<_> = changes.get().relay_urls().cloned().collect();
+                if urls == vec![live.clone()] {
+                    break;
+                }
+                changes.updated().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        ep.close().await;
+        server.shutdown().await?;
         Ok(())
     }
 }

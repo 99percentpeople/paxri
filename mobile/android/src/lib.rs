@@ -1130,69 +1130,75 @@ fn android_main(android: AndroidApp) {
             .with_max_level(log::LevelFilter::Warn)
             .with_tag("paxri"),
     );
-    gpui_mobile::android::jni::install_panic_hook();
-    gpui_mobile::android::jni::init_platform(&android);
-    let platform = gpui_mobile::android::jni::shared_platform().unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .expect("Android runtime");
     let handle = rt.handle().clone();
+    // Load local settings/peers and start the transport immediately so network
+    // bootstrap runs in parallel with Vulkan/GPUI window initialization.
+    let (local_settings, settings_error) = match settings::load(&android) {
+        Ok(settings) => (settings, None),
+        Err(error) => (
+            paxri_config::file::LocalSettings::default(),
+            Some(format!("Loading settings: {error:#}")),
+        ),
+    };
+    let preferences = local_settings.gui;
+    let initial_relay = local_settings
+        .native
+        .relay_url
+        .as_ref()
+        .map(|url| url.as_str().to_owned())
+        .unwrap_or_default();
+    let startup_relay = (!initial_relay.is_empty()).then(|| initial_relay.clone());
+    *HARDWARE_CONTROLS.lock().unwrap() = preferences.controls.clone();
+    let disk = android.internal_data_path();
+    let initial_peers = disk
+        .as_deref()
+        .map(client::load_saved_peers)
+        .unwrap_or_default();
+    let (tx, rx) = async_channel::bounded(128);
+    let events = tx.clone();
+    let network_activity = android.clone();
+    handle.spawn(async move {
+        let result = async {
+            let dir = disk.ok_or_else(|| anyhow::anyhow!("App storage unavailable"))?;
+            Client::start(&dir, startup_relay, events.clone(), move |paired, connected| {
+                if let Err(error) = activity_action(
+                    &network_activity,
+                    ActivityAction::DeviceConnections { paired, connected },
+                ) {
+                    log::warn!("Updating background connection service: {error}");
+                }
+            })
+            .await
+        }
+        .await;
+        let event = match result {
+            Ok(c) => {
+                let peers = c.list().await;
+                Update::Ready(c, peers)
+            }
+            Err(e) => Update::Error(format!("{e:#}")),
+        };
+        let _ = events.send(event).await;
+    });
+    gpui_mobile::android::jni::install_panic_hook();
+    gpui_mobile::android::jni::init_platform(&android);
+    let platform = gpui_mobile::android::jni::shared_platform().unwrap();
     // A busy PTY must not crowd out Back, pairing or window-inset events.
     let (controls, platform_events) = async_channel::unbounded();
     *BRIDGE.lock().unwrap() = Some(controls.clone());
     CAN_GO_BACK.store(false, Ordering::Release);
     Application::with_platform(platform.into_rc()).run(move |cx| {
-        let (local_settings, settings_error) = match settings::load(&android) {
-            Ok(settings) => (settings, None),
-            Err(error) => (
-                paxri_config::file::LocalSettings::default(),
-                Some(format!("Loading settings: {error:#}")),
-            ),
-        };
-        let preferences = local_settings.gui;
-        let initial_relay = local_settings
-            .native
-            .relay_url
-            .as_ref()
-            .map(|url| url.as_str().to_owned())
-            .unwrap_or_default();
-        let startup_relay = (!initial_relay.is_empty()).then(|| initial_relay.clone());
-        *HARDWARE_CONTROLS.lock().unwrap() = preferences.controls.clone();
         theme::install(preferences, cx);
         let activity = android.clone();
         Toast::set_native(
             move |message| activity_action(&activity, ActivityAction::Toast(message)).is_ok(),
             cx,
         );
-        let (tx, rx) = async_channel::bounded(128);
-        let disk = android.internal_data_path();
-        let events = tx.clone();
-        let network_activity = android.clone();
-        handle.spawn(async move {
-            let result = async {
-                let dir = disk.ok_or_else(|| anyhow::anyhow!("App storage unavailable"))?;
-                Client::start(&dir, startup_relay, events.clone(), move |paired, connected| {
-                    if let Err(error) = activity_action(
-                        &network_activity,
-                        ActivityAction::DeviceConnections { paired, connected },
-                    ) {
-                        log::warn!("Updating background connection service: {error}");
-                    }
-                })
-                .await
-            }
-            .await;
-            let event = match result {
-                Ok(c) => {
-                    let peers = c.list().await;
-                    Update::Ready(c, peers)
-                }
-                Err(e) => Update::Error(format!("{e:#}")),
-            };
-            let _ = events.send(event).await;
-        });
         cx.open_window(WindowOptions::default(), move |window, cx| {
             theme::observe(window);
             if let Some(error) = settings_error {
@@ -1290,7 +1296,7 @@ fn android_main(android: AndroidApp) {
                     rt: handle,
                     client: None,
                     updates: tx,
-                    peers: Peers::new(),
+                    peers: initial_peers,
                     presence: Presence::default(),
                     lifecycles: BTreeMap::new(),
                     connection_history: ConnectionHistory::default(),

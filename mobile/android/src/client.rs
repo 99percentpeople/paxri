@@ -70,6 +70,15 @@ pub struct Peer {
 
 pub type Peers = BTreeMap<String, Peer>;
 
+pub fn load_saved_peers(dir: &Path) -> Peers {
+    match std::fs::read(dir.join("peers.json")) {
+        Ok(bytes) => serde_json::from_slice::<SavedDevices>(&bytes)
+            .map(|devices| devices.peers)
+            .unwrap_or_default(),
+        Err(_) => Peers::new(),
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct SavedDevices {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

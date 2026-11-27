@@ -53,6 +53,13 @@ async fn public_relays(config: &Native, no_relay: bool) -> Option<relay::PublicR
     Some(relay::PublicRelays::rank().await)
 }
 
+pub(crate) fn deferred_public_relays(config: &Native, no_relay: bool) -> Option<relay::PublicRelays> {
+    if no_relay || config.relay_url.is_some() {
+        return None;
+    }
+    Some(relay::PublicRelays::deferred())
+}
+
 fn mapping_protocols(upnp: bool) -> portmapper::Config {
     portmapper::Config { enable_upnp: upnp, ..Default::default() }
 }
